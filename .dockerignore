@@ -1,5 +1,6 @@
-/target/
-__pycache__/
+target
+__pycache__
+.git
 .env
 .env.*
 !.env.example

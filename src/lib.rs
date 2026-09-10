@@ -1,7 +1,7 @@
 //! Core types and interfaces for the troute v0 routing pipeline.
 //!
-//! Concrete HTTP, routing-provider, and optimization implementations are
-//! intentionally outside the initial project skeleton.
+//! The binary serves the HTTP health endpoint. Concrete routing-provider and
+//! optimization implementations are intentionally outside this library skeleton.
 
 pub mod api;
 pub mod domain;

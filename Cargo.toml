@@ -2,12 +2,14 @@
 name = "troute"
 version = "0.1.0"
 edition = "2021"
-rust-version = "1.78"
+rust-version = "1.80"
 description = "Routing and route optimization engine for Trasolve"
 
 [dependencies]
+axum = { version = "0.8", default-features = false, features = ["http1", "json", "tokio"] }
 serde = { version = "1", features = ["derive"] }
 thiserror = "1"
+tokio = { version = "1", features = ["macros", "net", "rt-multi-thread", "signal"] }
 
 [dev-dependencies]
 serde_json = "1"
