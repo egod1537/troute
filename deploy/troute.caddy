@@ -1,0 +1,6 @@
+# Imported by the existing jsb1 edge Caddyfile, which defines jsb_tls.
+# This Mac publishes only the main API on host loopback port 18080.
+https://troute.mangagaki.net {
+	import jsb_tls
+	reverse_proxy host.docker.internal:18080
+}

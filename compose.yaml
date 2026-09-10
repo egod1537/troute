@@ -6,3 +6,16 @@ services:
       TROUTE_PORT: ${TROUTE_PORT:-8080}
     ports:
       - "127.0.0.1:${TROUTE_HOST_PORT:-8080}:${TROUTE_PORT:-8080}"
+  testbed:
+    build:
+      context: ./testbed
+      args:
+        VITE_TROUTE_API_BASE_URL: ${VITE_TROUTE_API_BASE_URL:-/api}
+        VITE_TROUTE_ROUTE_PATH: ${VITE_TROUTE_ROUTE_PATH:-}
+    restart: unless-stopped
+    environment:
+      TROUTE_PORT: ${TROUTE_PORT:-8080}
+    ports:
+      - "127.0.0.1:${TROUTE_TESTBED_PORT:-8081}:8080"
+    depends_on:
+      - troute

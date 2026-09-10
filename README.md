@@ -51,8 +51,8 @@ troute
 
 The component interfaces and v0 data flow are defined. The HTTP server currently
 exposes only `GET /health`; route optimization, Google Maps integration, and
-caching are not implemented. Browsers call the Trasolve backend, which calls
-troute over HTTP.
+caching are not implemented. Trasolve user browsers call the Trasolve backend, which calls
+troute over HTTP. The separate developer testbed uses its own same-origin API proxy.
 
 ## Tech Stack
 
@@ -60,6 +60,7 @@ troute over HTTP.
 - axum / tokio
 - Serde
 - Docker / Docker Compose
+- Developer testbed: React / TypeScript / Vite
 
 ## Development Roadmap
 
@@ -69,6 +70,7 @@ troute over HTTP.
 - [x] Routing provider and solver interfaces
 - [x] Schedule calculation for a supplied visit order
 - [x] Runnable HTTP server and Docker Compose environment
+- [x] Developer testbed with health checks, input editor, and request timing
 - [ ] Distance matrix generation
 - [ ] Simple greedy route solver
 - [ ] 2-opt or similar local optimization
@@ -144,10 +146,84 @@ and check `http://localhost:18080/health`. `TROUTE_HOST_PORT` changes only the
 published host port; `TROUTE_PORT` sets the application/container port. Compose
 automatically reads `.env` and keeps the port mapping consistent.
 
-No container healthcheck is configured: the slim runtime has no HTTP client,
+No API container healthcheck is configured: the slim runtime has no HTTP client,
 and adding one solely for this check is unnecessary at this stage. Verify
 `/health` from the host or the Trasolve backend. The restart policy restarts an
 exited container; it does not detect an unresponsive process.
+
+## Developer testbed
+
+`testbed/` is a one-page React + TypeScript + Vite tool for developers, separate
+from the Rust API and the Trasolve user interface. It has a JSON input editor,
+validation, API health status, route-result/table components, formatted raw
+responses, HTTP timing, and an in-memory graph of the last 40 requests.
+
+**The Rust API currently implements only `GET /health`.** The primary action
+therefore runs a health check without submitting the editor payload. No solver
+runs and no route or solver timing is fabricated. Sample Place IDs illustrate
+the v0 input shape only. Once a real route endpoint exists, configure
+`VITE_TROUTE_ROUTE_PATH` with that endpoint's relative path; the client posts the
+v0 input and renders `route` / `total_travel_minutes` from the existing DTOs.
+The route path is deliberately unset by default. Error status and response
+bodies remain visible, including malformed JSON and infeasible-route errors.
+
+For local development (Node 22.12+; Docker builds use Node 24), start the API
+with `cargo run` and run these commands in another terminal:
+
+```sh
+cd testbed
+npm install
+npm run dev
+```
+
+Open `http://localhost:5173`. The browser uses `VITE_TROUTE_API_BASE_URL=/api`;
+Vite forwards `/api/*` to `http://127.0.0.1:8080/*`. For a different API port,
+set `TROUTE_DEV_PROXY_TARGET` in `testbed/.env.local`, for example:
+
+```dotenv
+TROUTE_DEV_PROXY_TARGET=http://127.0.0.1:18080
+```
+
+In Docker, `docker compose up -d --build` builds and starts both `troute` and
+`testbed`. The testbed defaults to `http://localhost:8081`; override
+`TROUTE_TESTBED_PORT` in the root `.env` when occupied (this Mac uses 18081).
+The API's existing host-port override is independent. Both services publish
+only on localhost and use `restart: unless-stopped`.
+
+The testbed image contains built static assets and Nginx, without Node or dev
+packages. Nginx serves `/` and proxies `/api/*` to `troute:$TROUTE_PORT` inside
+Docker. The browser never resolves a Docker hostname. The same-origin proxy
+avoids CORS changes to the Rust API; no wildcard CORS is enabled. A custom
+absolute `VITE_TROUTE_API_BASE_URL` requires that API to explicitly allow the
+frontend origin; the recommended `/api` setup needs no such configuration.
+
+`VITE_*` values are public build-time configuration. For Compose builds, set
+`VITE_TROUTE_API_BASE_URL` and optional `VITE_TROUTE_ROUTE_PATH` in the root
+`.env`, then rebuild. For Vite development use `testbed/.env.local`. Never put
+API keys in these variables. Remote private access should forward the testbed
+port through your existing private connection; it does not require exposing
+the API port or publishing a public domain.
+
+`request_latency_ms` measures the browser round trip, including the proxy and
+response transfer. The current API provides no `solver_latency_ms`, so it is
+shown as unavailable. Measurements exist only in browser memory and disappear
+on refresh; there is no benchmark DB or frontend solver implementation.
+
+The main watcher runs in a separate production clone; each new main commit rebuilds and updates
+both services. Deployment succeeds only when API health **and** testbed HTTP
+checks pass. The testbed also has its own lightweight container healthcheck.
+
+Frontend build and browser regression checks:
+
+```sh
+cd testbed
+npm ci
+npm run build
+npx playwright install chromium
+npm test
+```
+
+Browser tests use explicitly mocked HTTP route fixtures, not a working solver.
 
 ## Mac mini operation
 
@@ -161,61 +237,150 @@ start it again. `docker compose down` removes it.
 
 ## Automatic deployment
 
-`.github/workflows/deploy-main.yml` deploys **main only** from a GitHub-hosted
-runner over SSH to the Mac mini. A push to `main` triggers deployment; manual
-`workflow_dispatch` runs also require the `main` ref. Pull requests and preview
-branches do not deploy production. This becomes active after the workflow is
-pushed and the connection settings below are configured.
+The Mac mini polls **origin/main every minute** using cron, following the jsb1
+pull-based deployment pattern. Production deployment does not use GitHub
+Actions or inbound SSH. The former `TROUTE_DEPLOY_*` Actions Secrets are no
+longer used. The Mac uses its existing GitHub credentials for `ls-remote`/fetch;
+GitHub must be reachable non-interactively from the cron user's session.
 
-Configure these repository **Actions Secrets** (never commit their values):
+Use a **dedicated production clone on main**, separate from development. Update
+that clone to the published main and run there:
 
-| Name | Purpose |
-| --- | --- |
-| `TROUTE_DEPLOY_HOST` | SSH hostname/IP reachable from the GitHub-hosted runner |
-| `TROUTE_DEPLOY_USER` | Mac mini deployment user |
-| `TROUTE_DEPLOY_SSH_KEY` | Dedicated, passphrase-free deployment private key |
-| `TROUTE_DEPLOY_KNOWN_HOSTS` | Verified OpenSSH known_hosts entry for that host/port |
-| `TROUTE_DEPLOY_PORT` | SSH port; optional, defaults to 22 |
-| `TROUTE_DEPLOY_PATH` | Absolute path to a dedicated deployment clone, not a development checkout |
+```sh
+./auto-deploy.sh --once
+./auto-deploy.sh --install
+./auto-deploy.sh --status
+```
 
-Port and path may instead be Actions Variables; Secrets take precedence.
-Create a dedicated key pair: its public key goes in the deployment user's
-`~/.ssh/authorized_keys`, its private key only in the GitHub Secret. Verify the
-server host key through a trusted connection before registering known_hosts
-(use `[hostname]:port` for a non-default port). Host key checking stays enabled.
+`--once` checks the remote SHA and deploys if needed. On the first run there is
+no recorded deployment, so it builds and verifies main even if HEAD already
+matches origin. `--install` installs one `# troute-auto-deploy` cron entry at
+`* * * * *`; reinstalling replaces that entry and preserves other cron jobs.
+It requires a clean, published main checkout. The next cron tick performs the
+first check if `--once` was skipped. To remove only the watcher:
 
-The SSH user needs non-interactive Git fetch access, Bash, curl, and a running
-Docker engine with Compose. Clone `main` at the configured deployment path and
-keep runtime settings in its ignored `.env`. When moving an existing deployment,
-preserve `TROUTE_HOST_PORT` and set `COMPOSE_PROJECT_NAME` to its existing project
-name in `.env`; otherwise the new directory changes Compose's default identity.
-Common macOS Docker executable paths are supplied by the script.
+```sh
+./auto-deploy.sh --uninstall
+```
 
-The workflow sends `scripts/deploy.sh` over SSH: fetch/reset to `origin/main`,
-build, then `docker compose up -d --no-build troute`. **Tracked local edits in
-the deployment clone are discarded.** There is no `git clean` or `.env` write;
-tracked runtime `.env` files are rejected before reset.
+The watcher compares remote and successfully deployed SHAs, then calls
+`scripts/deploy.sh`. The deploy script fetches main, checks out/reset tracked
+files to origin/main, builds both services with `docker compose build`, and runs
+`docker compose up -d --no-build`. Build failure leaves existing containers
+in place. If main advances between polling and fetch, deployment is deferred
+to the next poll so the recorded SHA always matches the code being built.
 
-Success requires localhost `/health` to return HTTP 200 and `{"status":"ok"}`.
-The script discovers the actual host port (including `.env` overrides) and
-retries up to 20 times at 3-second intervals, with a 5-second request timeout.
-Any SSH, Git, build, startup, or health failure fails the Actions run. Images
-build on the Mac; no public troute port, registry, or automatic rollback is used.
+Success requires the API `/health` to return HTTP 200 and `{"status":"ok"}`,
+and the testbed `/` to return HTTP 200. Both published host ports are discovered
+from their containers, including `.env` overrides. A testbed failure marks the
+deployment failed without stopping the API.
+Health checks retry up to 20 times at 3-second intervals with a 5-second request
+timeout. Only success updates `deployed-commit`. The same failed commit waits
+300 seconds after failure before retrying; a newer commit bypasses that delay.
+To change the delay for future cron runs, reinstall with, for example:
 
-Concurrency keeps the running deployment and retains the latest pending run,
-which fetches the latest main when it starts. `cancel-in-progress: false` avoids
-assuming that cancelling SSH also stops the remote Docker build. A host-side
-lock additionally refuses overlapping deployment processes. If a killed process
-leaves `troute-deploy.lock` in Git's common directory, confirm no deployment is
-still running before removing that empty lock directory and rerunning the workflow.
+```sh
+TROUTE_AUTO_DEPLOY_RETRY_SEC=600 ./auto-deploy.sh --install
+```
 
-Check **Actions → Deploy troute main** for each deployment stage. Provider
-secrets stay in the Mac's `.env`. A private Tailscale address needs separately
-configured runner connectivity; this workflow does not join a VPN.
+Status, last attempted SHA, successful SHA, and retry time live under
+`.git/troute-deploy/` (the Git directory for linked worktrees), outside tracked
+files. Logs include detected SHA, build/start/health output, and final result:
 
-Script regression tests: `python3 -m unittest discover -s tests -p 'test_deploy.py' -v`.
+```sh
+tail -f "$(git rev-parse --absolute-git-dir)/troute-deploy/logs/auto-deploy.log"
+```
+
+Watcher and deployment locks prevent overlapping polls and builds. If an
+unclean shutdown leaves a lock behind, `--status` reports it; confirm no watcher
+or deployment process is running before removing the stale lock. Uninstalling
+preserves state/logs and leaves the container running.
+
+**Deployment discards tracked local edits.** Runtime secrets stay in ignored
+`.env`; scripts neither overwrite it nor run `git clean`. A tracked runtime
+`.env` file is rejected before reset. When moving an existing service to a new
+clone, preserve `TROUTE_HOST_PORT` and set `COMPOSE_PROJECT_NAME` in `.env` to
+its existing Compose project name so the service is updated in place.
+
+Git, Bash, curl, cron, and a running Docker engine with Compose are required.
+The script supplies common macOS executable paths. Keep the Mac awake and
+Docker available to the cron user. New commits are normally detected on the
+next minute tick; build and health-check time is additional. Preview branches,
+remote CI deployment, and automatic rollback are outside this implementation.
+
+Regression tests: `python3 -m unittest discover -s tests -p 'test_deploy.py' -v`.
 
 ## Backend connection and branches
+
+Production API: **https://troute.mangagaki.net**. Only `main` is deployed here,
+on the Mac mini. The existing Cloudflare Tunnel routes this hostname to the
+existing jsb1 edge Caddy, which forwards to the API's loopback host port 18080.
+The container still listens on port 8080. TLS and credentials stay in the
+existing host infrastructure; no new tunnel or certificate is required.
+
+```sh
+curl --fail --show-error https://troute.mangagaki.net/health
+```
+
+Expected: HTTP 200 and `{"status":"ok"}`. `/` is currently HTTP 404: this host
+serves the API, not the testbed. The developer testbed stays private on
+`http://127.0.0.1:18081` on this Mac; no testbed DNS record is configured.
+
+The production checkout is `$HOME/services/troute`. Its ignored `.env` fixes
+`COMPOSE_PROJECT_NAME=troute`, `TROUTE_PORT=8080`, `TROUTE_HOST_PORT=18080`, and
+`TROUTE_TESTBED_PORT=18081`. Run watcher status and Compose commands there.
+The one-minute cron watcher rebuilds both services when `origin/main` changes.
+Build time is additional to polling time.
+
+### Existing edge setup and diagnostics
+
+`deploy/troute.caddy` is the non-secret site configuration used by this Mac's
+existing jsb1 edge. It relies on that edge's `jsb_tls` snippet and
+`host.docker.internal` mapping. It is not a standalone Caddy configuration.
+At initial setup it is copied as `_troute-main.caddy` into the edge's existing
+mounted routes directory, then the full Caddy configuration is validated and
+gracefully reloaded. That local route is independent of jsb1 branch routes.
+Cloudflare DNS has an explicit proxied CNAME for `troute.mangagaki.net` to the
+existing **jsb1** tunnel; the zone's wildcard points to another tunnel and is
+left unchanged. The jsb1 tunnel's existing wildcard ingress already reaches
+Caddy, so its configuration does not need changing or restarting.
+
+Normal troute deployment changes containers only. It does not rewrite edge
+configuration, DNS, certificates, or tunnels. If the host port changes, update
+the installed Caddy route and validate/reload the existing edge once. Never
+point this route at a development/preview checkout.
+
+Check the layers separately (the local commands below use this Mac's ports):
+
+```sh
+# Application: required by deploy.sh, independently of Cloudflare.
+curl --fail --show-error http://127.0.0.1:18080/health
+# Existing Caddy listener with the production hostname.
+# -k is only for this local origin-certificate diagnostic, never public HTTPS.
+curl --fail --show-error --insecure \
+  --resolve troute.mangagaki.net:4443:127.0.0.1 \
+  https://troute.mangagaki.net:4443/health
+# Public TLS, DNS, and tunnel: a separate external verification.
+curl --fail --show-error https://troute.mangagaki.net/health
+docker compose logs --tail 50 troute
+docker logs --tail 50 jsb1-edge-edge-1
+docker logs --tail 50 jsb1-edge-tunnel-1
+```
+
+Local failure indicates an application/Docker problem. Local success with
+proxy failure indicates the edge route/upstream. Local and proxy success with
+public failure indicates DNS/tunnel/external connectivity. External availability
+does not control local deployment success; a Cloudflare outage must not trigger
+repeated application rebuilds. Both local API and testbed checks remain required.
+
+For a Trasolve backend outside the Mac's Docker network:
+
+```dotenv
+TROUTE_URL=https://troute.mangagaki.net
+```
+
+This is a server-to-server setting; Trasolve browsers continue to call their
+backend. No API CORS changes or testbed public access are needed.
 
 The main branch is **`main`**. Production uses only the troute instance built
 from `main`. The Trasolve backend selects its instance through `TROUTE_URL`,

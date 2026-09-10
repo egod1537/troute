@@ -1,5 +1,9 @@
 target
 __pycache__
+node_modules
+testbed/dist
+testbed/test-results
+testbed/playwright-report
 .git
 .env
 .env.*
