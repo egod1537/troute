@@ -373,6 +373,13 @@ public failure indicates DNS/tunnel/external connectivity. External availability
 does not control local deployment success; a Cloudflare outage must not trigger
 repeated application rebuilds. Both local API and testbed checks remain required.
 
+Browser and curl HTTPS checks pass. The existing Cloudflare security policy
+returns HTTP 403 / error 1010 for Python's default `Python-urllib` User-Agent.
+Cloudflare documents this as a [browser-signature block](https://developers.cloudflare.com/support/troubleshooting/http-status-codes/cloudflare-1xxx-errors/error-1010/).
+Check the actual backend HTTP client when integrating; local server-to-server
+access avoids this edge policy. No zone-wide security or WAF rules were changed
+as part of domain setup.
+
 For a Trasolve backend outside the Mac's Docker network:
 
 ```dotenv
