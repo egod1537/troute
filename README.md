@@ -29,7 +29,7 @@ The long-term goal is not only to provide shortest-path calculations, but to dev
 
 ## Architecture
 
-The current high-level direction is:
+The current high-level structure is:
 
 ```text
 Trasolve
@@ -38,26 +38,32 @@ Trasolve
    v
 troute
    |
-   +-- Routing API
+   +-- API types
+   +-- Routing Provider
+   +-- Travel Time Matrix
    +-- Route Solver
-   +-- Graph / Optimization
+   +-- Schedule Calculation
 ```
 
-This architecture is preliminary and may change as the project develops.
+The component interfaces and v0 data flow are defined, but concrete HTTP,
+Google Maps, caching, and solver implementations have not been selected.
 
 ## Tech Stack
 
 - Rust
+- Serde
 
 Planned:
 
 - HTTP API
-- JSON-based requests and responses
 
 ## Development Roadmap
 
-- [ ] Basic Rust project setup
-- [ ] Point and route data models
+- [x] Basic Rust project setup
+- [x] v0 request, response, location, and route data models
+- [x] Travel time matrix model
+- [x] Routing provider and solver interfaces
+- [x] Schedule calculation for a supplied visit order
 - [ ] Distance matrix generation
 - [ ] Simple greedy route solver
 - [ ] 2-opt or similar local optimization
@@ -66,7 +72,14 @@ Planned:
 
 ## Getting Started
 
-Local build and run instructions are not available yet. The repository does not currently contain a Rust package manifest or executable source code.
+Build the library and run its tests with:
+
+```sh
+cargo build
+cargo test
+```
+
+There is no runnable HTTP server yet.
 
 ## Branch
 
@@ -74,4 +87,5 @@ The main development branch is `main`.
 
 ## Project Status
 
-Early development. The project structure and core functionality have not been implemented yet.
+Early development. The v0 types and component boundaries are in place; routing
+provider, optimization algorithm, and HTTP server implementations are pending.
