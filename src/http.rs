@@ -1,4 +1,4 @@
-use std::sync::Arc;
+use std::{sync::Arc, time::Duration};
 
 use axum::{
     body::Body,
@@ -9,9 +9,14 @@ use axum::{
     Json, Router,
 };
 use serde::Serialize;
+use tokio::{sync::mpsc, task::JoinHandle, time::timeout};
 
 use crate::{
     api::{OptimizeRouteRequest, OptimizeRouteResponse},
+    events::{
+        ErrorEventData, JobEventContext, JobEventType, NoopOptimizationEventReporter,
+        OptimizationErrorCode, OptimizationEventReporter, ProgressEventData, ProgressStage,
+    },
     routing::{RoutingError, RoutingProvider},
     schedule::ScheduleError,
     service::{OptimizationServiceError, RouteOptimizationService},
@@ -20,11 +25,13 @@ use crate::{
 };
 
 const MAX_REQUEST_BODY_BYTES: usize = 1024 * 1024;
+const JOB_EVENT_DRAIN_TIMEOUT: Duration = Duration::from_secs(2);
 
 trait Optimizer: Send + Sync {
-    fn optimize(
+    fn optimize_with_reporter(
         &self,
         request: OptimizeRouteRequest,
+        reporter: &dyn OptimizationEventReporter,
     ) -> Result<OptimizeRouteResponse, OptimizationServiceError>;
 }
 
@@ -33,11 +40,139 @@ where
     P: RoutingProvider + Send + Sync,
     S: RouteSolver + Send + Sync,
 {
-    fn optimize(
+    fn optimize_with_reporter(
         &self,
         request: OptimizeRouteRequest,
+        reporter: &dyn OptimizationEventReporter,
     ) -> Result<OptimizeRouteResponse, OptimizationServiceError> {
-        RouteOptimizationService::optimize(self, request)
+        RouteOptimizationService::optimize_with_reporter(self, request, reporter)
+    }
+}
+
+#[derive(Debug)]
+enum QueuedJobEvent {
+    Progress(ProgressEventData),
+    Error(ErrorEventData),
+    Result(OptimizeRouteResponse),
+}
+
+struct ChannelOptimizationEventReporter {
+    sender: mpsc::UnboundedSender<QueuedJobEvent>,
+}
+
+impl ChannelOptimizationEventReporter {
+    fn enqueue(&self, event: QueuedJobEvent) {
+        if self.sender.send(event).is_err() {
+            eprintln!("Trasolve job event callback queue is unavailable");
+        }
+    }
+}
+
+impl OptimizationEventReporter for ChannelOptimizationEventReporter {
+    fn progress(&self, stage: ProgressStage, progress: u8, message: Option<&str>) {
+        self.enqueue(QueuedJobEvent::Progress(ProgressEventData {
+            stage,
+            progress,
+            message: message.map(str::to_owned),
+        }));
+    }
+
+    fn error(&self, code: OptimizationErrorCode, message: &str, detail: &str) {
+        self.enqueue(QueuedJobEvent::Error(ErrorEventData {
+            code,
+            message: message.to_owned(),
+            detail: detail.to_owned(),
+        }));
+    }
+
+    fn result(&self, response: &OptimizeRouteResponse) {
+        self.enqueue(QueuedJobEvent::Result(response.clone()));
+    }
+}
+
+async fn send_queued_job_event<T: Serialize>(
+    client: &TrasolveClient,
+    context: &mut JobEventContext,
+    event_type: JobEventType,
+    data: T,
+) -> bool {
+    let event = match context.next_event(event_type, data) {
+        Ok(event) => event,
+        Err(error) => {
+            eprintln!("Trasolve job event sequence failed: {error}");
+            return false;
+        }
+    };
+    if let Err(error) = client.send_job_event(context.job_id(), &event).await {
+        eprintln!(
+            "Trasolve job event callback failed; sequence={}; type={:?}; error={error}",
+            event.sequence, event.event_type
+        );
+    }
+    true
+}
+
+struct JobCallbackSession {
+    reporter: ChannelOptimizationEventReporter,
+    sender_task: JoinHandle<()>,
+}
+
+impl JobCallbackSession {
+    fn start(client: TrasolveClient, job_id: String) -> Option<Self> {
+        let mut context = match JobEventContext::new(job_id) {
+            Ok(context) => context,
+            Err(error) => {
+                eprintln!("Trasolve job callbacks disabled for invalid job_id: {error}");
+                return None;
+            }
+        };
+        let (sender, mut receiver) = mpsc::unbounded_channel::<QueuedJobEvent>();
+        let sender_task = tokio::spawn(async move {
+            while let Some(queued) = receiver.recv().await {
+                let continue_sending = match queued {
+                    QueuedJobEvent::Progress(data) => {
+                        send_queued_job_event(&client, &mut context, JobEventType::Progress, data)
+                            .await
+                    }
+                    QueuedJobEvent::Error(data) => {
+                        send_queued_job_event(&client, &mut context, JobEventType::Error, data)
+                            .await
+                    }
+                    QueuedJobEvent::Result(data) => {
+                        send_queued_job_event(&client, &mut context, JobEventType::Result, data)
+                            .await
+                    }
+                };
+                if !continue_sending {
+                    break;
+                }
+            }
+        });
+        Some(Self {
+            reporter: ChannelOptimizationEventReporter { sender },
+            sender_task,
+        })
+    }
+
+    async fn finish(self) {
+        let Self {
+            reporter,
+            mut sender_task,
+        } = self;
+        drop(reporter);
+
+        match timeout(JOB_EVENT_DRAIN_TIMEOUT, &mut sender_task).await {
+            Ok(Ok(())) => {}
+            Ok(Err(error)) => eprintln!("Trasolve job event sender task failed: {error}"),
+            Err(_) => {
+                sender_task.abort();
+                let _ = sender_task.await;
+                eprintln!(
+                    "Trasolve job event callback drain exceeded {} ms",
+                    JOB_EVENT_DRAIN_TIMEOUT.as_millis()
+                );
+            }
+        }
     }
 }
 
@@ -277,11 +412,25 @@ async fn optimize(
     request: Result<Json<OptimizeRouteRequest>, JsonRejection>,
 ) -> Result<Json<OptimizeRouteResponse>, ApiError> {
     let Json(request) = request.map_err(ApiError::from_json_rejection)?;
-    state
-        .optimizer
-        .optimize(request)
-        .map(Json)
-        .map_err(ApiError::from_service)
+    let callback = match &state.trasolve {
+        Some(client) => JobCallbackSession::start(client.clone(), request.job_id.clone()),
+        None => {
+            println!("Trasolve job callbacks disabled: TRASOLVE_BASE_URL is not configured");
+            None
+        }
+    };
+    let noop_reporter = NoopOptimizationEventReporter;
+    let reporter: &dyn OptimizationEventReporter = match &callback {
+        Some(callback) => &callback.reporter,
+        None => &noop_reporter,
+    };
+    let result = state.optimizer.optimize_with_reporter(request, reporter);
+
+    if let Some(callback) = callback {
+        callback.finish().await;
+    }
+
+    result.map(Json).map_err(ApiError::from_service)
 }
 
 async fn trasolve_integration_health(
@@ -435,6 +584,7 @@ mod tests {
 
     fn valid_request() -> &'static str {
         r#"{
+            "job_id":"route-http-test",
             "locations":[{
                 "id":"place-1",
                 "place_id":"GOOGLE_PLACE_ID",

@@ -82,11 +82,13 @@ deploy_main() {
   git checkout --force main
   git reset --hard origin/main
   [[ "$(git branch --show-current)" == main ]] || fail 'Checkout is not on main.'
-  echo "Repository updated to main at $(git rev-parse --short HEAD)"
+  deployed_sha=$(git rev-parse HEAD)
+  [[ "$deployed_sha" =~ ^[0-9a-f]{40}$ ]] || fail 'Checked-out deployment SHA is invalid.'
+  echo "Repository updated to main at ${deployed_sha:0:7}"
 
   # Build must succeed before Compose replaces the existing container.
   echo 'Building troute and testbed images'
-  docker compose build
+  TROUTE_COMMIT_SHA="$deployed_sha" docker compose build
   echo 'Starting troute and testbed containers'
   docker compose up -d --no-build
 

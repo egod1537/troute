@@ -3,13 +3,13 @@ use axum::{
     extract::State,
     http::{header, Method, Request, StatusCode},
     response::IntoResponse,
-    routing::get,
-    Router,
+    routing::{get, post},
+    Json, Router,
 };
 use http_body_util::BodyExt;
 use serde_json::{json, Value};
 use std::time::Duration;
-use tokio::{net::TcpListener, task::JoinHandle, time::sleep};
+use tokio::{net::TcpListener, sync::mpsc, task::JoinHandle, time::sleep};
 use tower::ServiceExt;
 use troute::{
     development::{DevelopmentRouteSolver, DevelopmentRoutingProvider},
@@ -34,6 +34,7 @@ fn app_with_trasolve(trasolve: TrasolveClient) -> Router {
 
 fn valid_request() -> Value {
     json!({
+        "job_id": "route-http-integration-test",
         "locations": [
             {
                 "id": "place-1",
@@ -183,7 +184,7 @@ async fn malformed_trasolve_response_maps_to_bad_gateway() {
 }
 
 #[tokio::test]
-async fn optimize_does_not_contact_the_configured_trasolve_client() {
+async fn callback_connection_failure_does_not_alter_optimize_result() {
     let client = TrasolveClient::new("http://127.0.0.1:1").unwrap();
     let response = send_to(
         app_with_trasolve(client),
@@ -196,6 +197,117 @@ async fn optimize_does_not_contact_the_configured_trasolve_client() {
 
     assert_eq!(response.status, StatusCode::OK);
     assert_eq!(response.body["total_travel_minutes"], 30);
+}
+
+#[tokio::test]
+async fn callback_rejections_do_not_change_successful_optimize_response() {
+    let (base_url, mut events, _server) =
+        spawn_job_event_mock(StatusCode::SERVICE_UNAVAILABLE).await;
+    let response = send_to(
+        app_with_trasolve(TrasolveClient::new(base_url).unwrap()),
+        Method::POST,
+        "/optimize",
+        Some("application/json"),
+        valid_request().to_string(),
+    )
+    .await;
+
+    assert_eq!(response.status, StatusCode::OK);
+    assert_eq!(response.body["total_travel_minutes"], 30);
+    let mut callbacks = Vec::new();
+    while let Ok(event) = events.try_recv() {
+        callbacks.push(event);
+    }
+    assert_eq!(callbacks.len(), 5);
+    assert_eq!(callbacks.last().unwrap()["type"], "result");
+}
+
+#[tokio::test]
+async fn optimize_emits_progress_then_one_matching_result_callback() {
+    let (base_url, mut events, _server) = spawn_job_event_mock(StatusCode::NO_CONTENT).await;
+    let response = send_to(
+        app_with_trasolve(TrasolveClient::new(base_url).unwrap()),
+        Method::POST,
+        "/optimize",
+        Some("application/json"),
+        valid_request().to_string(),
+    )
+    .await;
+
+    assert_eq!(response.status, StatusCode::OK);
+    let mut callbacks = Vec::new();
+    while let Ok(event) = events.try_recv() {
+        callbacks.push(event);
+    }
+    assert_eq!(callbacks.len(), 5);
+    assert_eq!(
+        callbacks
+            .iter()
+            .map(|event| event["sequence"].as_u64().unwrap())
+            .collect::<Vec<_>>(),
+        vec![1, 2, 3, 4, 5]
+    );
+    let progress_events = &callbacks[..4];
+    assert!(progress_events
+        .iter()
+        .all(|event| event["type"] == "progress"));
+    assert_eq!(
+        progress_events
+            .iter()
+            .map(|event| event["data"]["stage"].as_str().unwrap())
+            .collect::<Vec<_>>(),
+        vec!["accepted", "building_matrix", "solving", "scheduling"]
+    );
+    let progress = progress_events
+        .iter()
+        .map(|event| event["data"]["progress"].as_u64().unwrap())
+        .collect::<Vec<_>>();
+    assert_eq!(progress, vec![0, 20, 60, 85]);
+    assert!(progress.windows(2).all(|pair| pair[0] <= pair[1]));
+    assert!(!progress.contains(&100));
+
+    let result_events = callbacks
+        .iter()
+        .filter(|event| event["type"] == "result")
+        .collect::<Vec<_>>();
+    assert_eq!(result_events.len(), 1);
+    assert_eq!(result_events[0]["sequence"], 5);
+    assert_eq!(result_events[0]["data"], response.body);
+}
+
+#[tokio::test]
+async fn infeasible_schedule_emits_a_structured_error_callback() {
+    let (base_url, mut events, _server) = spawn_job_event_mock(StatusCode::NO_CONTENT).await;
+    let mut request = valid_request();
+    request["locations"][1]["close_time"] = json!("09:10");
+    let response = send_to(
+        app_with_trasolve(TrasolveClient::new(base_url).unwrap()),
+        Method::POST,
+        "/optimize",
+        Some("application/json"),
+        request.to_string(),
+    )
+    .await;
+
+    assert_error(
+        response,
+        StatusCode::UNPROCESSABLE_ENTITY,
+        "NO_FEASIBLE_ROUTE",
+    );
+    let mut callbacks = Vec::new();
+    while let Ok(event) = events.try_recv() {
+        callbacks.push(event);
+    }
+    let error = callbacks.last().unwrap();
+    assert_eq!(error["sequence"], 5);
+    assert_eq!(error["type"], "error");
+    assert_eq!(error["data"]["code"], "NO_FEASIBLE_ROUTE");
+    assert_eq!(error["data"]["message"], "No feasible route was found.");
+    assert!(error["data"]["detail"]
+        .as_str()
+        .unwrap()
+        .contains("time window"));
+    assert!(!callbacks.iter().any(|event| event["type"] == "result"));
 }
 
 #[tokio::test]
@@ -221,6 +333,21 @@ async fn valid_optimize_request_uses_the_service_pipeline() {
 }
 
 #[tokio::test]
+async fn job_id_at_the_maximum_length_is_accepted() {
+    let mut request = valid_request();
+    request["job_id"] = json!("j".repeat(128));
+    let response = send(
+        Method::POST,
+        "/optimize",
+        Some("application/json"),
+        request.to_string(),
+    )
+    .await;
+
+    assert_eq!(response.status, StatusCode::OK);
+}
+
+#[tokio::test]
 async fn malformed_json_returns_a_json_client_error() {
     let response = send(
         Method::POST,
@@ -234,6 +361,14 @@ async fn malformed_json_returns_a_json_client_error() {
 
 #[tokio::test]
 async fn invalid_requests_return_stable_json_errors_without_panicking() {
+    let mut empty_job_id = valid_request();
+    empty_job_id["job_id"] = json!("");
+    let mut whitespace_job_id = valid_request();
+    whitespace_job_id["job_id"] = json!("   ");
+    let mut long_job_id = valid_request();
+    long_job_id["job_id"] = json!("j".repeat(129));
+    let mut missing_job_id = valid_request();
+    missing_job_id.as_object_mut().unwrap().remove("job_id");
     let mut invalid_time = valid_request();
     invalid_time["start_time"] = json!("9:00");
     let mut empty_locations = valid_request();
@@ -269,6 +404,10 @@ async fn invalid_requests_return_stable_json_errors_without_panicking() {
     unknown_field["unexpected"] = json!(true);
 
     for body in [
+        empty_job_id,
+        whitespace_job_id,
+        long_job_id,
+        missing_job_id,
         invalid_time,
         empty_locations,
         duplicate_ids,
@@ -378,4 +517,36 @@ async fn spawn_trasolve_mock(
         axum::serve(listener, app).await.unwrap();
     });
     (format!("http://{address}"), server)
+}
+
+async fn spawn_job_event_mock(
+    status: StatusCode,
+) -> (String, mpsc::UnboundedReceiver<Value>, JoinHandle<()>) {
+    #[derive(Clone)]
+    struct CallbackState {
+        status: StatusCode,
+        events: mpsc::UnboundedSender<Value>,
+    }
+
+    async fn receive_event(
+        State(state): State<CallbackState>,
+        Json(event): Json<Value>,
+    ) -> impl IntoResponse {
+        state.events.send(event).unwrap();
+        state.status
+    }
+
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    let (event_tx, event_rx) = mpsc::unbounded_channel();
+    let app = Router::new()
+        .route("/api/internal/troute/jobs/{*path}", post(receive_event))
+        .with_state(CallbackState {
+            status,
+            events: event_tx,
+        });
+    let server = tokio::spawn(async move {
+        axum::serve(listener, app).await.unwrap();
+    });
+    (format!("http://{address}"), event_rx, server)
 }

@@ -25,6 +25,7 @@ import {
   type ApiResponse,
   type RouteResponse,
 } from "./api";
+import { BUILD_COMMIT } from "./commit";
 import { sample } from "./sample";
 
 type HealthState = "checking" | "online" | "offline";
@@ -41,6 +42,39 @@ function statusIntent(status: number) {
   if (status >= 400) return Intent.WARNING;
   if (status >= 200 && status < 300) return Intent.SUCCESS;
   return Intent.NONE;
+}
+
+function CommitIndicator() {
+  const tag = (
+    <Tag
+      aria-label={`Commit ${BUILD_COMMIT.shortSha}`}
+      className={`${Classes.MONOSPACE_TEXT} navbar-commit`}
+      icon="git-commit"
+      minimal
+      title={
+        BUILD_COMMIT.fullSha
+          ? `Commit ${BUILD_COMMIT.fullSha}`
+          : "Commit unknown"
+      }
+    >
+      <span className="navbar-commit-prefix">commit </span>
+      {BUILD_COMMIT.shortSha}
+    </Tag>
+  );
+
+  if (!BUILD_COMMIT.url) return tag;
+  return (
+    <a
+      aria-label={`Commit ${BUILD_COMMIT.fullSha}`}
+      className="navbar-commit-link"
+      href={BUILD_COMMIT.url}
+      target="_blank"
+      rel="noreferrer"
+      title={`Commit ${BUILD_COMMIT.fullSha}`}
+    >
+      {tag}
+    </a>
+  );
 }
 
 export function App() {
@@ -123,6 +157,8 @@ export function App() {
           <code className={`${Classes.MONOSPACE_TEXT} navbar-endpoint`}>
             {API_BASE} · {ROUTE_PATH ? `POST ${ROUTE_PATH}` : "GET /health only"}
           </code>
+          <NavbarDivider />
+          <CommitIndicator />
         </NavbarGroup>
         <NavbarGroup align={Alignment.END}>
           <span className={Classes.TEXT_MUTED}>API</span>

@@ -6,6 +6,7 @@ use thiserror::Error;
 use crate::domain::{
     DomainError, Location, OptimizationProblem, RoutePlan, RoutingReference, TimeOfDay, TimeWindow,
 };
+use crate::events::{validate_job_id, JobIdError};
 
 const MAX_LOCATIONS: usize = 500;
 const MAX_STRING_CHARACTERS: usize = 512;
@@ -13,6 +14,7 @@ const MAX_STRING_CHARACTERS: usize = 512;
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct OptimizeRouteRequest {
+    pub job_id: String,
     pub locations: Vec<LocationInput>,
     pub start_location_id: String,
     pub start_time: TimeOfDay,
@@ -47,6 +49,7 @@ impl TryFrom<OptimizeRouteRequest> for OptimizationProblem {
     type Error = RequestValidationError;
 
     fn try_from(request: OptimizeRouteRequest) -> Result<Self, Self::Error> {
+        validate_job_id(&request.job_id).map_err(RequestValidationError::InvalidJobId)?;
         if request.locations.is_empty() {
             return Err(RequestValidationError::NoLocations);
         }
@@ -146,6 +149,8 @@ impl OptimizeRouteResponse {
 
 #[derive(Debug, Error)]
 pub enum RequestValidationError {
+    #[error(transparent)]
+    InvalidJobId(JobIdError),
     #[error("at least one location is required")]
     NoLocations,
     #[error("locations contains {actual} items; at most {maximum} are allowed")]

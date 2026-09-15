@@ -7,6 +7,7 @@
 pub mod api;
 pub mod development;
 pub mod domain;
+pub mod events;
 pub mod http;
 pub mod matrix;
 pub mod routing;
@@ -16,4 +17,8 @@ pub mod solver;
 pub mod trasolve;
 
 pub use api::{OptimizeRouteRequest, OptimizeRouteResponse};
+pub use events::{
+    ErrorEventData, JobEvent, JobEventContext, JobEventType, OptimizationErrorCode,
+    OptimizationEventReporter, ProgressEventData, ProgressStage,
+};
 pub use service::RouteOptimizationService;

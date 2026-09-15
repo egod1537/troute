@@ -23,6 +23,10 @@ body {
   font-size: 12px;
 }
 
+.navbar-commit-link {
+  text-decoration: none;
+}
+
 .playground {
   width: min(1440px, 100%);
   min-height: calc(100vh - 50px);
@@ -193,6 +197,10 @@ body {
 }
 
 @media (max-width: 520px) {
+  .navbar-commit-prefix {
+    display: none;
+  }
+
   .card-heading {
     align-items: flex-start;
     flex-direction: column;

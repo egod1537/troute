@@ -5,6 +5,7 @@ export const API_BASE = (
 export const ROUTE_PATH = (import.meta.env.VITE_TROUTE_ROUTE_PATH || "").trim();
 
 export interface RouteInput {
+  job_id: string;
   locations: {
     id: string;
     place_id: string;
@@ -65,13 +66,15 @@ export function parseInput(text: string): RouteInput {
   }
   if (
     !object(input) ||
+    !nonempty(input.job_id) ||
+    [...input.job_id].length > 128 ||
     !Array.isArray(input.locations) ||
     !input.locations.length ||
     !nonempty(input.start_location_id) ||
     !time(input.start_time)
   ) {
     throw new Error(
-      "Input requires locations, start_location_id, and start_time (HH:MM).",
+      "Input requires job_id (1-128 characters), locations, start_location_id, and start_time (HH:MM).",
     );
   }
   for (const [index, location] of input.locations.entries()) {

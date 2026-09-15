@@ -60,7 +60,10 @@ exec "$REAL_GIT" "$@"
         self.executable("docker", '''#!/bin/bash
 printf '%s\\n' "$*" >> "$TEST_ROOT/docker.log"
 case "$*" in
-  "compose build") [[ "${TEST_FAILURE:-}" != build ]] ;;
+  "compose build")
+    printf '%s\n' "${TROUTE_COMMIT_SHA:-}" > "$TEST_ROOT/commit-sha.log"
+    [[ "${TEST_FAILURE:-}" != build ]]
+    ;;
   "compose up -d --no-build") [[ "${TEST_FAILURE:-}" != up ]] ;;
   "compose ps --all --quiet troute") echo troute-container ;;
   "compose ps --all --quiet testbed") echo testbed-container ;;
@@ -135,6 +138,10 @@ fi
         self.assertEqual(self.git("-C", str(self.checkout), "branch", "--show-current"), "main")
         commands = (self.root / "docker.log").read_text()
         self.assertLess(commands.index("compose build"), commands.index("compose up"))
+        self.assertEqual(
+            (self.root / "commit-sha.log").read_text().strip(),
+            self.git("-C", str(self.checkout), "rev-parse", "HEAD"),
+        )
         self.assertIn("http://127.0.0.1:18080/health", (self.root / "curl.log").read_text())
         self.assertIn("http://127.0.0.1:18081/", (self.root / "curl.log").read_text())
         self.assertFalse((self.checkout / ".git/troute-deploy.lock").exists())

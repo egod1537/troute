@@ -6,6 +6,8 @@ COPY tsconfig.json vite.config.ts index.html ./
 COPY src ./src
 ARG VITE_TROUTE_API_BASE_URL=/api
 ARG VITE_TROUTE_ROUTE_PATH=
+ARG VITE_TROUTE_COMMIT_SHA=unknown
+ENV VITE_TROUTE_COMMIT_SHA=$VITE_TROUTE_COMMIT_SHA
 RUN npm run build
 
 FROM nginx:stable-alpine AS runtime

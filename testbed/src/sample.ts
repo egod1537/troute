@@ -1,6 +1,7 @@
 import type { RouteInput } from "./api";
 
 export const sample: RouteInput = {
+  job_id: "route-testbed-sample",
   locations: [
     {
       id: "A",

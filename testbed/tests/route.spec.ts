@@ -6,11 +6,31 @@ test.beforeEach(async ({ page }) => {
   );
 });
 
+test("valid build commit renders a short linked SHA", async ({ page }) => {
+  await page.goto("/");
+
+  const commit = page.getByRole("link", {
+    name: "Commit 3f4f8d25686fe955582295e1e47334c7a277c681",
+  });
+  await expect(commit).toContainText("commit 3f4f8d2");
+  await expect(commit).toHaveAttribute(
+    "href",
+    "https://github.com/egod1537/troute/commit/3f4f8d25686fe955582295e1e47334c7a277c681",
+  );
+  await expect(commit).toHaveAttribute("target", "_blank");
+  await expect(commit).toHaveAttribute("rel", "noreferrer");
+  await expect(page.getByLabel("API Online")).toBeVisible();
+  await expect(
+    page.getByRole("button", { name: "Refresh API health" }),
+  ).toBeVisible();
+});
+
 test("configured client posts input and renders one inspectable response", async ({
   page,
 }) => {
   await page.route("**/api/fixture-route", async (route) => {
     expect(route.request().method()).toBe("POST");
+    expect(route.request().postDataJSON().job_id).toBe("route-testbed-sample");
     expect(route.request().postDataJSON().start_location_id).toBe("A");
     await route.fulfill({
       json: {

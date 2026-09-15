@@ -132,15 +132,18 @@ client uses a five-second timeout and is reused across requests.
 `POST /optimize` accepts `application/json`. Time values are strict 24-hour
 `HH:MM` strings on both request and response; numeric minute values and forms
 such as `9:00`, `24:00`, or `09:60` are rejected. Requests may contain 1 to 500
-locations. Location IDs and Place IDs must be non-blank strings of at most 512
-characters, location IDs must be unique, and `start_location_id` must match a
-location. Overnight windows are not supported, so `open_time` must not be later
-than `close_time`. The request body limit is 1 MiB.
+locations. The required `job_id` is an opaque correlation value supplied by
+Trasolve; it must be non-blank and at most 128 characters. Location IDs and
+Place IDs must be non-blank strings of at most 512 characters, location IDs
+must be unique, and `start_location_id` must match a location. Overnight
+windows are not supported, so `open_time` must not be later than `close_time`.
+The request body limit is 1 MiB.
 
 ```sh
 curl -i -X POST http://127.0.0.1:8080/optimize \
   -H 'Content-Type: application/json' \
   -d '{
+    "job_id": "route-local-example",
     "locations": [
       {
         "id": "place-1",
@@ -296,6 +299,103 @@ continue to work. Timeouts return HTTP 504 with `TRASOLVE_TIMEOUT`. Connection
 failures and upstream 5xx responses return HTTP 503. Unexpected response bodies
 and upstream contract mismatches return HTTP 502. All failures use the existing
 JSON error envelope. No browser CORS or service authentication is added.
+
+### Job event contract foundation
+
+Trasolve supplies `job_id` in each optimize request. troute treats it as an
+opaque identifier and must use the same value to correlate future callbacks:
+
+```text
+POST {TRASOLVE_BASE_URL}/api/internal/troute/jobs/{job_id}/events
+```
+
+The reusable callback sender posts this common JSON envelope:
+
+```json
+{
+  "sequence": 1,
+  "type": "progress",
+  "data": {}
+}
+```
+
+Event types are exactly `progress`, `error`, and `result`. Sequence numbers are
+per job, begin at 1, and increment for each event; there is no process-wide
+sequence.
+
+### Progress and error callbacks
+
+When `TRASOLVE_BASE_URL` is configured, `/optimize` reports these coarse,
+real pipeline boundaries in order:
+
+- `accepted` at 0: the request entered the optimization pipeline;
+- `building_matrix` at 20: travel-time matrix construction is starting;
+- `solving` at 60: visit-order optimization is starting;
+- `scheduling` at 85: itinerary schedule construction is starting.
+
+These values identify stages, not solver iterations. Progress never reports
+100; a terminal `result` event represents successful completion.
+
+Failures produce an `error` event whose data contains `code`, `message`, and
+`detail`. Stable codes are `INVALID_REQUEST`, `ROUTING_UNAVAILABLE`,
+`NO_FEASIBLE_ROUTE`, `SOLVER_ERROR`, and `SCHEDULE_ERROR`. Solver and schedule
+feasibility failures both use `NO_FEASIBLE_ROUTE`; unexpected failures retain
+their component-specific code. Details contain concise error text and never a
+Rust backtrace.
+
+Callback delivery is best-effort relative to the optimize HTTP response.
+Events are queued synchronously, delivered sequentially by an asynchronous
+sender, and drained for a bounded period before the response returns. A
+callback timeout or rejection is logged but never replaces the optimization
+result or its original error. Without `TRASOLVE_BASE_URL`, reporting is a no-op
+and optimization remains fully available. Solver behavior is unchanged.
+
+### Successful result lifecycle
+
+After routing, solving, and scheduling succeed, troute constructs the same
+`OptimizeRouteResponse` returned by `/optimize` and queues it as the final event:
+
+```json
+{
+  "sequence": 5,
+  "type": "result",
+  "data": {
+    "route": [],
+    "total_travel_minutes": 0
+  }
+}
+```
+
+The `data` value uses the canonical optimize response type rather than a
+separate callback DTO. A successful request therefore follows this lifecycle:
+
+```text
+Trasolve creates job_id
+  -> troute receives POST /optimize
+  -> accepted -> building_matrix -> solving -> scheduling
+  -> result callback
+  -> synchronous OptimizeRouteResponse
+```
+
+`result` is emitted exactly once and last. Error paths emit `error` instead and
+never emit `result`. As with progress and error delivery, a failed or timed-out
+result callback is logged but does not change a successful HTTP response.
+
+For local end-to-end verification, run Trasolve and troute with reciprocal base
+URLs, submit an optimization through Trasolve, then inspect the returned job:
+
+```sh
+curl -i -X POST http://127.0.0.1:43127/api/troute/optimize \
+  -H 'Content-Type: application/json' \
+  --data @optimize-request.json
+
+curl -i http://127.0.0.1:43127/api/internal/troute/jobs/JOB_ID
+```
+
+After successful delivery, the job is expected to be `completed` with progress
+100, a populated result, and an event history containing the coarse progress
+events followed by the result event. The Trasolve job endpoint owns that stored
+state; troute remains synchronous and does not write Trip storage directly.
 
 ## Docker
 

@@ -32,6 +32,7 @@ impl RouteSolver for FixedSolver {
 fn v0_pipeline_returns_ids_schedule_and_travel_total() {
     let request: OptimizeRouteRequest = serde_json::from_str(
         r#"{
+            "job_id": "route-v0-contract-test",
             "locations": [
                 {
                     "id": "A",
@@ -84,6 +85,7 @@ fn v0_pipeline_returns_ids_schedule_and_travel_total() {
 fn malformed_hhmm_time_is_rejected() {
     let result = serde_json::from_str::<OptimizeRouteRequest>(
         r#"{
+            "job_id": "route-invalid-time-test",
             "locations": [],
             "start_location_id": "A",
             "start_time": "9:00"

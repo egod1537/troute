@@ -12,6 +12,12 @@ test("health-only mode shows API status, raw response, and latest latency", asyn
 
   await page.goto("/");
   await expect(page.getByLabel("API Online")).toBeVisible();
+  await expect(page.getByLabel("Commit unknown")).toContainText(
+    "commit unknown",
+  );
+  await expect(
+    page.getByRole("link", { name: /Commit/i }),
+  ).toHaveCount(0);
   await expect(
     page.getByRole("heading", { name: "Request", exact: true }),
   ).toBeVisible();

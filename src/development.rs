@@ -74,6 +74,7 @@ mod tests {
     fn problem_with_start_at(index: usize) -> OptimizationProblem {
         let mut request: OptimizeRouteRequest = serde_json::from_str(
             r#"{
+                "job_id":"route-development-test",
                 "locations": [
                     {"id":"A","place_id":"a","open_time":"00:00","close_time":"23:59","stay_minutes":0},
                     {"id":"B","place_id":"b","open_time":"00:00","close_time":"23:59","stay_minutes":0},
