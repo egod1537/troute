@@ -7,7 +7,11 @@ use crate::domain::{
     DomainError, Location, OptimizationProblem, RoutePlan, RoutingReference, TimeOfDay, TimeWindow,
 };
 
+const MAX_LOCATIONS: usize = 500;
+const MAX_STRING_CHARACTERS: usize = 512;
+
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct OptimizeRouteRequest {
     pub locations: Vec<LocationInput>,
     pub start_location_id: String,
@@ -15,6 +19,7 @@ pub struct OptimizeRouteRequest {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct LocationInput {
     pub id: String,
     pub place_id: String,
@@ -45,6 +50,20 @@ impl TryFrom<OptimizeRouteRequest> for OptimizationProblem {
         if request.locations.is_empty() {
             return Err(RequestValidationError::NoLocations);
         }
+        if request.locations.len() > MAX_LOCATIONS {
+            return Err(RequestValidationError::TooManyLocations {
+                maximum: MAX_LOCATIONS,
+                actual: request.locations.len(),
+            });
+        }
+        if request.start_location_id.trim().is_empty() {
+            return Err(RequestValidationError::EmptyStartLocationId);
+        }
+        if request.start_location_id.chars().count() > MAX_STRING_CHARACTERS {
+            return Err(RequestValidationError::StartLocationIdTooLong {
+                maximum: MAX_STRING_CHARACTERS,
+            });
+        }
 
         let mut ids = HashSet::with_capacity(request.locations.len());
         let mut locations = Vec::with_capacity(request.locations.len());
@@ -53,9 +72,20 @@ impl TryFrom<OptimizeRouteRequest> for OptimizationProblem {
             if input.id.trim().is_empty() {
                 return Err(RequestValidationError::EmptyLocationId);
             }
+            if input.id.chars().count() > MAX_STRING_CHARACTERS {
+                return Err(RequestValidationError::LocationIdTooLong {
+                    maximum: MAX_STRING_CHARACTERS,
+                });
+            }
             if input.place_id.trim().is_empty() {
                 return Err(RequestValidationError::EmptyPlaceId {
                     location_id: input.id,
+                });
+            }
+            if input.place_id.chars().count() > MAX_STRING_CHARACTERS {
+                return Err(RequestValidationError::PlaceIdTooLong {
+                    location_id: input.id,
+                    maximum: MAX_STRING_CHARACTERS,
                 });
             }
             if !ids.insert(input.id.clone()) {
@@ -118,12 +148,22 @@ impl OptimizeRouteResponse {
 pub enum RequestValidationError {
     #[error("at least one location is required")]
     NoLocations,
+    #[error("locations contains {actual} items; at most {maximum} are allowed")]
+    TooManyLocations { maximum: usize, actual: usize },
     #[error("location id must not be empty")]
     EmptyLocationId,
+    #[error("location id must not exceed {maximum} characters")]
+    LocationIdTooLong { maximum: usize },
     #[error("place_id must not be empty for location {location_id}")]
     EmptyPlaceId { location_id: String },
+    #[error("place_id must not exceed {maximum} characters for location {location_id}")]
+    PlaceIdTooLong { location_id: String, maximum: usize },
     #[error("duplicate location id: {0}")]
     DuplicateLocationId(String),
+    #[error("start_location_id must not be empty")]
+    EmptyStartLocationId,
+    #[error("start_location_id must not exceed {maximum} characters")]
+    StartLocationIdTooLong { maximum: usize },
     #[error("start_location_id does not exist in locations: {0}")]
     UnknownStartLocation(String),
     #[error("invalid time window for location {location_id}: {source}")]

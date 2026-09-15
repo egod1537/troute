@@ -1,6 +1,18 @@
 # Imported by the existing jsb1 edge Caddyfile, which defines jsb_tls.
-# This Mac publishes only the main API on host loopback port 18080.
+# Keep the API's original public paths while serving the testbed at the root.
 https://troute.mangagaki.net {
 	import jsb_tls
-	reverse_proxy host.docker.internal:18080
+
+	@direct_api path /health /optimize
+	handle @direct_api {
+		reverse_proxy host.docker.internal:18080
+	}
+
+	handle_path /api/* {
+		reverse_proxy host.docker.internal:18080
+	}
+
+	handle {
+		reverse_proxy host.docker.internal:18081
+	}
 }

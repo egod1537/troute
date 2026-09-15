@@ -42,6 +42,7 @@ Trasolve Backend
 troute
    |
    +-- HTTP health endpoint
+   +-- HTTP optimize endpoint
    +-- API types
    +-- Routing Provider
    +-- Travel Time Matrix
@@ -49,10 +50,13 @@ troute
    +-- Schedule Calculation
 ```
 
-The component interfaces and v0 data flow are defined. The HTTP server currently
-exposes only `GET /health`; route optimization, Google Maps integration, and
-caching are not implemented. Trasolve user browsers call the Trasolve backend, which calls
-troute over HTTP. The separate developer testbed uses its own same-origin API proxy.
+The component interfaces and v0 data flow are defined. The HTTP server exposes
+`GET /health` and `POST /optimize`. The optimize endpoint executes the existing
+provider -> solver -> schedule service pipeline. Its currently wired provider
+and solver are deterministic development placeholders; real travel-time lookup,
+actual optimization, Google Maps integration, and caching are not implemented.
+Trasolve user browsers call the Trasolve backend, which calls troute over HTTP.
+The separate developer testbed uses its own same-origin API proxy.
 
 ## Tech Stack
 
@@ -70,6 +74,7 @@ troute over HTTP. The separate developer testbed uses its own same-origin API pr
 - [x] Routing provider and solver interfaces
 - [x] Schedule calculation for a supplied visit order
 - [x] Runnable HTTP server and Docker Compose environment
+- [x] `POST /optimize` HTTP integration contract
 - [x] Developer testbed with health checks, input editor, and request timing
 - [ ] Distance matrix generation
 - [ ] Simple greedy route solver
@@ -115,6 +120,126 @@ Invalid values fail startup with an error on stderr. Startup, bind address,
 and shutdown messages go to stdout. The binary does not load `.env` itself;
 set variables in the shell for `cargo run`.
 
+## HTTP API
+
+`POST /optimize` accepts `application/json`. Time values are strict 24-hour
+`HH:MM` strings on both request and response; numeric minute values and forms
+such as `9:00`, `24:00`, or `09:60` are rejected. Requests may contain 1 to 500
+locations. Location IDs and Place IDs must be non-blank strings of at most 512
+characters, location IDs must be unique, and `start_location_id` must match a
+location. Overnight windows are not supported, so `open_time` must not be later
+than `close_time`. The request body limit is 1 MiB.
+
+```sh
+curl -i -X POST http://127.0.0.1:8080/optimize \
+  -H 'Content-Type: application/json' \
+  -d '{
+    "locations": [
+      {
+        "id": "place-1",
+        "place_id": "GOOGLE_PLACE_ID_1",
+        "open_time": "09:00",
+        "close_time": "18:00",
+        "stay_minutes": 60
+      },
+      {
+        "id": "place-2",
+        "place_id": "GOOGLE_PLACE_ID_2",
+        "open_time": "10:00",
+        "close_time": "18:00",
+        "stay_minutes": 45
+      }
+    ],
+    "start_location_id": "place-1",
+    "start_time": "09:00"
+  }'
+```
+
+The current deterministic development implementation returns:
+
+```json
+{
+  "route": [
+    {
+      "location_id": "place-1",
+      "order": 0,
+      "arrival_time": "09:00",
+      "departure_time": "09:00"
+    },
+    {
+      "location_id": "place-2",
+      "order": 1,
+      "arrival_time": "09:15",
+      "departure_time": "10:45"
+    },
+    {
+      "location_id": "place-1",
+      "order": 2,
+      "arrival_time": "11:00"
+    }
+  ],
+  "total_travel_minutes": 30
+}
+```
+
+The start location is the v0 depot: its stay duration and opening window are
+ignored for the initial departure and final return. A missing
+`departure_time` is omitted rather than serialized as `null`.
+
+All endpoint failures use a JSON envelope rather than an HTML error page:
+
+```json
+{
+  "error": {
+    "code": "INVALID_REQUEST",
+    "message": "The optimize request is invalid."
+  }
+}
+```
+
+Malformed or invalid requests return 400, a non-JSON content type returns 415,
+and an oversized body returns 413. An infeasible route or schedule returns 422
+with `NO_FEASIBLE_ROUTE`. A routing-provider outage returns 503. Unexpected
+solver or schedule failures return 500. No permissive browser CORS is enabled;
+the supported integration is server-to-server.
+
+### Current provider and solver status
+
+`DevelopmentRoutingProvider` supplies zero minutes on the matrix diagonal and
+a fixed 15 minutes between every pair of different locations.
+`DevelopmentRouteSolver` starts at the selected location, visits all other
+locations in request order, and returns to the start. This behavior is
+deterministic and exercises the real `RouteOptimizationService` and schedule,
+but it is **not route optimization and does not use Google travel data**. The
+implementations are isolated in `src/development.rs` so they can be replaced
+without changing the HTTP handler or wire contract. Schedule infeasibility is
+returned as an error; the placeholders do not alter request semantics or invent
+a successful route.
+
+### Trasolve integration
+
+The supported call path is:
+
+```text
+Trasolve browser/client
+  -> POST /api/troute/optimize on the Trasolve backend
+  -> POST /optimize on troute
+  -> RouteOptimizationService
+  -> provider -> solver -> schedule
+```
+
+Run troute on port 8080, then start the Trasolve backend with:
+
+```sh
+TROUTE_BASE_URL=http://127.0.0.1:8080 npm run dev -w @trasolve/backend
+```
+
+`POST http://127.0.0.1:43127/api/troute/optimize` accepts the same request body.
+The Trasolve browser never connects directly to troute. The public
+`POST https://troute.mangagaki.net/optimize` endpoint will become available
+after this `impl` change is reviewed, merged to `main`, and deployed by the
+existing main watcher.
+
 ## Docker
 
 The multi-stage Dockerfile builds the binary and copies it into a Debian slim
@@ -158,14 +283,13 @@ from the Rust API and the Trasolve user interface. It has a JSON input editor,
 validation, API health status, route-result/table components, formatted raw
 responses, HTTP timing, and an in-memory graph of the last 40 requests.
 
-**The Rust API currently implements only `GET /health`.** The primary action
-therefore runs a health check without submitting the editor payload. No solver
-runs and no route or solver timing is fabricated. Sample Place IDs illustrate
-the v0 input shape only. Once a real route endpoint exists, configure
-`VITE_TROUTE_ROUTE_PATH` with that endpoint's relative path; the client posts the
-v0 input and renders `route` / `total_travel_minutes` from the existing DTOs.
-The route path is deliberately unset by default. Error status and response
-bodies remain visible, including malformed JSON and infeasible-route errors.
+The Rust API implements `GET /health` and `POST /optimize`. Configure
+`VITE_TROUTE_ROUTE_PATH=/optimize` to make the primary action submit the editor
+payload; otherwise it continues to run a health check. The client renders
+`route` / `total_travel_minutes` from the existing DTOs. Error status and
+response bodies remain visible, including malformed JSON and infeasible-route
+errors. Results currently come from the documented deterministic development
+provider and solver, not a production optimization algorithm.
 
 For local development (Node 22.12+; Docker builds use Node 24), start the API
 with `cargo run` and run these commands in another terminal:
@@ -312,19 +436,23 @@ Regression tests: `python3 -m unittest discover -s tests -p 'test_deploy.py' -v`
 
 ## Backend connection and branches
 
-Production API: **https://troute.mangagaki.net**. Only `main` is deployed here,
-on the Mac mini. The existing Cloudflare Tunnel routes this hostname to the
-existing jsb1 edge Caddy, which forwards to the API's loopback host port 18080.
-The container still listens on port 8080. TLS and credentials stay in the
+Production testbed and API: **https://troute.mangagaki.net**. Only `main` is
+deployed here, on the Mac mini. The existing Cloudflare Tunnel routes this
+hostname to the existing jsb1 edge Caddy. Caddy serves the testbed from its
+loopback host port 18081, proxies `/api/*` to the API on port 18080 after
+stripping `/api`, and preserves the direct `/health` and `/optimize` API paths.
+The containers still listen on port 8080. TLS and credentials stay in the
 existing host infrastructure; no new tunnel or certificate is required.
 
 ```sh
 curl --fail --show-error https://troute.mangagaki.net/health
 ```
 
-Expected: HTTP 200 and `{"status":"ok"}`. `/` is currently HTTP 404: this host
-serves the API, not the testbed. The developer testbed stays private on
-`http://127.0.0.1:18081` on this Mac; no testbed DNS record is configured.
+Expected: HTTP 200 and `{"status":"ok"}`. After the HTTP integration is merged
+to main, the same host also serves `POST /optimize`. `/` serves the testbed,
+whose same-origin requests use `/api/health` and, when configured,
+`/api/optimize`. The testbed also remains directly available on this Mac at
+`http://127.0.0.1:18081`.
 
 The production checkout is `$HOME/services/troute`. Its ignored `.env` fixes
 `COMPOSE_PROJECT_NAME=troute`, `TROUTE_PORT=8080`, `TROUTE_HOST_PORT=18080`, and
@@ -417,11 +545,13 @@ Preview deployment automation is outside the current scope.
 
 `.env` and `.env.*` are excluded from Git and the Docker build context;
 `.env.example` contains only safe defaults. Do not commit keys or tokens.
-No Google Maps key is needed now. Add `GOOGLE_MAPS_API_KEY` through environment
-configuration only when an actual provider integration requires it.
+No Google Maps key is needed for the deterministic development provider. Add
+`GOOGLE_MAPS_API_KEY` through environment configuration only when an actual
+provider integration requires it.
 
 ## Project Status
 
-Early development. The v0 types, component boundaries, HTTP health endpoint,
-and container environment are in place. Routing provider and optimization API
-implementations are pending.
+Early development. The v0 types, component boundaries, health and optimize HTTP
+endpoints, and container environment are in place. The optimize endpoint uses
+temporary deterministic provider/solver implementations; production routing
+data and optimization algorithms are pending.

@@ -1,17 +1,10 @@
 use std::{env, error::Error, net::SocketAddr, num::NonZeroU16, process::ExitCode};
 
-use axum::{routing::get, Json, Router};
-use serde::Serialize;
 use tokio::net::TcpListener;
-
-#[derive(Serialize)]
-struct HealthResponse {
-    status: &'static str,
-}
-
-async fn health() -> Json<HealthResponse> {
-    Json(HealthResponse { status: "ok" })
-}
+use troute::{
+    development::{DevelopmentRouteSolver, DevelopmentRoutingProvider},
+    http, RouteOptimizationService,
+};
 
 #[tokio::main]
 async fn main() -> ExitCode {
@@ -36,7 +29,9 @@ async fn run() -> Result<(), Box<dyn Error>> {
     let address = SocketAddr::from(([0, 0, 0, 0], port));
     println!("troute server starting; bind address: {address}");
     let listener = TcpListener::bind(address).await?;
-    let app = Router::new().route("/health", get(health));
+    let optimizer =
+        RouteOptimizationService::new(DevelopmentRoutingProvider, DevelopmentRouteSolver);
+    let app = http::router(optimizer);
 
     println!("troute server listening on http://{address}");
     axum::serve(listener, app)
