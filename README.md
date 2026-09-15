@@ -51,7 +51,8 @@ troute
 ```
 
 The component interfaces and v0 data flow are defined. The HTTP server exposes
-`GET /health` and `POST /optimize`. The optimize endpoint executes the existing
+`GET /health`, `POST /optimize`, and the reverse-integration verification endpoint
+`GET /integration/trasolve/health`. The optimize endpoint executes the existing
 provider -> solver -> schedule service pipeline. Its currently wired provider
 and solver are deterministic development placeholders; real travel-time lookup,
 actual optimization, Google Maps integration, and caching are not implemented.
@@ -119,6 +120,12 @@ curl -i http://localhost:18080/health
 Invalid values fail startup with an error on stderr. Startup, bind address,
 and shutdown messages go to stdout. The binary does not load `.env` itself;
 set variables in the shell for `cargo run`.
+
+`TRASOLVE_BASE_URL` optionally configures reverse server-to-server calls to the
+Trasolve backend. It has no implicit default. A missing value leaves troute and
+its existing endpoints available; an invalid configured URL fails startup with
+a clear configuration error. Trailing slashes are normalized. The outbound
+client uses a five-second timeout and is reused across requests.
 
 ## HTTP API
 
@@ -240,6 +247,56 @@ The Trasolve browser never connects directly to troute. The public
 after this `impl` change is reviewed, merged to `main`, and deployed by the
 existing main watcher.
 
+### Reverse Trasolve connectivity
+
+troute can independently verify the reverse communication path:
+
+```text
+external caller
+  -> GET /integration/trasolve/health on troute
+  -> TrasolveClient
+  -> GET /api/internal/troute/health on Trasolve
+  -> troute response
+```
+
+This is connectivity infrastructure only. It does not fetch Trip data, send
+optimization results, or make `RouteOptimizationService`, the routing provider,
+the solver, schedule calculation, or `/optimize` depend on Trasolve.
+
+Start the Trasolve backend from its repository, verify it directly, and then
+start troute with its base URL:
+
+```sh
+# In the Trasolve repository (impl branch):
+npm run dev -w @trasolve/backend
+
+# In separate terminals:
+curl -i http://127.0.0.1:43127/api/internal/troute/health
+
+TRASOLVE_BASE_URL=http://127.0.0.1:43127 cargo run
+curl -i http://127.0.0.1:8080/integration/trasolve/health
+```
+
+The integration endpoint returns HTTP 200 when Trasolve returns its expected
+typed contract:
+
+```json
+{
+  "status": "ok",
+  "trasolve": {
+    "status": "ok",
+    "service": "trasolve"
+  }
+}
+```
+
+When `TRASOLVE_BASE_URL` is absent, the endpoint returns HTTP 503 with
+`TRASOLVE_NOT_CONFIGURED`; troute still starts and `/health` and `/optimize`
+continue to work. Timeouts return HTTP 504 with `TRASOLVE_TIMEOUT`. Connection
+failures and upstream 5xx responses return HTTP 503. Unexpected response bodies
+and upstream contract mismatches return HTTP 502. All failures use the existing
+JSON error envelope. No browser CORS or service authentication is added.
+
 ## Docker
 
 The multi-stage Dockerfile builds the binary and copies it into a Debian slim
@@ -260,6 +317,12 @@ Compose publishes the host port on `127.0.0.1` only. The application still binds
 to `0.0.0.0` inside the container, so containers on its Docker network can reach
 it. Both application and host ports default to `8080`.
 
+Compose passes through `TRASOLVE_BASE_URL` when it is set. Inside the troute
+container, `127.0.0.1` refers to that container, not the Docker host or a
+Trasolve container. Set the variable to an address actually reachable from the
+troute container, such as the Trasolve Compose service name when both services
+share a network. The source code makes no host-specific networking assumption.
+
 If the host port is already occupied, create a local configuration:
 
 ```sh
@@ -278,10 +341,11 @@ exited container; it does not detect an unresponsive process.
 
 ## Developer testbed
 
-`testbed/` is a one-page React + TypeScript + Vite tool for developers, separate
-from the Rust API and the Trasolve user interface. It has a JSON input editor,
-validation, API health status, route-result/table components, formatted raw
-responses, HTTP timing, and an in-memory graph of the last 40 requests.
+`testbed/` is a compact Blueprint + React + TypeScript + Vite API playground for
+developers, separate from the Rust API and the Trasolve user interface. It
+provides API health, an editable optimize request, request validation, route
+execution, a structured route result, the raw response, HTTP status, and the
+latest round-trip latency.
 
 The Rust API implements `GET /health` and `POST /optimize`. Configure
 `VITE_TROUTE_ROUTE_PATH=/optimize` to make the primary action submit the editor
@@ -328,10 +392,9 @@ API keys in these variables. Remote private access should forward the testbed
 port through your existing private connection; it does not require exposing
 the API port or publishing a public domain.
 
-`request_latency_ms` measures the browser round trip, including the proxy and
-response transfer. The current API provides no `solver_latency_ms`, so it is
-shown as unavailable. Measurements exist only in browser memory and disappear
-on refresh; there is no benchmark DB or frontend solver implementation.
+The displayed request latency measures the latest browser round trip, including
+the proxy and response transfer. It is not solver execution time and is not
+stored as history or persisted.
 
 The main watcher runs in a separate production clone; each new main commit rebuilds and updates
 both services. Deployment succeeds only when API health **and** testbed HTTP

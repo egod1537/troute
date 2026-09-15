@@ -1,67 +1,76 @@
 import { test, expect } from "@playwright/test";
 
-test("health-only UI shows real request timing without claiming a solver result", async ({
+test("health-only mode shows API status, raw response, and latest latency", async ({
   page,
 }) => {
+  let healthCalls = 0;
   await page.route("**/api/health", async (route) => {
+    healthCalls++;
     await new Promise((resolve) => setTimeout(resolve, 40));
     await route.fulfill({ json: { status: "ok" } });
   });
+
   await page.goto("/");
-  await expect(page.getByText("API: Online")).toBeVisible();
+  await expect(page.getByLabel("API Online")).toBeVisible();
   await expect(
-    page.getByRole("heading", { name: "No route has been calculated" }),
+    page.getByRole("heading", { name: "Request", exact: true }),
   ).toBeVisible();
   await expect(
-    page.getByRole("button", { name: "Run route", exact: true }),
-  ).toHaveCount(0);
+    page.getByRole("heading", { name: "Response", exact: true }),
+  ).toBeVisible();
+  await expect(page.getByText("HTTP 200", { exact: true })).toBeVisible();
+  await expect(page.getByText(/\d+\.\d ms/)).toBeVisible();
   await expect(page.getByLabel("Raw API response")).toContainText(
     '"status": "ok"',
   );
-  await page.getByRole("button", { name: "Run health check" }).click();
-  await expect(
-    page.getByRole("img", {
-      name: /Request latency chart, 2 session requests/,
-    }),
-  ).toBeVisible();
-  await expect(
-    page.getByText("input payload is not submitted", { exact: false }),
-  ).toBeVisible();
-  await page.reload();
-  await expect(
-    page.getByRole("img", {
-      name: /Request latency chart, 1 session requests/,
-    }),
-  ).toBeVisible();
+  await expect(page.getByRole("table")).toHaveCount(0);
+  await expect(page.getByText("Performance", { exact: true })).toHaveCount(0);
+
+  await page.getByRole("button", { name: "Run", exact: true }).click();
+  await expect.poll(() => healthCalls).toBe(2);
+  await expect(page.getByLabel("API Online")).toBeVisible();
+
+  await page.getByRole("button", { name: "Refresh API health" }).click();
+  await expect.poll(() => healthCalls).toBe(3);
+  await expect(page.getByLabel("API Online")).toBeVisible();
 });
 
-test("invalid JSON is visible and sample can be restored", async ({ page }) => {
+test("invalid JSON is visible and the sample can be restored", async ({
+  page,
+}) => {
   await page.route("**/api/health", (route) =>
     route.fulfill({ json: { status: "ok" } }),
   );
   await page.goto("/");
-  await expect(page.getByText("API: Online")).toBeVisible();
-  await page.getByLabel("Route input JSON").fill("{ broken");
-  await page.getByRole("button", { name: "Validate JSON" }).click();
+  await expect(page.getByLabel("API Online")).toBeVisible();
+
+  await page.getByLabel("Request JSON").fill("{ broken");
+  await page.getByRole("button", { name: "Validate", exact: true }).click();
   await expect(page.getByRole("alert")).toContainText("Invalid JSON");
-  await page.getByRole("button", { name: "Load sample" }).click();
-  await page.getByRole("button", { name: "Validate JSON" }).click();
-  await expect(page.getByRole("status")).toContainText("Valid v0 input shape");
+
+  await page.getByRole("button", { name: "Reset sample" }).click();
+  await page.getByRole("button", { name: "Validate", exact: true }).click();
+  await expect(page.getByText("Valid", { exact: true })).toBeVisible();
 });
 
-test("HTTP failures retain status and response body", async ({ page }) => {
+test("HTTP failures retain status, latency, and response body", async ({
+  page,
+}) => {
   await page.route("**/api/health", (route) =>
     route.fulfill({ status: 503, json: { error: "upstream unavailable" } }),
   );
   await page.goto("/");
-  await expect(page.getByText("API: Offline")).toBeVisible();
+
+  await expect(page.getByLabel("API Offline")).toBeVisible();
   await expect(page.getByRole("alert")).toContainText("HTTP 503");
+  await expect(page.getByText("HTTP 503", { exact: true })).toBeVisible();
+  await expect(page.getByText(/\d+\.\d ms/)).toBeVisible();
   await expect(page.getByLabel("Raw API response")).toContainText(
     "upstream unavailable",
   );
 });
 
-test("malformed health response is not shown as online", async ({ page }) => {
+test("malformed health responses remain inspectable", async ({ page }) => {
   await page.route("**/api/health", (route) =>
     route.fulfill({
       body: "<html>not the API</html>",
@@ -69,7 +78,8 @@ test("malformed health response is not shown as online", async ({ page }) => {
     }),
   );
   await page.goto("/");
-  await expect(page.getByText("API: Offline")).toBeVisible();
+
+  await expect(page.getByLabel("API Offline")).toBeVisible();
   await expect(page.getByRole("alert")).toContainText("Malformed response");
   await expect(page.getByLabel("Raw API response")).toContainText(
     "not the API",
@@ -83,14 +93,15 @@ test("connection errors are visible without stale response data", async ({
     route.abort("connectionrefused"),
   );
   await page.goto("/");
+
   await expect(page.getByRole("alert")).toContainText("API connection failed");
-  await expect(page.getByText("API: Offline")).toBeVisible();
+  await expect(page.getByLabel("API Offline")).toBeVisible();
   await expect(page.getByLabel("Raw API response")).toContainText(
-    "No response received",
+    "No response yet",
   );
 });
 
-test("mobile layout keeps the editor and controls within the viewport", async ({
+test("mobile layout stacks request before response without horizontal overflow", async ({
   page,
 }) => {
   await page.setViewportSize({ width: 390, height: 844 });
@@ -98,11 +109,20 @@ test("mobile layout keeps the editor and controls within the viewport", async ({
     route.fulfill({ json: { status: "ok" } }),
   );
   await page.goto("/");
-  await expect(page.getByText("API: Online")).toBeVisible();
-  await expect(page.getByLabel("Route input JSON")).toBeVisible();
+
+  await expect(page.getByLabel("API Online")).toBeVisible();
+  await expect(page.getByLabel("Request JSON")).toBeVisible();
   expect(
     await page.evaluate(
       () => document.documentElement.scrollWidth <= innerWidth,
     ),
   ).toBe(true);
+
+  const requestTop = await page
+    .getByRole("heading", { name: "Request", exact: true })
+    .evaluate((element) => element.getBoundingClientRect().top);
+  const responseTop = await page
+    .getByRole("heading", { name: "Response", exact: true })
+    .evaluate((element) => element.getBoundingClientRect().top);
+  expect(requestTop).toBeLessThan(responseTop);
 });

@@ -3,7 +3,9 @@ use std::{env, error::Error, net::SocketAddr, num::NonZeroU16, process::ExitCode
 use tokio::net::TcpListener;
 use troute::{
     development::{DevelopmentRouteSolver, DevelopmentRoutingProvider},
-    http, RouteOptimizationService,
+    http,
+    trasolve::TrasolveClient,
+    RouteOptimizationService,
 };
 
 #[tokio::main]
@@ -26,12 +28,25 @@ async fn run() -> Result<(), Box<dyn Error>> {
         Err(env::VarError::NotPresent) => 8080,
         Err(error) => return Err(error.into()),
     };
+    let trasolve = match env::var("TRASOLVE_BASE_URL") {
+        Ok(base_url) => Some(TrasolveClient::new(base_url)?),
+        Err(env::VarError::NotPresent) => None,
+        Err(error) => return Err(error.into()),
+    };
     let address = SocketAddr::from(([0, 0, 0, 0], port));
     println!("troute server starting; bind address: {address}");
+    println!(
+        "Trasolve reverse integration: {}",
+        if trasolve.is_some() {
+            "configured"
+        } else {
+            "not configured"
+        }
+    );
     let listener = TcpListener::bind(address).await?;
     let optimizer =
         RouteOptimizationService::new(DevelopmentRoutingProvider, DevelopmentRouteSolver);
-    let app = http::router(optimizer);
+    let app = http::router_with_trasolve(optimizer, trasolve);
 
     println!("troute server listening on http://{address}");
     axum::serve(listener, app)

@@ -13,6 +13,7 @@ pub mod routing;
 pub mod schedule;
 pub mod service;
 pub mod solver;
+pub mod trasolve;
 
 pub use api::{OptimizeRouteRequest, OptimizeRouteResponse};
 pub use service::RouteOptimizationService;

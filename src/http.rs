@@ -16,6 +16,7 @@ use crate::{
     schedule::ScheduleError,
     service::{OptimizationServiceError, RouteOptimizationService},
     solver::{RouteSolver, SolverError},
+    trasolve::{TrasolveClient, TrasolveClientError, TrasolveHealthResponse},
 };
 
 const MAX_REQUEST_BODY_BYTES: usize = 1024 * 1024;
@@ -43,11 +44,18 @@ where
 #[derive(Clone)]
 struct AppState {
     optimizer: Arc<dyn Optimizer>,
+    trasolve: Option<TrasolveClient>,
 }
 
 #[derive(Debug, Serialize)]
 struct HealthResponse {
     status: &'static str,
+}
+
+#[derive(Debug, Serialize)]
+struct TrasolveIntegrationHealthResponse {
+    status: &'static str,
+    trasolve: TrasolveHealthResponse,
 }
 
 #[derive(Debug, Serialize)]
@@ -155,6 +163,54 @@ impl ApiError {
             ),
         }
     }
+
+    fn trasolve_not_configured() -> Self {
+        Self::new(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "TRASOLVE_NOT_CONFIGURED",
+            "Trasolve integration is not configured.",
+            "TRASOLVE_BASE_URL is not set",
+        )
+    }
+
+    fn from_trasolve(error: TrasolveClientError) -> Self {
+        match error {
+            TrasolveClientError::Configuration(reason) => Self::new(
+                StatusCode::SERVICE_UNAVAILABLE,
+                "TRASOLVE_NOT_CONFIGURED",
+                "Trasolve integration is not configured.",
+                reason,
+            ),
+            TrasolveClientError::Timeout => Self::new(
+                StatusCode::GATEWAY_TIMEOUT,
+                "TRASOLVE_TIMEOUT",
+                "Trasolve did not respond before the timeout.",
+                error.to_string(),
+            ),
+            TrasolveClientError::Connection(reason) => Self::new(
+                StatusCode::SERVICE_UNAVAILABLE,
+                "TRASOLVE_UNAVAILABLE",
+                "Trasolve is unavailable.",
+                reason,
+            ),
+            TrasolveClientError::UpstreamHttp { status, body: _ } => Self::new(
+                if status >= 500 {
+                    StatusCode::SERVICE_UNAVAILABLE
+                } else {
+                    StatusCode::BAD_GATEWAY
+                },
+                "TRASOLVE_UPSTREAM_ERROR",
+                "Trasolve returned an unsuccessful response.",
+                format!("Trasolve returned HTTP {status}"),
+            ),
+            TrasolveClientError::InvalidResponse(reason) => Self::new(
+                StatusCode::BAD_GATEWAY,
+                "TRASOLVE_INVALID_RESPONSE",
+                "Trasolve returned an invalid response.",
+                reason,
+            ),
+        }
+    }
 }
 
 impl IntoResponse for ApiError {
@@ -184,14 +240,31 @@ where
     P: RoutingProvider + Send + Sync + 'static,
     S: RouteSolver + Send + Sync + 'static,
 {
+    router_with_trasolve(optimizer, None)
+}
+
+/// Builds the HTTP application with an optional reusable Trasolve client.
+pub fn router_with_trasolve<P, S>(
+    optimizer: RouteOptimizationService<P, S>,
+    trasolve: Option<TrasolveClient>,
+) -> Router
+where
+    P: RoutingProvider + Send + Sync + 'static,
+    S: RouteSolver + Send + Sync + 'static,
+{
     Router::new()
         .route("/health", get(health))
         .route("/optimize", post(optimize))
+        .route(
+            "/integration/trasolve/health",
+            get(trasolve_integration_health),
+        )
         .fallback(not_found)
         .method_not_allowed_fallback(method_not_allowed)
         .layer(DefaultBodyLimit::max(MAX_REQUEST_BODY_BYTES))
         .with_state(AppState {
             optimizer: Arc::new(optimizer),
+            trasolve,
         })
 }
 
@@ -211,6 +284,20 @@ async fn optimize(
         .map_err(ApiError::from_service)
 }
 
+async fn trasolve_integration_health(
+    State(state): State<AppState>,
+) -> Result<Json<TrasolveIntegrationHealthResponse>, ApiError> {
+    let client = state
+        .trasolve
+        .as_ref()
+        .ok_or_else(ApiError::trasolve_not_configured)?;
+    let trasolve = client.health().await.map_err(ApiError::from_trasolve)?;
+    Ok(Json(TrasolveIntegrationHealthResponse {
+        status: "ok",
+        trasolve,
+    }))
+}
+
 async fn method_not_allowed<B>(request: Request<B>) -> Response {
     let mut response = ApiError::new(
         StatusCode::METHOD_NOT_ALLOWED,
@@ -227,7 +314,10 @@ async fn method_not_allowed<B>(request: Request<B>) -> Response {
         response
             .headers_mut()
             .insert(header::ALLOW, HeaderValue::from_static("POST"));
-    } else if request.uri().path() == "/health" {
+    } else if matches!(
+        request.uri().path(),
+        "/health" | "/integration/trasolve/health"
+    ) {
         response
             .headers_mut()
             .insert(header::ALLOW, HeaderValue::from_static("GET,HEAD"));

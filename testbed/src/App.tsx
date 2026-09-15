@@ -1,4 +1,20 @@
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useEffect, useState } from "react";
+import {
+  Alignment,
+  Button,
+  ButtonGroup,
+  Callout,
+  Card,
+  Classes,
+  Divider,
+  Intent,
+  Navbar,
+  NavbarDivider,
+  NavbarGroup,
+  NavbarHeading,
+  Tag,
+  TextArea,
+} from "@blueprintjs/core";
 import {
   API_BASE,
   ROUTE_PATH,
@@ -9,14 +25,27 @@ import {
   type ApiResponse,
   type RouteResponse,
 } from "./api";
-import { LatencyChart, type Measurement } from "./LatencyChart";
 import { sample } from "./sample";
+
+type HealthState = "checking" | "online" | "offline";
+type RequestKind = "health" | "route";
+
+function healthIntent(health: HealthState) {
+  if (health === "online") return Intent.SUCCESS;
+  if (health === "offline") return Intent.DANGER;
+  return Intent.PRIMARY;
+}
+
+function statusIntent(status: number) {
+  if (status >= 500) return Intent.DANGER;
+  if (status >= 400) return Intent.WARNING;
+  if (status >= 200 && status < 300) return Intent.SUCCESS;
+  return Intent.NONE;
+}
 
 export function App() {
   const [input, setInput] = useState(JSON.stringify(sample, null, 2));
-  const [health, setHealth] = useState<"checking" | "online" | "offline">(
-    "checking",
-  );
+  const [health, setHealth] = useState<HealthState>("checking");
   const [busy, setBusy] = useState(false);
   const [validation, setValidation] = useState<{
     valid: boolean;
@@ -25,25 +54,12 @@ export function App() {
   const [error, setError] = useState("");
   const [response, setResponse] = useState<ApiResponse | null>(null);
   const [route, setRoute] = useState<RouteResponse | null>(null);
-  const [measurements, setMeasurements] = useState<Measurement[]>([]);
   const [copied, setCopied] = useState(false);
-  const sequence = useRef(0);
-  const locations = useMemo(() => {
-    try {
-      const value = JSON.parse(input);
-      return Array.isArray(value?.locations) ? value.locations.length : null;
-    } catch {
-      return null;
-    }
-  }, [input]);
 
   function validate() {
     try {
       const value = parseInput(input);
-      setValidation({
-        valid: true,
-        message: "Valid v0 input shape. Feasibility is checked by the backend.",
-      });
+      setValidation({ valid: true, message: "Valid" });
       return value;
     } catch (error) {
       setValidation({ valid: false, message: (error as Error).message });
@@ -51,38 +67,31 @@ export function App() {
     }
   }
 
-  function remember(value: ApiResponse, kind: Measurement["kind"]) {
-    setResponse(value);
-    const point = {
-      id: ++sequence.current,
-      latency: value.request_latency_ms,
-      kind,
-    };
-    setMeasurements((previous) => [...previous, point].slice(-40));
-  }
-
-  async function execute(kind: Measurement["kind"]) {
+  async function execute(kind: RequestKind) {
     const payload = kind === "route" ? validate() : null;
     if (kind === "route" && !payload) return;
+
     setBusy(true);
     setError("");
     setResponse(null);
+    setRoute(null);
     setCopied(false);
     if (kind === "health") setHealth("checking");
-    else setRoute(null);
+
     try {
       if (kind === "health") {
-        remember(await checkHealth(), kind);
+        setResponse(await checkHealth());
         setHealth("online");
       } else if (payload) {
         const result = await runRoute(payload);
-        remember(result.response, kind);
+        setResponse(result.response);
         setRoute(result.route);
       }
     } catch (error) {
       setError((error as Error).message);
-      if (error instanceof ApiError && error.response)
-        remember(error.response, kind);
+      if (error instanceof ApiError && error.response) {
+        setResponse(error.response);
+      }
       if (kind === "health") setHealth("offline");
     } finally {
       setBusy(false);
@@ -98,108 +107,88 @@ export function App() {
       ? JSON.stringify(response.body, null, 2)
       : response.raw
     : "";
+  const healthLabel =
+    health === "online"
+      ? "Online"
+      : health === "offline"
+        ? "Offline"
+        : "Checking";
+
   return (
-    <div className="workspace">
-      <header className="topbar">
-        <a className="brand" href="#top" aria-label="troute testbed">
-          <span className="brand-icon">↱</span>
-          <strong>troute</strong>
-          <span className="brand-divider">/</span>
-          <span>testbed</span>
-        </a>
-        <div className="topbar-meta">
-          <span className="tag">DEVELOPER TOOL</span>
-          <span className="branch">
-            <span>⑂</span> main deployment
-          </span>
-        </div>
-      </header>
+    <div className="app-shell">
+      <Navbar className="app-navbar">
+        <NavbarGroup align={Alignment.START}>
+          <NavbarHeading>troute testbed</NavbarHeading>
+          <NavbarDivider />
+          <code className={`${Classes.MONOSPACE_TEXT} navbar-endpoint`}>
+            {API_BASE} · {ROUTE_PATH ? `POST ${ROUTE_PATH}` : "GET /health only"}
+          </code>
+        </NavbarGroup>
+        <NavbarGroup align={Alignment.END}>
+          <span className={Classes.TEXT_MUTED}>API</span>
+          <Tag
+            aria-label={`API ${healthLabel}`}
+            icon={
+              health === "online"
+                ? "tick-circle"
+                : health === "offline"
+                  ? "error"
+                  : "time"
+            }
+            intent={healthIntent(health)}
+            minimal
+          >
+            {healthLabel}
+          </Tag>
+          <Button
+            aria-label="Refresh API health"
+            title="Refresh API health"
+            icon="refresh"
+            loading={busy && health === "checking"}
+            disabled={busy}
+            variant="minimal"
+            onClick={() => void execute("health")}
+          />
+        </NavbarGroup>
+      </Navbar>
 
-      <main id="top">
-        <div className="page-heading">
-          <div>
-            <div className="eyebrow">
-              ROUTING WORKBENCH <span>v0.1</span>
-            </div>
-            <h1>Inspect the journey.</h1>
-            <p>Compose an input. Run a request. Understand the result.</p>
-          </div>
-          <div className="connection">
-            <div className="connection-label">API CONNECTION</div>
-            <div className="connection-row">
-              <span className={`status ${health}`}>
-                <i />
-                API:{" "}
-                {health === "online"
-                  ? "Online"
-                  : health === "offline"
-                    ? "Offline"
-                    : "Checking"}
-              </span>
-              <button
-                className="icon-button"
-                aria-label="Refresh API health"
+      <main className="playground">
+        <Card className="workspace-card request-card" elevation={1} compact>
+          <div className="card-heading">
+            <h1 className={Classes.HEADING}>Request</h1>
+            <ButtonGroup size="small" variant="minimal">
+              <Button
+                icon="code"
                 disabled={busy}
-                onClick={() => void execute("health")}
+                onClick={() => {
+                  const parsed = validate();
+                  if (parsed) setInput(JSON.stringify(parsed, null, 2));
+                }}
               >
-                ↻
-              </button>
-            </div>
-            <code>{API_BASE}</code>
+                Format
+              </Button>
+              <Button
+                icon="reset"
+                disabled={busy}
+                onClick={() => {
+                  setInput(JSON.stringify(sample, null, 2));
+                  setValidation(null);
+                }}
+              >
+                Reset sample
+              </Button>
+            </ButtonGroup>
           </div>
-        </div>
+          <Divider />
 
-        {!ROUTE_PATH && (
-          <div className="notice">
-            <span className="notice-symbol">i</span>
-            <div>
-              <strong>Health check mode</strong>
-              <span>
-                The API currently exposes only <code>GET /health</code>. Route
-                execution and solver timing are not available yet.
-              </span>
-            </div>
-            <span className="tag">NO SOLVER RUN</span>
-          </div>
-        )}
-
-        <div className="main-grid">
-          <section className="panel input-panel" aria-labelledby="input-title">
-            <div className="panel-heading">
-              <div>
-                <span className="section-number">01</span>
-                <h2 id="input-title">Input</h2>
-              </div>
-              <span className="subtle mono">v0 · JSON</span>
-            </div>
-            <div className="editor-toolbar">
-              <span className="file-label">request.json</span>
-              <div>
-                <button
-                  className="text-button"
-                  onClick={() => {
-                    const parsed = validate();
-                    if (parsed) setInput(JSON.stringify(parsed, null, 2));
-                  }}
-                >
-                  Format
-                </button>
-                <button
-                  className="text-button"
-                  onClick={() => {
-                    setInput(JSON.stringify(sample, null, 2));
-                    setValidation(null);
-                  }}
-                >
-                  Load sample
-                </button>
-              </div>
-            </div>
-            <label className="sr-only" htmlFor="route-input">
-              Route input JSON
-            </label>
-            <textarea
-              id="route-input"
+          <div className="request-content">
+            <TextArea
+              aria-label="Request JSON"
+              className="json-editor"
+              fill
+              intent={
+                validation && !validation.valid ? Intent.DANGER : Intent.NONE
+              }
               spellCheck={false}
               autoCapitalize="off"
               value={input}
@@ -208,72 +197,103 @@ export function App() {
                 setValidation(null);
               }}
             />
-            <div className="editor-footer">
-              <span>{locations ?? "—"} locations</span>
-              <span>UTF-8 · JSON</span>
-            </div>
-            <p className="input-note">
-              Sample is an input-format example. Its placeholder Place IDs are
-              not connected to a routing provider.
-            </p>
-            {validation && (
-              <p
-                role={validation.valid ? "status" : "alert"}
-                className={`validation ${validation.valid ? "valid" : "invalid"}`}
+
+            {!ROUTE_PATH && (
+              <Callout compact intent={Intent.PRIMARY} title="Health-only mode">
+                Run checks GET /health; the request body is not submitted.
+              </Callout>
+            )}
+
+            {validation && !validation.valid && (
+              <Callout
+                compact
+                intent={Intent.DANGER}
+                role="alert"
+                title="Invalid request"
               >
                 {validation.message}
-              </p>
+              </Callout>
             )}
-            <div className="run-actions">
-              <button className="secondary" disabled={busy} onClick={validate}>
-                Validate JSON
-              </button>
-              <button
-                className="primary"
-                disabled={busy}
-                onClick={() => void execute(ROUTE_PATH ? "route" : "health")}
-              >
-                <span aria-hidden="true">{busy ? "◌" : "▶"}</span>
-                {busy
-                  ? "Running…"
-                  : ROUTE_PATH
-                    ? "Run route"
-                    : "Run health check"}
-              </button>
-            </div>
-            <p className="run-note">
-              {ROUTE_PATH
-                ? `POST ${ROUTE_PATH} · calculations run on the backend`
-                : "GET /health · input payload is not submitted"}
-            </p>
-          </section>
 
-          <div className="result-column">
-            <section
-              className="panel route-panel"
-              aria-labelledby="route-title"
-            >
-              <div className="panel-heading">
-                <div>
-                  <span className="section-number">02</span>
-                  <h2 id="route-title">Route result</h2>
-                </div>
-                <span className="tag neutral">
-                  {route ? "LAST ROUTE" : "AWAITING ROUTE API"}
-                </span>
+            <div className="request-actions">
+              <div aria-live="polite">
+                {validation?.valid && (
+                  <Tag icon="tick" intent={Intent.SUCCESS} minimal>
+                    Valid
+                  </Tag>
+                )}
               </div>
-              {route ? (
+              <ButtonGroup>
+                <Button icon="tick" disabled={busy} onClick={validate}>
+                  Validate
+                </Button>
+                <Button
+                  icon="play"
+                  intent={Intent.PRIMARY}
+                  loading={busy}
+                  disabled={busy}
+                  onClick={() => void execute(ROUTE_PATH ? "route" : "health")}
+                >
+                  Run
+                </Button>
+              </ButtonGroup>
+            </div>
+          </div>
+        </Card>
+
+        <Card className="workspace-card response-card" elevation={1} compact>
+          <div className="card-heading">
+            <h1 className={Classes.HEADING}>Response</h1>
+            <div className="response-metadata" aria-live="polite">
+              {response ? (
                 <>
-                  <div className="route-flow" aria-label="Visit order">
-                    {route.route.map((stop, index) => (
-                      <span key={`${stop.order}-${index}`}>
-                        <b>{stop.location_id}</b>
-                        {index < route.route.length - 1 && <i>→</i>}
-                      </span>
-                    ))}
+                  <Tag intent={statusIntent(response.status)}>
+                    HTTP {response.status}
+                  </Tag>
+                  <Tag icon="stopwatch" minimal>
+                    {response.request_latency_ms.toFixed(1)} ms
+                  </Tag>
+                </>
+              ) : (
+                <span className={Classes.TEXT_MUTED}>No response yet</span>
+              )}
+            </div>
+          </div>
+          <Divider />
+
+          <div className="response-content">
+            {error && (
+              <Callout
+                compact
+                intent={Intent.DANGER}
+                role="alert"
+                title="Request failed"
+              >
+                {error}
+              </Callout>
+            )}
+
+            {route && (
+              <>
+                <section className="route-summary" aria-labelledby="route-title">
+                  <div className="route-overview">
+                    <div>
+                      <h2 id="route-title" className={Classes.HEADING}>
+                        Route
+                      </h2>
+                      <div aria-label="Visit order">
+                        {route.route.map((stop) => stop.location_id).join(" → ")}
+                      </div>
+                    </div>
+                    <div>
+                      <span className={Classes.TEXT_MUTED}>Total travel</span>
+                      <strong>{route.total_travel_minutes} min</strong>
+                    </div>
                   </div>
                   <div className="table-scroll">
-                    <table>
+                    <table
+                      className={`${Classes.HTML_TABLE} ${Classes.HTML_TABLE_BORDERED} ${Classes.HTML_TABLE_STRIPED}`}
+                    >
                       <thead>
                         <tr>
                           <th>Order</th>
@@ -284,7 +304,7 @@ export function App() {
                       </thead>
                       <tbody>
                         {route.route.map((stop, index) => (
-                          <tr key={index}>
+                          <tr key={`${stop.order}-${index}`}>
                             <td>{stop.order}</td>
                             <td>{stop.location_id}</td>
                             <td>{stop.arrival_time}</td>
@@ -294,153 +314,46 @@ export function App() {
                       </tbody>
                     </table>
                   </div>
-                  <div className="route-total">
-                    Total travel time{" "}
-                    <strong>{route.total_travel_minutes} min</strong>
-                  </div>
-                </>
-              ) : (
-                <div className="empty-route">
-                  <div className="empty-path">
-                    <i />
-                    <span />
-                    <i />
-                    <span />
-                    <i />
-                  </div>
-                  <h3>No route has been calculated</h3>
-                  <p>
-                    {ROUTE_PATH
-                      ? "Submit an input to see visit order and arrival / departure times."
-                      : "Visit order and arrival / departure times will appear when a route endpoint is available."}
-                  </p>
-                  <div className="empty-columns">
-                    ORDER <span>LOCATION</span>
-                    <span>ARRIVAL</span>
-                    <span>DEPARTURE</span>
-                  </div>
-                </div>
-              )}
-            </section>
+                </section>
+                <Divider />
+              </>
+            )}
 
-            <section
-              className="panel performance-panel"
-              aria-labelledby="performance-title"
-            >
-              <div className="panel-heading">
-                <div>
-                  <span className="section-number">03</span>
-                  <h2 id="performance-title">Performance</h2>
-                </div>
-                <span className="subtle mono">this session</span>
-              </div>
-              <div className="metrics">
-                <div>
-                  <span>Input locations</span>
-                  <strong>{locations ?? "—"}</strong>
-                </div>
-                <div>
-                  <span>Last request</span>
-                  <strong>
-                    {response ? response.request_latency_ms.toFixed(1) : "—"}
-                    <small>ms</small>
-                  </strong>
-                </div>
-                <div>
-                  <span>Solver latency</span>
-                  <strong className="unavailable">—</strong>
-                  <small>not provided</small>
-                </div>
-                <div>
-                  <span>Last route travel</span>
-                  <strong>
-                    {route?.total_travel_minutes ?? "—"}
-                    <small>min</small>
-                  </strong>
-                </div>
-              </div>
-              <div className="chart-heading">
-                <h3>HTTP round-trip latency</h3>
-                <span>
-                  <i className="legend-dot health" />
-                  Health <i className="legend-dot route" />
-                  Route
-                </span>
-              </div>
-              <LatencyChart measurements={measurements} />
-              <div className="chart-footer">
-                <span>Last 40 completed HTTP requests · resets on refresh</span>
-                <button
-                  className="text-button"
-                  disabled={!measurements.length}
-                  onClick={() => setMeasurements([])}
+            <section className="raw-response" aria-labelledby="raw-title">
+              <div className="raw-heading">
+                <h2 id="raw-title" className={Classes.HEADING}>
+                  Raw response
+                </h2>
+                <Button
+                  icon={copied ? "tick" : "clipboard"}
+                  intent={copied ? Intent.SUCCESS : Intent.NONE}
+                  variant="minimal"
+                  size="small"
+                  disabled={!response}
+                  onClick={async () => {
+                    try {
+                      await navigator.clipboard.writeText(raw);
+                      setCopied(true);
+                    } catch {
+                      setError(
+                        "Copy failed. Select and copy the response manually.",
+                      );
+                    }
+                  }}
                 >
-                  Clear trace
-                </button>
+                  {copied ? "Copied" : "Copy"}
+                </Button>
               </div>
-              <p className="timing-note">
-                Browser → API → browser time, including proxy and response
-                transfer. This is not solver execution time.
-              </p>
-            </section>
-          </div>
-        </div>
-
-        <section className="panel raw-panel" aria-labelledby="raw-title">
-          <div className="panel-heading">
-            <div>
-              <span className="section-number">04</span>
-              <h2 id="raw-title">Raw response</h2>
-              {response && (
-                <span
-                  className={`http-status ${response.status >= 400 ? "failed" : ""}`}
-                >
-                  HTTP {response.status}
-                </span>
-              )}
-            </div>
-            <div className="raw-actions">
-              <span className="subtle mono">
-                {response
-                  ? `${response.method} ${response.path}`
-                  : "No response"}
-              </span>
-              <button
-                className="text-button"
-                disabled={!response}
-                onClick={async () => {
-                  try {
-                    await navigator.clipboard.writeText(raw);
-                    setCopied(true);
-                  } catch {
-                    setError(
-                      "Copy failed. Select and copy the raw response manually.",
-                    );
-                  }
-                }}
+              <pre
+                className={`${Classes.CODE_BLOCK} raw-output`}
+                aria-label="Raw API response"
+                aria-busy={busy}
               >
-                {copied ? "Copied" : "Copy JSON"}
-              </button>
-            </div>
+                {raw || (busy ? "Waiting for the API…" : "No response yet.")}
+              </pre>
+            </section>
           </div>
-          {error && (
-            <div className="request-error" role="alert">
-              <strong>Request failed</strong>
-              <span>{error}</span>
-            </div>
-          )}
-          <pre aria-label="Raw API response">
-            {raw || (busy ? "Waiting for the API…" : "No response received.")}
-          </pre>
-        </section>
-        <footer>
-          <span>
-            <b>troute</b> / developer testbed
-          </span>
-          <span>
-            Local session only <i /> No benchmark persistence
-          </span>
-        </footer>
+        </Card>
       </main>
     </div>
   );

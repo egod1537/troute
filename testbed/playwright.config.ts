@@ -3,7 +3,11 @@ import { defineConfig, devices } from "@playwright/test";
 export default defineConfig({
   testDir: "./tests",
   fullyParallel: true,
-  use: { ...devices["Desktop Chrome"], trace: "retain-on-failure" },
+  use: {
+    ...devices["Desktop Chrome"],
+    trace: "retain-on-failure",
+    permissions: ["clipboard-read", "clipboard-write"],
+  },
   projects: [
     {
       name: "health-only",

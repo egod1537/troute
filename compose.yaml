@@ -3,7 +3,8 @@ services:
     build: .
     restart: unless-stopped
     environment:
-      TROUTE_PORT: ${TROUTE_PORT:-8080}
+      - TROUTE_PORT=${TROUTE_PORT:-8080}
+      - TRASOLVE_BASE_URL
     ports:
       - "127.0.0.1:${TROUTE_HOST_PORT:-8080}:${TROUTE_PORT:-8080}"
   testbed:

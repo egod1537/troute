@@ -1,14 +1,21 @@
 use axum::{
     body::Body,
+    extract::State,
     http::{header, Method, Request, StatusCode},
+    response::IntoResponse,
+    routing::get,
     Router,
 };
 use http_body_util::BodyExt;
 use serde_json::{json, Value};
+use std::time::Duration;
+use tokio::{net::TcpListener, task::JoinHandle, time::sleep};
 use tower::ServiceExt;
 use troute::{
     development::{DevelopmentRouteSolver, DevelopmentRoutingProvider},
-    http, RouteOptimizationService,
+    http,
+    trasolve::TrasolveClient,
+    RouteOptimizationService,
 };
 
 fn app() -> Router {
@@ -16,6 +23,13 @@ fn app() -> Router {
         DevelopmentRoutingProvider,
         DevelopmentRouteSolver,
     ))
+}
+
+fn app_with_trasolve(trasolve: TrasolveClient) -> Router {
+    http::router_with_trasolve(
+        RouteOptimizationService::new(DevelopmentRoutingProvider, DevelopmentRouteSolver),
+        Some(trasolve),
+    )
 }
 
 fn valid_request() -> Value {
@@ -42,11 +56,21 @@ fn valid_request() -> Value {
 }
 
 async fn send(method: Method, path: &str, content_type: Option<&str>, body: String) -> Response {
+    send_to(app(), method, path, content_type, body).await
+}
+
+async fn send_to(
+    app: Router,
+    method: Method,
+    path: &str,
+    content_type: Option<&str>,
+    body: String,
+) -> Response {
     let mut builder = Request::builder().method(method).uri(path);
     if let Some(content_type) = content_type {
         builder = builder.header(header::CONTENT_TYPE, content_type);
     }
-    let response = app()
+    let response = app
         .oneshot(builder.body(Body::from(body)).unwrap())
         .await
         .unwrap();
@@ -72,6 +96,106 @@ async fn health_remains_available() {
     let response = send(Method::GET, "/health", None, String::new()).await;
     assert_eq!(response.status, StatusCode::OK);
     assert_eq!(response.body, json!({ "status": "ok" }));
+}
+
+#[tokio::test]
+async fn trasolve_integration_health_succeeds_with_a_local_mock() {
+    let (base_url, _server) = spawn_trasolve_mock(
+        StatusCode::OK,
+        r#"{"status":"ok","service":"trasolve"}"#,
+        Duration::ZERO,
+    )
+    .await;
+    let response = send_to(
+        app_with_trasolve(TrasolveClient::new(base_url).unwrap()),
+        Method::GET,
+        "/integration/trasolve/health",
+        None,
+        String::new(),
+    )
+    .await;
+
+    assert_eq!(response.status, StatusCode::OK);
+    assert_eq!(
+        response.body,
+        json!({
+            "status": "ok",
+            "trasolve": { "status": "ok", "service": "trasolve" }
+        })
+    );
+}
+
+#[tokio::test]
+async fn trasolve_integration_health_is_deterministic_when_not_configured() {
+    let response = send(
+        Method::GET,
+        "/integration/trasolve/health",
+        None,
+        String::new(),
+    )
+    .await;
+
+    assert_error(
+        response,
+        StatusCode::SERVICE_UNAVAILABLE,
+        "TRASOLVE_NOT_CONFIGURED",
+    );
+}
+
+#[tokio::test]
+async fn trasolve_integration_timeout_maps_to_gateway_timeout() {
+    let (base_url, _server) = spawn_trasolve_mock(
+        StatusCode::OK,
+        r#"{"status":"ok","service":"trasolve"}"#,
+        Duration::from_millis(100),
+    )
+    .await;
+    let client = TrasolveClient::with_timeout(base_url, Duration::from_millis(10)).unwrap();
+    let response = send_to(
+        app_with_trasolve(client),
+        Method::GET,
+        "/integration/trasolve/health",
+        None,
+        String::new(),
+    )
+    .await;
+
+    assert_error(response, StatusCode::GATEWAY_TIMEOUT, "TRASOLVE_TIMEOUT");
+}
+
+#[tokio::test]
+async fn malformed_trasolve_response_maps_to_bad_gateway() {
+    let (base_url, _server) = spawn_trasolve_mock(StatusCode::OK, "not-json", Duration::ZERO).await;
+    let response = send_to(
+        app_with_trasolve(TrasolveClient::new(base_url).unwrap()),
+        Method::GET,
+        "/integration/trasolve/health",
+        None,
+        String::new(),
+    )
+    .await;
+
+    assert_error(
+        response,
+        StatusCode::BAD_GATEWAY,
+        "TRASOLVE_INVALID_RESPONSE",
+    );
+}
+
+#[tokio::test]
+async fn optimize_does_not_contact_the_configured_trasolve_client() {
+    let client = TrasolveClient::new("http://127.0.0.1:1").unwrap();
+    let response = send_to(
+        app_with_trasolve(client),
+        Method::POST,
+        "/optimize",
+        Some("application/json"),
+        valid_request().to_string(),
+    )
+    .await;
+
+    assert_eq!(response.status, StatusCode::OK);
+    assert_eq!(response.body["total_travel_minutes"], 30);
 }
 
 #[tokio::test]
@@ -222,4 +346,36 @@ fn assert_error(response: Response, status: StatusCode, code: &str) {
     assert_eq!(response.headers[header::CONTENT_TYPE], "application/json");
     assert_eq!(response.body["error"]["code"], code);
     assert!(response.body["error"]["message"].is_string());
+}
+
+#[derive(Clone)]
+struct MockTrasolveResponse {
+    status: StatusCode,
+    body: &'static str,
+    delay: Duration,
+}
+
+async fn spawn_trasolve_mock(
+    status: StatusCode,
+    body: &'static str,
+    delay: Duration,
+) -> (String, JoinHandle<()>) {
+    async fn respond(State(response): State<MockTrasolveResponse>) -> impl IntoResponse {
+        sleep(response.delay).await;
+        (response.status, response.body)
+    }
+
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    let app = Router::new()
+        .route("/api/internal/troute/health", get(respond))
+        .with_state(MockTrasolveResponse {
+            status,
+            body,
+            delay,
+        });
+    let server = tokio::spawn(async move {
+        axum::serve(listener, app).await.unwrap();
+    });
+    (format!("http://{address}"), server)
 }
