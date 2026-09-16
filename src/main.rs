@@ -9,7 +9,6 @@ use troute::{
     http,
     observation::JobObservationRecorder,
     storage::{FileJobStore, FileJobTimelineStore, JobStore},
-    trasolve::TrasolveClient,
     RouteOptimizationService,
 };
 
@@ -33,11 +32,6 @@ async fn run() -> Result<(), Box<dyn Error>> {
         Err(env::VarError::NotPresent) => 8080,
         Err(error) => return Err(error.into()),
     };
-    let trasolve = match env::var("TRASOLVE_BASE_URL") {
-        Ok(base_url) => Some(TrasolveClient::new(base_url)?),
-        Err(env::VarError::NotPresent) => None,
-        Err(error) => return Err(error.into()),
-    };
     let data_dir = match env::var("TROUTE_DATA_DIR") {
         Ok(value) if !value.trim().is_empty() => PathBuf::from(value),
         Ok(_) => return Err("TROUTE_DATA_DIR must not be empty".into()),
@@ -49,20 +43,12 @@ async fn run() -> Result<(), Box<dyn Error>> {
     let observation = JobObservationRecorder::new(Arc::new(FileJobTimelineStore::new(&data_dir)?));
     let address = SocketAddr::from(([0, 0, 0, 0], port));
     println!("troute server starting; bind address: {address}");
-    println!(
-        "Trasolve reverse integration: {}",
-        if trasolve.is_some() {
-            "configured"
-        } else {
-            "not configured"
-        }
-    );
     println!("Local job data directory: {}", data_dir.display());
     println!("Recovered interrupted jobs: {recovered_jobs}");
     let listener = TcpListener::bind(address).await?;
     let optimizer =
         RouteOptimizationService::new(DevelopmentRoutingProvider, DevelopmentRouteSolver);
-    let app = http::router_with_storage(optimizer, trasolve, Some(observation), Some(job_store));
+    let app = http::router_with_storage(optimizer, Some(observation), Some(job_store));
 
     println!("troute server listening on http://{address}");
     axum::serve(listener, app)

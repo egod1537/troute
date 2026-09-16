@@ -32,21 +32,19 @@ const requestFor = (jobId: string) => ({
 function recordFor(job: ServerJob) {
   return {
     request: requestFor(job.id),
-    state: {
-      job_id: job.id,
-      status: job.status,
-      stage: job.status === "running" ? "solving" : job.status,
-      progress: job.progress,
-      last_message: `${job.status} message`,
-      created_at: job.createdAt,
-      updated_at: job.updatedAt,
-      completed_at:
-        job.status === "completed" ||
-        job.status === "failed" ||
-        job.status === "cancelled"
-          ? job.updatedAt
-          : null,
-    },
+    job_id: job.id,
+    status: job.status,
+    stage: job.status === "running" ? "solving" : job.status,
+    progress: job.progress,
+    last_message: `${job.status} message`,
+    created_at: job.createdAt,
+    updated_at: job.updatedAt,
+    completed_at:
+      job.status === "completed" ||
+      job.status === "failed" ||
+      job.status === "cancelled"
+        ? job.updatedAt
+        : null,
     result: null,
     error: null,
   };

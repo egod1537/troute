@@ -74,6 +74,7 @@ pub struct StoredJobError {
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
 pub struct StoredJob {
     pub request: OptimizeRouteRequest,
+    #[serde(flatten)]
     pub state: JobState,
     pub result: Option<OptimizeRouteResponse>,
     pub error: Option<StoredJobError>,
@@ -971,8 +972,8 @@ mod tests {
         let mut first = recorder.entry(
             "pair-1",
             ObservationDirection::Request,
+            ObservationPeer::Testbed,
             ObservationPeer::Troute,
-            ObservationPeer::Trasolve,
         );
         first.method = Some("POST".to_owned());
         recorder.append("job-1", first);
@@ -981,8 +982,8 @@ mod tests {
             recorder.entry(
                 "pair-1",
                 ObservationDirection::Response,
-                ObservationPeer::Trasolve,
                 ObservationPeer::Troute,
+                ObservationPeer::Testbed,
             ),
         );
 

@@ -25,7 +25,6 @@ pub type ObservationHeaders = BTreeMap<String, String>;
 pub enum ObservationPeer {
     Testbed,
     Troute,
-    Trasolve,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize)]
@@ -266,8 +265,8 @@ mod tests {
             "RESPONSE"
         );
         assert_eq!(
-            serde_json::to_value(ObservationPeer::Trasolve).unwrap(),
-            "trasolve"
+            serde_json::to_value(ObservationPeer::Troute).unwrap(),
+            "troute"
         );
     }
 

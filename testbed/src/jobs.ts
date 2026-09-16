@@ -17,8 +17,8 @@ export interface TimelineEntry {
   pair_id: string;
   timestamp_ms: number;
   direction: "REQUEST" | "RESPONSE";
-  source: "testbed" | "troute" | "trasolve";
-  target: "testbed" | "troute" | "trasolve";
+  source: "testbed" | "troute";
+  target: "testbed" | "troute";
   method?: string | null;
   path?: string | null;
   status?: number | null;
@@ -65,20 +65,20 @@ export function mergeStoredJob(
     ? `${record.error.code}: ${record.error.message}${record.error.detail ? ` (${record.error.detail})` : ""}`
     : undefined;
   return {
-    id: record.state.job_id,
-    status: record.state.status,
-    createdAt: record.state.created_at,
-    updatedAt: record.state.updated_at,
-    completedAt: record.state.completed_at ?? undefined,
-    progress: record.state.progress,
-    stage: record.state.stage ?? undefined,
-    message: record.state.last_message ?? undefined,
+    id: record.job_id,
+    status: record.status,
+    createdAt: record.created_at,
+    updatedAt: record.updated_at,
+    completedAt: record.completed_at ?? undefined,
+    progress: record.progress,
+    stage: record.stage ?? undefined,
+    message: record.last_message ?? undefined,
     error,
     request: record.request,
     timeline: existing?.timeline ?? [],
     response: existing?.response,
     route: record.result ?? existing?.route,
-    serverUpdatedAt: record.state.updated_at,
+    serverUpdatedAt: record.updated_at,
   };
 }
 

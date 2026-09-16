@@ -51,13 +51,15 @@ troute
 ```
 
 The component interfaces and v0 data flow are defined. The HTTP server exposes
-`GET /health`, `POST /optimize`, and the reverse-integration verification endpoint
-`GET /integration/trasolve/health`. The optimize endpoint executes the existing
-provider -> solver -> schedule service pipeline. Its currently wired provider
-and solver are deterministic development placeholders; real travel-time lookup,
-actual optimization, Google Maps integration, and caching are not implemented.
-Trasolve user browsers call the Trasolve backend, which calls troute over HTTP.
-The separate developer testbed uses its own same-origin API proxy.
+`GET /health`, `POST /optimize`, and polling APIs under `/integration/jobs`.
+The optimize endpoint executes the existing provider -> solver -> schedule
+service pipeline and persists progress, result, error, cancellation, and
+observation data locally. Its currently wired provider and solver are
+deterministic development placeholders; real travel-time lookup, actual
+optimization, Google Maps integration, and caching are not implemented.
+Trasolve calls troute in one direction only. troute neither requires a Trasolve
+address nor sends callbacks to it. The separate developer testbed uses its own
+same-origin API proxy.
 
 ## Tech Stack
 
@@ -121,11 +123,9 @@ Invalid values fail startup with an error on stderr. Startup, bind address,
 and shutdown messages go to stdout. The binary does not load `.env` itself;
 set variables in the shell for `cargo run`.
 
-`TRASOLVE_BASE_URL` optionally configures reverse server-to-server calls to the
-Trasolve backend. It has no implicit default. A missing value leaves troute and
-its existing endpoints available; an invalid configured URL fails startup with
-a clear configuration error. Trailing slashes are normalized. The outbound
-client uses a five-second timeout and is reused across requests.
+troute starts without any Trasolve-specific environment variable. Consumers
+configure troute's base URL on their side and poll the Job APIs for progress and
+terminal results.
 
 ## HTTP API
 
@@ -235,165 +235,58 @@ does not use Google travel data**. The implementations are isolated in
 or wire contract. Schedule infeasibility is returned as an error; the
 placeholders do not alter request semantics or invent a successful route.
 
-### Trasolve integration
+### One-way Job API integration
 
-The supported call path is:
+The supported dependency direction is `Trasolve -> troute` only:
 
 ```text
-Trasolve browser/client
-  -> POST /api/troute/optimize on the Trasolve backend
-  -> POST /optimize on troute
-  -> RouteOptimizationService
-  -> provider -> solver -> schedule
+Trasolve
+  ├─ POST /optimize
+  ├─ GET /integration/jobs?limit=50
+  ├─ GET /integration/jobs/{job_id}
+  ├─ GET /integration/jobs/{job_id}/timeline
+  └─ POST /integration/jobs/{job_id}/cancel
+        ↓
+      troute
 ```
 
-Run troute with Docker Compose on the Mac mini host, then start a host-native
-Trasolve backend with:
+troute validates and persists the request, records local progress through
+`accepted`, `building_matrix`, `solving`, and `scheduling`, then stores either
+the result or error and its terminal state. It performs no HTTP request to
+Trasolve. A consumer can poll the Job detail endpoint to read status, progress,
+result, error, and cancellation state:
+
+```json
+{
+  "job_id": "route-example",
+  "status": "running",
+  "stage": "solving",
+  "progress": 60,
+  "last_message": "Solving route.",
+  "created_at": 1789520000000,
+  "updated_at": 1789520005000,
+  "completed_at": null,
+  "request": {},
+  "result": null,
+  "error": null
+}
+```
+
+This supports a local Trasolve calling local troute, local Trasolve calling the
+deployed troute, and deployed Trasolve calling deployed troute. Configure only
+the caller, for example:
 
 ```sh
+# Host-native Trasolve -> Compose troute
 TROUTE_BASE_URL=http://127.0.0.1:18080 npm run dev -w @trasolve/backend
+
+# Local Trasolve -> deployed troute
+TROUTE_BASE_URL=https://troute.mangagaki.net npm run dev -w @trasolve/backend
 ```
 
 When both services share a Docker network, use `http://troute:8080` instead.
-For a directly executed `cargo run`, the non-container default remains
-`http://127.0.0.1:8080` unless `TROUTE_PORT` is overridden.
-
-`POST http://127.0.0.1:43127/api/troute/optimize` accepts the same request body.
-The Trasolve browser never connects directly to troute. The public
-`POST https://troute.mangagaki.net/optimize` endpoint will become available
-after this `impl` change is reviewed, merged to `main`, and deployed by the
-existing main watcher.
-
-### Reverse Trasolve connectivity
-
-troute can independently verify the reverse communication path:
-
-```text
-external caller
-  -> GET /integration/trasolve/health on troute
-  -> TrasolveClient
-  -> GET /api/internal/troute/health on Trasolve
-  -> troute response
-```
-
-This is connectivity infrastructure only. It does not fetch Trip data, send
-optimization results, or make `RouteOptimizationService`, the routing provider,
-the solver, schedule calculation, or `/optimize` depend on Trasolve.
-
-Start the Trasolve backend from its repository, verify it directly, and then
-start troute with its base URL:
-
-```sh
-# In the Trasolve repository (impl branch):
-npm run dev -w @trasolve/backend
-
-# In separate terminals:
-curl -i http://127.0.0.1:43127/api/internal/troute/health
-
-TRASOLVE_BASE_URL=http://127.0.0.1:43127 cargo run
-curl -i http://127.0.0.1:8080/integration/trasolve/health
-```
-
-The integration endpoint returns HTTP 200 when Trasolve returns its expected
-typed contract:
-
-```json
-{
-  "status": "ok",
-  "trasolve": {
-    "status": "ok",
-    "service": "trasolve"
-  }
-}
-```
-
-When `TRASOLVE_BASE_URL` is absent, the endpoint returns HTTP 503 with
-`TRASOLVE_NOT_CONFIGURED`; troute still starts and `/health` and `/optimize`
-continue to work. Timeouts return HTTP 504 with `TRASOLVE_TIMEOUT`. Connection
-failures and upstream 5xx responses return HTTP 503. Unexpected response bodies
-and upstream contract mismatches return HTTP 502. All failures use the existing
-JSON error envelope. No browser CORS or service authentication is added.
-
-### Job event contract foundation
-
-Trasolve supplies `job_id` in each optimize request. troute treats it as an
-opaque identifier and must use the same value to correlate future callbacks:
-
-```text
-POST {TRASOLVE_BASE_URL}/api/internal/troute/jobs/{job_id}/events
-```
-
-The reusable callback sender posts this common JSON envelope:
-
-```json
-{
-  "sequence": 1,
-  "type": "progress",
-  "data": {}
-}
-```
-
-Event types are exactly `progress`, `error`, `result`, and `cancelled`. Sequence
-numbers are per job, begin at 1, and increment for each event; there is no
-process-wide sequence.
-
-### Progress and error callbacks
-
-When `TRASOLVE_BASE_URL` is configured, `/optimize` reports these coarse,
-real pipeline boundaries in order:
-
-- `accepted` at 0: the request entered the optimization pipeline;
-- `building_matrix` at 20: travel-time matrix construction is starting;
-- `solving` at 60: visit-order optimization is starting;
-- `scheduling` at 85: itinerary schedule construction is starting.
-
-These values identify stages, not solver iterations. Progress never reports
-100; a terminal `result` event represents successful completion.
-
-Failures produce an `error` event whose data contains `code`, `message`, and
-`detail`. Stable codes are `INVALID_REQUEST`, `ROUTING_UNAVAILABLE`,
-`NO_FEASIBLE_ROUTE`, `SOLVER_ERROR`, and `SCHEDULE_ERROR`. Solver and schedule
-feasibility failures both use `NO_FEASIBLE_ROUTE`; unexpected failures retain
-their component-specific code. Details contain concise error text and never a
-Rust backtrace.
-
-Callback delivery is best-effort relative to the optimize HTTP response.
-Events are queued synchronously, delivered sequentially by an asynchronous
-sender, and drained for a bounded period before the response returns. A
-callback timeout or rejection is logged but never replaces the optimization
-result or its original error. Without `TRASOLVE_BASE_URL`, reporting is a no-op
-and optimization remains fully available. Solver behavior is unchanged.
-
-### Successful result lifecycle
-
-After routing, solving, and scheduling succeed, troute constructs the same
-`OptimizeRouteResponse` returned by `/optimize` and queues it as the final event:
-
-```json
-{
-  "sequence": 5,
-  "type": "result",
-  "data": {
-    "route": [],
-    "total_travel_minutes": 0
-  }
-}
-```
-
-The `data` value uses the canonical optimize response type rather than a
-separate callback DTO. A successful request therefore follows this lifecycle:
-
-```text
-Trasolve creates job_id
-  -> troute receives POST /optimize
-  -> accepted -> building_matrix -> solving -> scheduling
-  -> result callback
-  -> synchronous OptimizeRouteResponse
-```
-
-`result` is emitted exactly once and last. Error paths emit `error` instead and
-never emit `result`. As with progress and error delivery, a failed or timed-out
-result callback is logged but does not change a successful HTTP response.
+For direct `cargo run`, troute defaults to `http://127.0.0.1:8080` unless
+`TROUTE_PORT` is overridden. No reciprocal base URL is configured in troute.
 
 ### Job cancellation
 
@@ -404,35 +297,30 @@ POST /integration/jobs/{job_id}/cancel
 ```
 
 Only `pending` and `running` jobs are cancellable. The endpoint returns the
-terminal `cancelled` state, signals the service and solver cancellation token,
-and queues a `cancelled` callback containing `Job cancelled by request`.
-Cancellation is checked at every major pipeline boundary and is available to
-solver implementations through `SolverInput`. The synchronous `/optimize`
-request returns HTTP 409 with `JOB_CANCELLED` after it stops.
+terminal `cancelled` state and signals the service and solver cancellation
+token. Cancellation is checked at every major pipeline boundary and is
+available to solver implementations through `SolverInput`. The synchronous
+`/optimize` request returns HTTP 409 with `JOB_CANCELLED` after it stops.
 
 Terminal transition is guarded by the file store lock: whichever of result,
 failure, or cancellation is persisted first wins. A cancellation winner keeps
 the last progress value, sets `completed_at`, writes no `error.json` or
-`result.json`, and suppresses error/result callbacks. Cancelling a completed,
-failed, or already cancelled job returns `JOB_NOT_CANCELLABLE`; an unknown job
-returns `JOB_NOT_FOUND`. Callback failure never changes the local cancelled
-state.
+`result.json`. Cancelling a completed, failed, or already cancelled job returns
+`JOB_NOT_CANCELLABLE`; an unknown job returns `JOB_NOT_FOUND`.
 
-For local end-to-end verification, run Trasolve and troute with reciprocal base
-URLs, submit an optimization through Trasolve, then inspect the returned job:
+For local end-to-end verification, submit an optimization through Trasolve and
+then poll the same Job directly from troute:
 
 ```sh
 curl -i -X POST http://127.0.0.1:43127/api/troute/optimize \
   -H 'Content-Type: application/json' \
   --data @optimize-request.json
 
-curl -i http://127.0.0.1:43127/api/internal/troute/jobs/JOB_ID
+curl -i http://127.0.0.1:18080/integration/jobs/JOB_ID
 ```
 
-After successful delivery, the job is expected to be `completed` with progress
-100, a populated result, and an event history containing the coarse progress
-events followed by the result event. The Trasolve job endpoint owns that stored
-state; troute remains synchronous and does not write Trip storage directly.
+After success, the job is `completed` with progress 100 and a populated result.
+troute owns this local execution record; the consumer only reads it.
 
 ### Local job records and observation timeline
 
@@ -473,9 +361,11 @@ GET /integration/jobs/{job_id}/timeline
 An unknown timeline returns HTTP 200 with an empty `entries` list; an unknown
 job detail returns 404. Timeline entries are sorted by millisecond timestamp,
 preserving file insertion order when timestamps match. Each real HTTP exchange
-has separate `REQUEST` and `RESPONSE` entries sharing a `pair_id`. Callback HTTP
-rejections, connection failures, and timeouts remain visible as response
-entries; failures without an HTTP response have no status.
+has separate `REQUEST` and `RESPONSE` entries sharing a `pair_id`. The timeline
+contains traffic observed by troute, including optimize and cancellation HTTP
+exchanges and successful Job detail inspection requests. It contains no
+fabricated browser traffic or removed Trasolve callback entries. Unknown Job
+lookups are not recorded, so observation cannot create a phantom Job directory.
 
 Only `Content-Type`, `Accept`, and `User-Agent` headers are eligible for
 recording. Authorization, cookies, API keys, and other headers are never stored.
@@ -501,15 +391,14 @@ to `0.0.0.0` inside the container, so containers on its Docker network can reach
 it. The application/container port defaults to `8080`; the host port defaults
 to `18080` because SFTPGo uses host port `8080` on the deployment Mac.
 
-Compose passes through `TRASOLVE_BASE_URL` when it is set, sets
-`TROUTE_DATA_DIR=/data`, and bind-mounts `./runtime/troute:/data`. Both
+Compose sets `TROUTE_DATA_DIR=/data` and bind-mounts
+`./runtime/troute:/data`. Both
 `.local/` and `runtime/` are ignored by Git. `docker compose build`, `up`, and
 the deployment script do not remove the host runtime directory, so records
 survive image and container replacement. Inside the troute container,
-`127.0.0.1` refers to that container, not the Docker host or a Trasolve
-container. Set the backend URL to an address actually reachable from the
-troute container, such as the Trasolve Compose service name when both services
-share a network. The source code makes no host-specific networking assumption.
+`127.0.0.1` refers to that container. Consumers on the same Docker network use
+`http://troute:8080`; host-native consumers use the published loopback port.
+troute has no outbound Trasolve configuration.
 
 To make the host and container ports explicit, create a local configuration:
 

@@ -62,7 +62,7 @@ export function useJobListRefresh({
         if (controller.signal.aborted || !mountedRef.current) return;
 
         const recordsById = new Map(
-          records.map((record) => [record.state.job_id, record]),
+          records.map((record) => [record.job_id, record]),
         );
         const serverIds = new Set(summaries.map((summary) => summary.job_id));
         const mergedServerJobs = summaries.flatMap((summary) => {

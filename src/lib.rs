@@ -17,14 +17,10 @@ pub mod schedule;
 pub mod service;
 pub mod solver;
 pub mod storage;
-pub mod trasolve;
 
 pub use api::{OptimizeRouteRequest, OptimizeRouteResponse};
 pub use cancellation::CancellationToken;
-pub use events::{
-    CancelledEventData, ErrorEventData, JobEvent, JobEventContext, JobEventType,
-    OptimizationErrorCode, OptimizationEventReporter, ProgressEventData, ProgressStage,
-};
+pub use events::{OptimizationErrorCode, OptimizationEventReporter, ProgressStage};
 pub use observation::{
     InMemoryJobTimelineStore, JobObservationRecorder, JobTimelineEntry, JobTimelineStore,
     ObservationDirection, ObservationPeer,

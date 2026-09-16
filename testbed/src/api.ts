@@ -57,9 +57,8 @@ export interface StoredJobError {
   detail: string;
 }
 
-export interface StoredJobRecord {
+export interface StoredJobRecord extends StoredJobState {
   request: RouteInput;
-  state: StoredJobState;
   result?: RouteResponse | null;
   error?: StoredJobError | null;
 }
@@ -69,8 +68,8 @@ export interface StoredTimelineEntry {
   pair_id: string;
   timestamp_ms: number;
   direction: "REQUEST" | "RESPONSE";
-  source: "testbed" | "troute" | "trasolve";
-  target: "testbed" | "troute" | "trasolve";
+  source: "testbed" | "troute";
+  target: "testbed" | "troute";
   method?: string | null;
   path?: string | null;
   status?: number | null;
