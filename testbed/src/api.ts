@@ -26,7 +26,12 @@ export interface RouteResponse {
   total_travel_minutes: number;
 }
 
-export type StoredJobStatus = "pending" | "running" | "completed" | "failed";
+export type StoredJobStatus =
+  | "pending"
+  | "running"
+  | "completed"
+  | "failed"
+  | "cancelled";
 
 export interface StoredJobState {
   job_id: string;
@@ -280,4 +285,30 @@ export async function getStoredTimeline(
     entries: StoredTimelineEntry[];
   }>(`/integration/jobs/${encodeURIComponent(jobId)}/timeline`);
   return response.entries;
+}
+
+export async function cancelStoredJob(
+  jobId: string,
+): Promise<{ job_id: string; status: "cancelled" }> {
+  const response = await fetch(
+    `${API_BASE}/integration/jobs/${encodeURIComponent(jobId)}/cancel`,
+    { method: "POST", cache: "no-store" },
+  );
+  const body = (await response.json()) as {
+    job_id?: string;
+    status?: "cancelled";
+    error?: { message?: string; detail?: string };
+  };
+  if (!response.ok) {
+    const detail = body.error?.detail ? ` (${body.error.detail})` : "";
+    throw new Error(
+      body.error?.message
+        ? `${body.error.message}${detail}`
+        : `HTTP ${response.status} ${response.statusText}`,
+    );
+  }
+  if (body.job_id !== jobId || body.status !== "cancelled") {
+    throw new Error("Job 취소 응답 형식이 올바르지 않습니다.");
+  }
+  return { job_id: body.job_id, status: body.status };
 }

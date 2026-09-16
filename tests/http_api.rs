@@ -12,7 +12,7 @@ use std::{
     fs,
     path::PathBuf,
     sync::{
-        atomic::{AtomicU64, Ordering},
+        atomic::{AtomicBool, AtomicU64, Ordering},
         Arc,
     },
     time::Duration,
@@ -26,10 +26,32 @@ use troute::{
         JobObservationRecorder, JobTimelineEntry, JobTimelineStore, ObservationDirection,
         ObservationPeer,
     },
-    storage::{FileJobStore, FileJobTimelineStore},
+    solver::{RouteSolver, SolverError, SolverInput, SolverSolution},
+    storage::{FileJobStore, FileJobTimelineStore, JobStatus, JobStore},
     trasolve::TrasolveClient,
     RouteOptimizationService,
 };
+
+#[derive(Clone)]
+struct SlowCancellationSolver {
+    started: Arc<AtomicBool>,
+}
+
+impl RouteSolver for SlowCancellationSolver {
+    fn solve(&self, input: SolverInput<'_>) -> Result<SolverSolution, SolverError> {
+        self.started.store(true, Ordering::Release);
+        let started = std::time::Instant::now();
+        while !input.cancellation.is_cancelled() {
+            if started.elapsed() > Duration::from_secs(5) {
+                return Err(SolverError::Failed(
+                    "test solver was not cancelled before timeout".to_owned(),
+                ));
+            }
+            std::thread::sleep(Duration::from_millis(1));
+        }
+        Err(SolverError::Cancelled)
+    }
+}
 
 static NEXT_TEST_DIRECTORY: AtomicU64 = AtomicU64::new(1);
 
@@ -330,6 +352,257 @@ async fn persistent_job_failure_writes_error_and_terminal_state() {
         .0
         .join("jobs/route-persistent-failure/result.json")
         .exists());
+}
+
+#[tokio::test]
+async fn cancel_endpoint_handles_pending_terminal_duplicate_and_unknown_jobs() {
+    let temporary = TestDirectory::new();
+    let store = Arc::new(FileJobStore::new(&temporary.0).unwrap());
+    let observation =
+        JobObservationRecorder::new(Arc::new(FileJobTimelineStore::new(&temporary.0).unwrap()));
+    let app = http::router_with_storage(
+        RouteOptimizationService::new(DevelopmentRoutingProvider, DevelopmentRouteSolver),
+        None,
+        Some(observation),
+        Some(store.clone()),
+    );
+
+    let mut pending_request = valid_request();
+    pending_request["job_id"] = json!("pending-cancel");
+    store
+        .create_job(&serde_json::from_value(pending_request).unwrap())
+        .unwrap();
+    let cancelled = send_to(
+        app.clone(),
+        Method::POST,
+        "/integration/jobs/pending-cancel/cancel",
+        None,
+        String::new(),
+    )
+    .await;
+    assert_eq!(cancelled.status, StatusCode::OK);
+    assert_eq!(
+        cancelled.body,
+        json!({"job_id":"pending-cancel","status":"cancelled"})
+    );
+    let stored = store.get_job("pending-cancel").unwrap().unwrap();
+    assert_eq!(stored.state.status, JobStatus::Cancelled);
+    assert!(stored.state.completed_at.is_some());
+    assert!(stored.result.is_none());
+    assert!(stored.error.is_none());
+
+    let duplicate = send_to(
+        app.clone(),
+        Method::POST,
+        "/integration/jobs/pending-cancel/cancel",
+        None,
+        String::new(),
+    )
+    .await;
+    assert_eq!(duplicate.status, StatusCode::CONFLICT);
+    assert_eq!(duplicate.body["error"]["code"], "JOB_NOT_CANCELLABLE");
+    assert_eq!(duplicate.body["error"]["detail"], "cancelled");
+
+    let mut completed_request = valid_request();
+    completed_request["job_id"] = json!("completed-cancel");
+    assert_eq!(
+        send_to(
+            app.clone(),
+            Method::POST,
+            "/optimize",
+            Some("application/json"),
+            completed_request.to_string(),
+        )
+        .await
+        .status,
+        StatusCode::OK
+    );
+    let completed = send_to(
+        app.clone(),
+        Method::POST,
+        "/integration/jobs/completed-cancel/cancel",
+        None,
+        String::new(),
+    )
+    .await;
+    assert_eq!(completed.status, StatusCode::CONFLICT);
+    assert_eq!(completed.body["error"]["detail"], "completed");
+
+    let mut failed_request = valid_request();
+    failed_request["job_id"] = json!("failed-cancel");
+    failed_request["locations"][1]["close_time"] = json!("09:10");
+    assert_eq!(
+        send_to(
+            app.clone(),
+            Method::POST,
+            "/optimize",
+            Some("application/json"),
+            failed_request.to_string(),
+        )
+        .await
+        .status,
+        StatusCode::UNPROCESSABLE_ENTITY
+    );
+    let failed = send_to(
+        app.clone(),
+        Method::POST,
+        "/integration/jobs/failed-cancel/cancel",
+        None,
+        String::new(),
+    )
+    .await;
+    assert_eq!(failed.status, StatusCode::CONFLICT);
+    assert_eq!(failed.body["error"]["detail"], "failed");
+
+    let unknown = send_to(
+        app.clone(),
+        Method::POST,
+        "/integration/jobs/unknown/cancel",
+        None,
+        String::new(),
+    )
+    .await;
+    assert_eq!(unknown.status, StatusCode::NOT_FOUND);
+    assert_eq!(unknown.body["error"]["code"], "JOB_NOT_FOUND");
+
+    let timeline = send_to(
+        app,
+        Method::GET,
+        "/integration/jobs/pending-cancel/timeline",
+        None,
+        String::new(),
+    )
+    .await;
+    let cancel_entries = timeline.body["entries"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|entry| {
+            entry["path"] == "/integration/jobs/pending-cancel/cancel"
+                || entry["pair_id"]
+                    .as_str()
+                    .is_some_and(|pair_id| pair_id.starts_with("cancel-"))
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(cancel_entries.len(), 4);
+    assert_eq!(cancel_entries[0]["direction"], "REQUEST");
+    assert_eq!(cancel_entries[1]["status"], 200);
+    assert_eq!(cancel_entries[2]["direction"], "REQUEST");
+    assert_eq!(cancel_entries[3]["status"], 409);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn running_cancel_stops_pipeline_and_delivers_cancelled_callback() {
+    assert_running_cancel(StatusCode::NO_CONTENT).await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn callback_failure_does_not_change_local_cancelled_state() {
+    assert_running_cancel(StatusCode::SERVICE_UNAVAILABLE).await;
+}
+
+async fn assert_running_cancel(callback_status: StatusCode) {
+    let temporary = TestDirectory::new();
+    let (base_url, mut callback_events, _server) = spawn_job_event_mock(callback_status).await;
+    let started = Arc::new(AtomicBool::new(false));
+    let store = Arc::new(FileJobStore::new(&temporary.0).unwrap());
+    let observation =
+        JobObservationRecorder::new(Arc::new(FileJobTimelineStore::new(&temporary.0).unwrap()));
+    let app = http::router_with_storage(
+        RouteOptimizationService::new(
+            DevelopmentRoutingProvider,
+            SlowCancellationSolver {
+                started: started.clone(),
+            },
+        ),
+        Some(TrasolveClient::new(base_url).unwrap()),
+        Some(observation),
+        Some(store.clone()),
+    );
+    let mut request = valid_request();
+    request["job_id"] = json!("running-cancel");
+    let optimize_app = app.clone();
+    let optimize = tokio::spawn(async move {
+        send_to(
+            optimize_app,
+            Method::POST,
+            "/optimize",
+            Some("application/json"),
+            request.to_string(),
+        )
+        .await
+    });
+
+    tokio::time::timeout(Duration::from_secs(2), async {
+        while !started.load(Ordering::Acquire) {
+            sleep(Duration::from_millis(1)).await;
+        }
+    })
+    .await
+    .unwrap();
+
+    let cancelled = send_to(
+        app.clone(),
+        Method::POST,
+        "/integration/jobs/running-cancel/cancel",
+        None,
+        String::new(),
+    )
+    .await;
+    assert_eq!(cancelled.status, StatusCode::OK);
+    assert_eq!(cancelled.body["status"], "cancelled");
+
+    let optimize = optimize.await.unwrap();
+    assert_error(optimize, StatusCode::CONFLICT, "JOB_CANCELLED");
+    let job = store.get_job("running-cancel").unwrap().unwrap();
+    assert_eq!(job.state.status, JobStatus::Cancelled);
+    assert!(job.state.completed_at.is_some());
+    assert!(job.result.is_none());
+    assert!(job.error.is_none());
+
+    let mut events = Vec::new();
+    while let Ok(event) = callback_events.try_recv() {
+        events.push(event);
+    }
+    assert_eq!(events.last().unwrap()["type"], "cancelled");
+    assert_eq!(
+        events.last().unwrap()["data"]["message"],
+        "Job cancelled by request"
+    );
+    assert!(!events.iter().any(|event| event["type"] == "result"));
+    assert!(!events.iter().any(|event| event["type"] == "error"));
+
+    let timeline = send_to(
+        app,
+        Method::GET,
+        "/integration/jobs/running-cancel/timeline",
+        None,
+        String::new(),
+    )
+    .await;
+    let entries = timeline.body["entries"].as_array().unwrap();
+    assert!(entries.iter().any(|entry| {
+        entry["direction"] == "REQUEST"
+            && entry["path"] == "/integration/jobs/running-cancel/cancel"
+    }));
+    assert!(entries.iter().any(|entry| {
+        entry["direction"] == "RESPONSE"
+            && entry["status"] == 200
+            && entry["source"] == "troute"
+            && entry["target"] == "testbed"
+    }));
+    assert!(entries.iter().any(|entry| {
+        entry["direction"] == "REQUEST"
+            && entry["source"] == "troute"
+            && entry["target"] == "trasolve"
+            && entry["body"]["type"] == "cancelled"
+    }));
+    assert!(entries.iter().any(|entry| {
+        entry["direction"] == "RESPONSE"
+            && entry["source"] == "trasolve"
+            && entry["target"] == "troute"
+            && entry["status"] == u64::from(callback_status.as_u16())
+    }));
 }
 
 #[tokio::test]

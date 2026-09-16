@@ -27,6 +27,29 @@ pub enum JobStatus {
     Running,
     Completed,
     Failed,
+    Cancelled,
+}
+
+impl JobStatus {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Pending => "pending",
+            Self::Running => "running",
+            Self::Completed => "completed",
+            Self::Failed => "failed",
+            Self::Cancelled => "cancelled",
+        }
+    }
+
+    fn is_active(self) -> bool {
+        matches!(self, Self::Pending | Self::Running)
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TerminalWriteOutcome {
+    Applied,
+    Cancelled,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
@@ -75,6 +98,10 @@ pub enum JobStoreError {
     DuplicateJob(String),
     #[error("job does not exist: {0}")]
     JobNotFound(String),
+    #[error("job is not cancellable because it is already {status:?}: {job_id}")]
+    JobNotCancellable { job_id: String, status: JobStatus },
+    #[error("job state transition is not allowed from {status:?}: {job_id}")]
+    InvalidTransition { job_id: String, status: JobStatus },
     #[error("job storage I/O failed at {path}: {source}")]
     Io {
         path: PathBuf,
@@ -103,8 +130,13 @@ pub trait JobStore: Send + Sync {
         &self,
         job_id: &str,
         result: &OptimizeRouteResponse,
-    ) -> Result<(), JobStoreError>;
-    fn save_error(&self, job_id: &str, error: &StoredJobError) -> Result<(), JobStoreError>;
+    ) -> Result<TerminalWriteOutcome, JobStoreError>;
+    fn save_error(
+        &self,
+        job_id: &str,
+        error: &StoredJobError,
+    ) -> Result<TerminalWriteOutcome, JobStoreError>;
+    fn cancel_job(&self, job_id: &str, message: &str) -> Result<JobState, JobStoreError>;
     fn get_job(&self, job_id: &str) -> Result<Option<StoredJob>, JobStoreError>;
     fn list_recent(&self, limit: usize) -> Result<Vec<JobIndexEntry>, JobStoreError>;
     fn recover_interrupted(&self) -> Result<usize, JobStoreError>;
@@ -155,20 +187,21 @@ impl FileJobStore {
         atomic_write_json(&self.state_path(&state.job_id), state)
     }
 
-    fn mutate_state(
+    fn mutate_state<T>(
         &self,
         job_id: &str,
-        mutate: impl FnOnce(&mut JobState),
-    ) -> Result<(), JobStoreError> {
+        mutate: impl FnOnce(&mut JobState) -> Result<T, JobStoreError>,
+    ) -> Result<T, JobStoreError> {
         let _guard = self
             .lock
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         let mut state = self.read_state(job_id)?;
-        mutate(&mut state);
+        let output = mutate(&mut state)?;
         state.updated_at = now_ms();
         self.write_state(&state)?;
-        self.update_index_entry(&state)
+        self.update_index_entry(&state)?;
+        Ok(output)
     }
 
     fn index_path(&self) -> PathBuf {
@@ -245,7 +278,15 @@ impl JobStore for FileJobStore {
 
     fn mark_running(&self, job_id: &str) -> Result<(), JobStoreError> {
         self.mutate_state(job_id, |state| {
-            state.status = JobStatus::Running;
+            if state.status.is_active() {
+                state.status = JobStatus::Running;
+                Ok(())
+            } else {
+                Err(JobStoreError::InvalidTransition {
+                    job_id: job_id.to_owned(),
+                    status: state.status,
+                })
+            }
         })
     }
 
@@ -257,10 +298,17 @@ impl JobStore for FileJobStore {
         message: Option<&str>,
     ) -> Result<(), JobStoreError> {
         self.mutate_state(job_id, |state| {
+            if !state.status.is_active() {
+                return Err(JobStoreError::InvalidTransition {
+                    job_id: job_id.to_owned(),
+                    status: state.status,
+                });
+            }
             state.status = JobStatus::Running;
             state.stage = Some(stage);
             state.progress = progress;
             state.last_message = message.map(str::to_owned);
+            Ok(())
         })
     }
 
@@ -268,43 +316,95 @@ impl JobStore for FileJobStore {
         &self,
         job_id: &str,
         result: &OptimizeRouteResponse,
-    ) -> Result<(), JobStoreError> {
+    ) -> Result<TerminalWriteOutcome, JobStoreError> {
         let _guard = self
             .lock
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
-        let path = self.job_dir(job_id).join("result.json");
-        if !path.parent().is_some_and(Path::exists) {
+        let directory = self.job_dir(job_id);
+        if !directory.exists() {
             return Err(JobStoreError::JobNotFound(job_id.to_owned()));
         }
-        atomic_write_json(&path, result)?;
         let mut state = self.read_state(job_id)?;
+        if state.status == JobStatus::Cancelled {
+            return Ok(TerminalWriteOutcome::Cancelled);
+        }
+        if state.status != JobStatus::Running {
+            return Err(JobStoreError::InvalidTransition {
+                job_id: job_id.to_owned(),
+                status: state.status,
+            });
+        }
+        let path = directory.join("result.json");
+        atomic_write_json(&path, result)?;
         let timestamp = now_ms();
         state.status = JobStatus::Completed;
         state.progress = 100;
         state.updated_at = timestamp;
         state.completed_at = Some(timestamp);
         self.write_state(&state)?;
-        self.update_index_entry(&state)
+        self.update_index_entry(&state)?;
+        Ok(TerminalWriteOutcome::Applied)
     }
 
-    fn save_error(&self, job_id: &str, error: &StoredJobError) -> Result<(), JobStoreError> {
+    fn save_error(
+        &self,
+        job_id: &str,
+        error: &StoredJobError,
+    ) -> Result<TerminalWriteOutcome, JobStoreError> {
         let _guard = self
             .lock
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
-        let path = self.job_dir(job_id).join("error.json");
-        if !path.parent().is_some_and(Path::exists) {
+        let directory = self.job_dir(job_id);
+        if !directory.exists() {
             return Err(JobStoreError::JobNotFound(job_id.to_owned()));
         }
-        atomic_write_json(&path, error)?;
         let mut state = self.read_state(job_id)?;
+        if state.status == JobStatus::Cancelled {
+            return Ok(TerminalWriteOutcome::Cancelled);
+        }
+        if state.status != JobStatus::Running {
+            return Err(JobStoreError::InvalidTransition {
+                job_id: job_id.to_owned(),
+                status: state.status,
+            });
+        }
+        let path = directory.join("error.json");
+        atomic_write_json(&path, error)?;
         let timestamp = now_ms();
         state.status = JobStatus::Failed;
         state.updated_at = timestamp;
         state.completed_at = Some(timestamp);
         self.write_state(&state)?;
-        self.update_index_entry(&state)
+        self.update_index_entry(&state)?;
+        Ok(TerminalWriteOutcome::Applied)
+    }
+
+    fn cancel_job(&self, job_id: &str, message: &str) -> Result<JobState, JobStoreError> {
+        let _guard = self
+            .lock
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let directory = self.job_dir(job_id);
+        if !directory.is_dir() {
+            return Err(JobStoreError::JobNotFound(job_id.to_owned()));
+        }
+        let mut state = self.read_state(job_id)?;
+        if !state.status.is_active() {
+            return Err(JobStoreError::JobNotCancellable {
+                job_id: job_id.to_owned(),
+                status: state.status,
+            });
+        }
+        let timestamp = now_ms();
+        state.status = JobStatus::Cancelled;
+        state.last_message = Some(message.to_owned());
+        state.updated_at = timestamp;
+        state.completed_at = Some(timestamp);
+        self.write_state(&state)?;
+        self.update_index_entry(&state)?;
+        Ok(state)
     }
 
     fn get_job(&self, job_id: &str) -> Result<Option<StoredJob>, JobStoreError> {
@@ -691,6 +791,7 @@ mod tests {
             store.create_job(&input),
             Err(JobStoreError::DuplicateJob(_))
         ));
+        store.mark_running(&input.job_id).unwrap();
         store
             .save_error(
                 &input.job_id,
@@ -713,6 +814,7 @@ mod tests {
         let store = FileJobStore::new(&temporary.0).unwrap();
         store.create_job(&request("pending")).unwrap();
         store.create_job(&request("completed")).unwrap();
+        store.mark_running("completed").unwrap();
         store.save_result("completed", &response()).unwrap();
         drop(store);
 
@@ -725,6 +827,140 @@ mod tests {
             reopened.get_job("completed").unwrap().unwrap().state.status,
             JobStatus::Completed
         );
+    }
+
+    #[test]
+    fn pending_and_running_jobs_can_be_cancelled_without_error_files() {
+        let temporary = TestDirectory::new();
+        let store = FileJobStore::new(&temporary.0).unwrap();
+        store.create_job(&request("pending-cancel")).unwrap();
+        let pending = store
+            .cancel_job("pending-cancel", "Job cancelled by request")
+            .unwrap();
+        assert_eq!(pending.status, JobStatus::Cancelled);
+        assert!(pending.completed_at.is_some());
+        assert_eq!(pending.progress, 0);
+
+        store.create_job(&request("running-cancel")).unwrap();
+        store.mark_running("running-cancel").unwrap();
+        store
+            .update_progress(
+                "running-cancel",
+                ProgressStage::Solving,
+                60,
+                Some("Solving route"),
+            )
+            .unwrap();
+        let running = store
+            .cancel_job("running-cancel", "Job cancelled by request")
+            .unwrap();
+        assert_eq!(running.status, JobStatus::Cancelled);
+        assert_eq!(running.progress, 60);
+        assert_eq!(
+            running.last_message.as_deref(),
+            Some("Job cancelled by request")
+        );
+        assert!(!temporary.0.join("jobs/running-cancel/error.json").exists());
+        assert!(!temporary.0.join("jobs/running-cancel/result.json").exists());
+    }
+
+    #[test]
+    fn terminal_jobs_reject_cancellation_and_cancelled_survives_restart() {
+        let temporary = TestDirectory::new();
+        let store = FileJobStore::new(&temporary.0).unwrap();
+
+        store.create_job(&request("completed")).unwrap();
+        store.mark_running("completed").unwrap();
+        store.save_result("completed", &response()).unwrap();
+        store.create_job(&request("failed")).unwrap();
+        store.mark_running("failed").unwrap();
+        store
+            .save_error(
+                "failed",
+                &StoredJobError {
+                    code: "TEST".to_owned(),
+                    message: "failed".to_owned(),
+                    detail: "detail".to_owned(),
+                },
+            )
+            .unwrap();
+        store.create_job(&request("cancelled")).unwrap();
+        store
+            .cancel_job("cancelled", "Job cancelled by request")
+            .unwrap();
+
+        for (job_id, expected) in [
+            ("completed", JobStatus::Completed),
+            ("failed", JobStatus::Failed),
+            ("cancelled", JobStatus::Cancelled),
+        ] {
+            assert!(matches!(
+                store.cancel_job(job_id, "again"),
+                Err(JobStoreError::JobNotCancellable { status, .. }) if status == expected
+            ));
+        }
+        drop(store);
+
+        let reopened = FileJobStore::new(&temporary.0).unwrap();
+        assert_eq!(reopened.recover_interrupted().unwrap(), 0);
+        assert_eq!(
+            reopened.get_job("cancelled").unwrap().unwrap().state.status,
+            JobStatus::Cancelled
+        );
+    }
+
+    #[test]
+    fn result_and_cancel_race_has_exactly_one_terminal_winner() {
+        use std::sync::{Arc, Barrier};
+
+        for iteration in 0..20 {
+            let temporary = TestDirectory::new();
+            let store = Arc::new(FileJobStore::new(&temporary.0).unwrap());
+            let job_id = format!("race-{iteration}");
+            store.create_job(&request(&job_id)).unwrap();
+            store.mark_running(&job_id).unwrap();
+            let barrier = Arc::new(Barrier::new(3));
+
+            let result_store = store.clone();
+            let result_barrier = barrier.clone();
+            let result_job_id = job_id.clone();
+            let result_thread = std::thread::spawn(move || {
+                result_barrier.wait();
+                result_store.save_result(&result_job_id, &response())
+            });
+
+            let cancel_store = store.clone();
+            let cancel_barrier = barrier.clone();
+            let cancel_job_id = job_id.clone();
+            let cancel_thread = std::thread::spawn(move || {
+                cancel_barrier.wait();
+                cancel_store.cancel_job(&cancel_job_id, "Job cancelled by request")
+            });
+
+            barrier.wait();
+            let result_outcome = result_thread.join().unwrap();
+            let cancel_outcome = cancel_thread.join().unwrap();
+            let job = store.get_job(&job_id).unwrap().unwrap();
+            match job.state.status {
+                JobStatus::Completed => {
+                    assert_eq!(result_outcome.unwrap(), TerminalWriteOutcome::Applied);
+                    assert!(matches!(
+                        cancel_outcome,
+                        Err(JobStoreError::JobNotCancellable {
+                            status: JobStatus::Completed,
+                            ..
+                        })
+                    ));
+                    assert!(job.result.is_some());
+                }
+                JobStatus::Cancelled => {
+                    assert_eq!(result_outcome.unwrap(), TerminalWriteOutcome::Cancelled);
+                    assert!(cancel_outcome.is_ok());
+                    assert!(job.result.is_none());
+                }
+                status => panic!("unexpected race winner state: {status:?}"),
+            }
+        }
     }
 
     #[test]

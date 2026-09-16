@@ -7,6 +7,7 @@ const STATUS_INTENTS = {
   running: Intent.PRIMARY,
   completed: Intent.SUCCESS,
   failed: Intent.DANGER,
+  cancelled: Intent.WARNING,
 } as const;
 
 function formatElapsed(milliseconds: number) {
@@ -22,6 +23,7 @@ const STAGE_LABELS: Record<string, string> = {
   optimizing: "최적화",
   completed: "완료",
   failed: "오류",
+  cancelled: "취소됨",
 };
 
 function useElapsed(job: TestbedJob) {

@@ -1,10 +1,13 @@
 use thiserror::Error;
 
-use crate::{domain::OptimizationProblem, matrix::TravelTimeMatrix};
+use crate::{
+    cancellation::CancellationToken, domain::OptimizationProblem, matrix::TravelTimeMatrix,
+};
 
 pub struct SolverInput<'a> {
     pub matrix: &'a TravelTimeMatrix,
     pub problem: &'a OptimizationProblem,
+    pub cancellation: &'a CancellationToken,
 }
 
 /// The visit order uses every location index exactly once. It starts at index
@@ -21,6 +24,8 @@ pub trait RouteSolver {
 
 #[derive(Debug, Error)]
 pub enum SolverError {
+    #[error("solver was cancelled")]
+    Cancelled,
     #[error("no feasible route was found")]
     NoFeasibleRoute,
     #[error("solver failed: {0}")]

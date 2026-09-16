@@ -1,5 +1,11 @@
 import { expect, test } from "@playwright/test";
 
+test.beforeEach(async ({ page }) => {
+  await page.route("**/api/integration/jobs?limit=50", (route) =>
+    route.fulfill({ json: { jobs: [] } }),
+  );
+});
+
 test("health-only shell preserves header controls and job-centric layout", async ({
   page,
 }) => {

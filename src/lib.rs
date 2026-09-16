@@ -5,6 +5,7 @@
 //! separate so production implementations can replace them later.
 
 pub mod api;
+pub mod cancellation;
 pub mod development;
 pub mod domain;
 pub mod events;
@@ -19,9 +20,10 @@ pub mod storage;
 pub mod trasolve;
 
 pub use api::{OptimizeRouteRequest, OptimizeRouteResponse};
+pub use cancellation::CancellationToken;
 pub use events::{
-    ErrorEventData, JobEvent, JobEventContext, JobEventType, OptimizationErrorCode,
-    OptimizationEventReporter, ProgressEventData, ProgressStage,
+    CancelledEventData, ErrorEventData, JobEvent, JobEventContext, JobEventType,
+    OptimizationErrorCode, OptimizationEventReporter, ProgressEventData, ProgressStage,
 };
 pub use observation::{
     InMemoryJobTimelineStore, JobObservationRecorder, JobTimelineEntry, JobTimelineStore,
@@ -30,5 +32,5 @@ pub use observation::{
 pub use service::RouteOptimizationService;
 pub use storage::{
     FileJobStore, FileJobTimelineStore, JobIndexEntry, JobState, JobStatus, JobStore,
-    JobStoreError, StoredJob, StoredJobError,
+    JobStoreError, StoredJob, StoredJobError, TerminalWriteOutcome,
 };

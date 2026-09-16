@@ -2,6 +2,7 @@ use thiserror::Error;
 
 use crate::{
     api::{OptimizeRouteRequest, OptimizeRouteResponse, RequestValidationError},
+    cancellation::CancellationToken,
     domain::OptimizationProblem,
     events::{
         NoopOptimizationEventReporter, OptimizationErrorCode, OptimizationEventReporter,
@@ -43,6 +44,15 @@ where
         request: OptimizeRouteRequest,
         reporter: &dyn OptimizationEventReporter,
     ) -> Result<OptimizeRouteResponse, OptimizationServiceError> {
+        self.optimize_with_cancellation(request, reporter, &CancellationToken::new())
+    }
+
+    pub fn optimize_with_cancellation(
+        &self,
+        request: OptimizeRouteRequest,
+        reporter: &dyn OptimizationEventReporter,
+        cancellation: &CancellationToken,
+    ) -> Result<OptimizeRouteResponse, OptimizationServiceError> {
         let result = (|| {
             let problem = OptimizationProblem::try_from(request)?;
             reporter.progress(
@@ -50,27 +60,41 @@ where
                 0,
                 Some("Optimization request accepted."),
             );
+            check_cancelled(cancellation)?;
             reporter.progress(
                 ProgressStage::BuildingMatrix,
                 20,
                 Some("Building travel-time matrix."),
             );
+            check_cancelled(cancellation)?;
             let matrix = self
                 .routing_provider
                 .travel_time_matrix(problem.locations())?;
+            check_cancelled(cancellation)?;
             reporter.progress(ProgressStage::Solving, 60, Some("Optimizing visit order."));
-            let solution = self.solver.solve(SolverInput {
+            check_cancelled(cancellation)?;
+            let solution = match self.solver.solve(SolverInput {
                 matrix: &matrix,
                 problem: &problem,
-            })?;
+                cancellation,
+            }) {
+                Ok(solution) => solution,
+                Err(SolverError::Cancelled) => return Err(OptimizationServiceError::Cancelled),
+                Err(error) => return Err(error.into()),
+            };
+            check_cancelled(cancellation)?;
             reporter.progress(
                 ProgressStage::Scheduling,
                 85,
                 Some("Building itinerary schedule."),
             );
+            check_cancelled(cancellation)?;
             let plan = calculate_schedule(&problem, &matrix, &solution)?;
+            check_cancelled(cancellation)?;
             let response = OptimizeRouteResponse::from_plan(plan, &problem);
+            check_cancelled(cancellation)?;
             reporter.result(&response);
+            check_cancelled(cancellation)?;
 
             Ok(response)
         })();
@@ -79,12 +103,25 @@ where
             report_error(reporter, error);
         }
 
-        result
+        if cancellation.is_cancelled() {
+            Err(OptimizationServiceError::Cancelled)
+        } else {
+            result
+        }
+    }
+}
+
+fn check_cancelled(cancellation: &CancellationToken) -> Result<(), OptimizationServiceError> {
+    if cancellation.is_cancelled() {
+        Err(OptimizationServiceError::Cancelled)
+    } else {
+        Ok(())
     }
 }
 
 fn report_error(reporter: &dyn OptimizationEventReporter, error: &OptimizationServiceError) {
     match error {
+        OptimizationServiceError::Cancelled => {}
         OptimizationServiceError::InvalidRequest(source) => reporter.error(
             OptimizationErrorCode::InvalidRequest,
             "The optimize request is invalid.",
@@ -122,6 +159,8 @@ fn report_error(reporter: &dyn OptimizationEventReporter, error: &OptimizationSe
 
 #[derive(Debug, Error)]
 pub enum OptimizationServiceError {
+    #[error("optimization job was cancelled")]
+    Cancelled,
     #[error(transparent)]
     InvalidRequest(#[from] RequestValidationError),
     #[error(transparent)]
@@ -241,6 +280,25 @@ mod tests {
                 RecordedEvent::Progress(ProgressStage::Scheduling, 85),
                 RecordedEvent::Result(response),
             ]
+        );
+    }
+
+    #[test]
+    fn cancelled_pipeline_stops_before_matrix_and_emits_no_error_or_result() {
+        let service =
+            RouteOptimizationService::new(DevelopmentRoutingProvider, DevelopmentRouteSolver);
+        let reporter = InMemoryReporter::default();
+        let cancellation = CancellationToken::new();
+        cancellation.cancel();
+
+        let error = service
+            .optimize_with_cancellation(valid_request(), &reporter, &cancellation)
+            .unwrap_err();
+
+        assert!(matches!(error, OptimizationServiceError::Cancelled));
+        assert_eq!(
+            reporter.events(),
+            vec![RecordedEvent::Progress(ProgressStage::Accepted, 0)]
         );
     }
 

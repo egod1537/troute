@@ -6,6 +6,7 @@ const STATUS_INTENTS = {
   running: Intent.PRIMARY,
   completed: Intent.SUCCESS,
   failed: Intent.DANGER,
+  cancelled: Intent.WARNING,
 } as const;
 
 interface JobListItemProps {

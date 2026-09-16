@@ -23,6 +23,9 @@ test.beforeEach(async ({ page }) => {
   await page.route("**/api/health", (route) =>
     route.fulfill({ json: { status: "ok" } }),
   );
+  await page.route("**/api/integration/jobs?limit=50", (route) =>
+    route.fulfill({ json: { jobs: [] } }),
+  );
 });
 
 async function openJobDialog(page: Page, jobId?: string) {
@@ -287,4 +290,54 @@ test("reload restores recent jobs and fetches the selected timeline", async ({
   await expect(page.getByRole("option", { name: /route-persisted/ })).toBeVisible();
   await expect(page.getByRole("heading", { name: "route-persisted" })).toBeVisible();
   await expect.poll(() => timelineCalls).toBe(2);
+});
+
+test("running job can be force-cancelled and remains cancelled after optimize ends", async ({
+  page,
+}) => {
+  let releaseOptimize!: () => void;
+  const optimizeGate = new Promise<void>((resolve) => {
+    releaseOptimize = resolve;
+  });
+  await page.route("**/api/fixture-route", async (route) => {
+    await optimizeGate;
+    await route.fulfill({
+      status: 409,
+      json: {
+        error: {
+          code: "JOB_CANCELLED",
+          message: "The optimization job was cancelled.",
+        },
+      },
+    });
+  });
+  await page.route("**/api/integration/jobs/route-cancel/cancel", (route) => {
+    expect(route.request().method()).toBe("POST");
+    return route.fulfill({
+      json: { job_id: "route-cancel", status: "cancelled" },
+    });
+  });
+  await page.route("**/api/integration/jobs/route-cancel/timeline", (route) =>
+    route.fulfill({ json: { job_id: "route-cancel", entries: [] } }),
+  );
+  await page.goto("/");
+
+  await createJob(page, "route-cancel");
+  const row = page.getByRole("option", { name: /route-cancel/ });
+  await expect(row).toHaveAttribute("data-status", "running");
+  await page.getByRole("button", { name: "Job 강제 종료" }).click();
+  const dialog = page.getByRole("dialog", { name: "Job 강제 종료" });
+  await expect(dialog).toContainText("이미 수행된 기록은 유지");
+  await dialog.getByRole("button", { name: "강제 종료" }).click();
+
+  await expect(row).toHaveAttribute("data-status", "cancelled");
+  await expect(row).toContainText("취소됨");
+  await expect(page.getByText("취소됨", { exact: true }).last()).toBeVisible();
+  await expect(
+    page.getByRole("button", { name: "Job 강제 종료" }),
+  ).toHaveCount(0);
+
+  releaseOptimize();
+  await expect(row).toHaveAttribute("data-status", "cancelled");
+  await expect(row).not.toContainText("오류");
 });

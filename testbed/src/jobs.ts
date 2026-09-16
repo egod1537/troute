@@ -4,7 +4,8 @@ export type TestbedJobStatus =
   | "pending"
   | "running"
   | "completed"
-  | "failed";
+  | "failed"
+  | "cancelled";
 
 export interface TimelineEntry {
   id: string;
@@ -45,4 +46,5 @@ export const JOB_STATUS_LABELS: Record<TestbedJobStatus, string> = {
   running: "실행 중",
   completed: "완료",
   failed: "오류",
+  cancelled: "취소됨",
 };

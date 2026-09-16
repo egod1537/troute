@@ -13,6 +13,7 @@ pub enum JobEventType {
     Progress,
     Error,
     Result,
+    Cancelled,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize)]
@@ -49,6 +50,11 @@ pub struct ErrorEventData {
     pub detail: String,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
+pub struct CancelledEventData {
+    pub message: String,
+}
+
 /// Synchronous reporting boundary used by the optimization pipeline.
 ///
 /// Implementations must return promptly. The HTTP application uses a channel
@@ -59,6 +65,8 @@ pub trait OptimizationEventReporter: Send + Sync {
     fn error(&self, code: OptimizationErrorCode, message: &str, detail: &str);
 
     fn result(&self, response: &OptimizeRouteResponse);
+
+    fn cancelled(&self, _message: &str) {}
 }
 
 #[derive(Debug, Default)]
@@ -155,6 +163,7 @@ mod tests {
             (JobEventType::Progress, "progress"),
             (JobEventType::Error, "error"),
             (JobEventType::Result, "result"),
+            (JobEventType::Cancelled, "cancelled"),
         ] {
             assert_eq!(serde_json::to_value(event_type).unwrap(), expected);
         }

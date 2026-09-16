@@ -2,6 +2,7 @@ import { useEffect, useMemo, useState } from "react";
 import { Classes } from "@blueprintjs/core";
 import {
   ApiError,
+  cancelStoredJob,
   checkHealth,
   getStoredJob,
   getStoredTimeline,
@@ -29,6 +30,8 @@ export function App({ initialThemeMode }: AppProps) {
   const [jobs, setJobs] = useState<TestbedJob[]>([]);
   const [selectedJobId, setSelectedJobId] = useState<string | null>(null);
   const [newJobOpen, setNewJobOpen] = useState(false);
+  const [cancellingJobId, setCancellingJobId] = useState<string | null>(null);
+  const [cancelError, setCancelError] = useState("");
 
   async function refreshHealth() {
     setHealthRefreshing(true);
@@ -77,6 +80,7 @@ export function App({ initialThemeMode }: AppProps) {
 
   useEffect(() => {
     if (!selectedJobId) return;
+    setCancelError("");
     let cancelled = false;
     void getStoredTimeline(selectedJobId)
       .then((timeline) => {
@@ -94,10 +98,20 @@ export function App({ initialThemeMode }: AppProps) {
     );
   }
 
+  function updateActiveJob(jobId: string, update: Partial<TestbedJob>) {
+    setJobs((current) =>
+      current.map((job) =>
+        job.id === jobId && job.status !== "cancelled"
+          ? { ...job, ...update }
+          : job,
+      ),
+    );
+  }
+
   async function executeJob(request: RouteInput) {
     // Let React commit the pending row before the network lifecycle starts.
     await new Promise<void>((resolve) => requestAnimationFrame(() => resolve()));
-    updateJob(request.job_id, {
+    updateActiveJob(request.job_id, {
       status: "running",
       stage: "optimizing",
       message: "POST /optimize 실행 중.",
@@ -105,7 +119,7 @@ export function App({ initialThemeMode }: AppProps) {
 
     try {
       const result = await runRoute(request);
-      updateJob(request.job_id, {
+      updateActiveJob(request.job_id, {
         status: "completed",
         completedAt: Date.now(),
         progress: 100,
@@ -115,7 +129,7 @@ export function App({ initialThemeMode }: AppProps) {
         route: result.route,
       });
     } catch (error) {
-      updateJob(request.job_id, {
+      updateActiveJob(request.job_id, {
         status: "failed",
         completedAt: Date.now(),
         stage: "failed",
@@ -127,6 +141,27 @@ export function App({ initialThemeMode }: AppProps) {
       void getStoredTimeline(request.job_id)
         .then((timeline) => updateJob(request.job_id, { timeline }))
         .catch(() => undefined);
+    }
+  }
+
+  async function cancelJob(jobId: string) {
+    setCancellingJobId(jobId);
+    setCancelError("");
+    try {
+      await cancelStoredJob(jobId);
+      updateJob(jobId, {
+        status: "cancelled",
+        completedAt: Date.now(),
+        message: "요청에 의해 Job이 종료되었습니다.",
+        error: undefined,
+      });
+      const timeline = await getStoredTimeline(jobId).catch(() => undefined);
+      if (timeline) updateJob(jobId, { timeline });
+    } catch (error) {
+      setCancelError((error as Error).message);
+      throw error;
+    } finally {
+      setCancellingJobId(null);
     }
   }
 
@@ -175,7 +210,13 @@ export function App({ initialThemeMode }: AppProps) {
           onNewJob={() => setNewJobOpen(true)}
           onSelect={setSelectedJobId}
         />
-        <JobDetail job={selectedJob} />
+        <JobDetail
+          job={selectedJob}
+          dark={resolvedTheme === "dark"}
+          cancelling={cancellingJobId === selectedJob?.id}
+          cancelError={cancelError}
+          onCancel={cancelJob}
+        />
       </main>
 
       <NewJobDialog

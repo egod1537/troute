@@ -46,6 +46,9 @@ pub struct DevelopmentRouteSolver;
 
 impl RouteSolver for DevelopmentRouteSolver {
     fn solve(&self, input: SolverInput<'_>) -> Result<SolverSolution, SolverError> {
+        if input.cancellation.is_cancelled() {
+            return Err(SolverError::Cancelled);
+        }
         let location_count = input.problem.locations().len();
         if input.matrix.size() != location_count {
             return Err(SolverError::Failed(
@@ -54,6 +57,9 @@ impl RouteSolver for DevelopmentRouteSolver {
         }
 
         let visit_order = (0..location_count).collect();
+        if input.cancellation.is_cancelled() {
+            return Err(SolverError::Cancelled);
+        }
         Ok(SolverSolution { visit_order })
     }
 }
@@ -111,6 +117,7 @@ mod tests {
             .solve(SolverInput {
                 matrix: &matrix,
                 problem: &problem,
+                cancellation: &crate::CancellationToken::new(),
             })
             .unwrap();
 

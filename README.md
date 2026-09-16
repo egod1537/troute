@@ -328,9 +328,9 @@ The reusable callback sender posts this common JSON envelope:
 }
 ```
 
-Event types are exactly `progress`, `error`, and `result`. Sequence numbers are
-per job, begin at 1, and increment for each event; there is no process-wide
-sequence.
+Event types are exactly `progress`, `error`, `result`, and `cancelled`. Sequence
+numbers are per job, begin at 1, and increment for each event; there is no
+process-wide sequence.
 
 ### Progress and error callbacks
 
@@ -390,6 +390,29 @@ Trasolve creates job_id
 never emit `result`. As with progress and error delivery, a failed or timed-out
 result callback is logged but does not change a successful HTTP response.
 
+### Job cancellation
+
+An active persisted job can be cancelled with an empty POST request:
+
+```text
+POST /integration/jobs/{job_id}/cancel
+```
+
+Only `pending` and `running` jobs are cancellable. The endpoint returns the
+terminal `cancelled` state, signals the service and solver cancellation token,
+and queues a `cancelled` callback containing `Job cancelled by request`.
+Cancellation is checked at every major pipeline boundary and is available to
+solver implementations through `SolverInput`. The synchronous `/optimize`
+request returns HTTP 409 with `JOB_CANCELLED` after it stops.
+
+Terminal transition is guarded by the file store lock: whichever of result,
+failure, or cancellation is persisted first wins. A cancellation winner keeps
+the last progress value, sets `completed_at`, writes no `error.json` or
+`result.json`, and suppresses error/result callbacks. Cancelling a completed,
+failed, or already cancelled job returns `JOB_NOT_CANCELLABLE`; an unknown job
+returns `JOB_NOT_FOUND`. Callback failure never changes the local cancelled
+state.
+
 For local end-to-end verification, run Trasolve and troute with reciprocal base
 URLs, submit an optimization through Trasolve, then inspect the returned job:
 
@@ -429,15 +452,16 @@ temporary file and rename. `timeline.jsonl` is append-only with one complete
 directory name; the original ID remains unchanged in stored JSON and APIs.
 
 An existing job directory is never overwritten. Reusing a `job_id` returns HTTP
-409 with `DUPLICATE_JOB_ID`. At startup, completed and failed jobs are retained;
-pending or running jobs are marked failed with `PROCESS_RESTARTED`. There is no
-automatic retention deletion in this version.
+409 with `DUPLICATE_JOB_ID`. At startup, completed, failed, and cancelled jobs
+are retained; pending or running jobs are marked failed with
+`PROCESS_RESTARTED`. There is no automatic retention deletion in this version.
 
 Read recent jobs, one stored job, or its timeline with:
 
 ```text
 GET /integration/jobs?limit=50
 GET /integration/jobs/{job_id}
+POST /integration/jobs/{job_id}/cancel
 GET /integration/jobs/{job_id}/timeline
 ```
 
@@ -509,6 +533,8 @@ On page load, the testbed reads the recent server-side job index, restores each
 Job view model, selects the newest job, and fetches its stored Timeline. Browser
 state remains a view model; the local troute files are the authoritative
 execution record. Reloading the page no longer discards completed history.
+Pending and running Job details expose `Job 강제 종료`; confirmation sends the
+cancel API request and renders the terminal state as `취소됨` with warning intent.
 
 The testbed supports Light, Dark, and System themes from the Navbar control.
 System is the default and follows browser/OS color-scheme changes. An explicit

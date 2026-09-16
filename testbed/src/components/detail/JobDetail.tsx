@@ -4,6 +4,9 @@ import {
   Callout,
   Card,
   Classes,
+  Dialog,
+  DialogBody,
+  DialogFooter,
   Divider,
   Intent,
   NonIdealState,
@@ -19,13 +22,29 @@ function statusIntent(status: number) {
   return Intent.NONE;
 }
 
-export function JobDetail({ job }: { job: TestbedJob | null }) {
+interface JobDetailProps {
+  job: TestbedJob | null;
+  dark: boolean;
+  cancelling: boolean;
+  cancelError: string;
+  onCancel: (jobId: string) => Promise<void>;
+}
+
+export function JobDetail({
+  job,
+  dark,
+  cancelling,
+  cancelError,
+  onCancel,
+}: JobDetailProps) {
   const [copied, setCopied] = useState(false);
   const [copyError, setCopyError] = useState("");
+  const [confirmCancelOpen, setConfirmCancelOpen] = useState(false);
 
   useEffect(() => {
     setCopied(false);
     setCopyError("");
+    setConfirmCancelOpen(false);
   }, [job?.id]);
 
   if (!job) {
@@ -46,11 +65,27 @@ export function JobDetail({ job }: { job: TestbedJob | null }) {
       : job.response.raw
     : "";
 
+  const cancellable = job.status === "pending" || job.status === "running";
+
   return (
-    <Card className="job-detail" elevation={1} compact>
+    <>
+      <Card className="job-detail" elevation={1} compact>
       <div className="detail-heading">
         <h1 className={Classes.HEADING}>Job 상세</h1>
-        <span className={Classes.TEXT_MUTED}>Timeline은 Task 3에서 제공</span>
+        <div className="detail-actions">
+          <span className={Classes.TEXT_MUTED}>Timeline은 Task 3에서 제공</span>
+          {cancellable && (
+            <Button
+              icon="stop"
+              intent={Intent.WARNING}
+              size="small"
+              loading={cancelling}
+              onClick={() => setConfirmCancelOpen(true)}
+            >
+              Job 강제 종료
+            </Button>
+          )}
+        </div>
       </div>
       <Divider />
       <div className="job-detail-content">
@@ -59,6 +94,12 @@ export function JobDetail({ job }: { job: TestbedJob | null }) {
         {job.error && (
           <Callout compact intent={Intent.DANGER} role="alert" title="요청 실패">
             {job.error}
+          </Callout>
+        )}
+
+        {cancelError && (
+          <Callout compact intent={Intent.WARNING} role="alert" title="Job 종료 실패">
+            {cancelError}
           </Callout>
         )}
 
@@ -153,6 +194,48 @@ export function JobDetail({ job }: { job: TestbedJob | null }) {
           </pre>
         </section>
       </div>
-    </Card>
+      </Card>
+      <Dialog
+        isOpen={confirmCancelOpen}
+        isCloseButtonShown={false}
+        onClose={() => setConfirmCancelOpen(false)}
+        portalClassName={dark ? Classes.DARK : undefined}
+        title="Job 강제 종료"
+        icon="warning-sign"
+        canEscapeKeyClose={!cancelling}
+      >
+        <DialogBody>
+          <p>현재 실행 중인 Job을 종료합니다.</p>
+          <p>
+            이미 수행된 기록은 유지되며, 종료 후 다시 실행하려면 새 Job을
+            생성해야 합니다.
+          </p>
+        </DialogBody>
+        <DialogFooter
+          actions={
+            <>
+              <Button
+                disabled={cancelling}
+                onClick={() => setConfirmCancelOpen(false)}
+              >
+                취소
+              </Button>
+              <Button
+                icon="stop"
+                intent={Intent.WARNING}
+                loading={cancelling}
+                onClick={() => {
+                  void onCancel(job.id)
+                    .then(() => setConfirmCancelOpen(false))
+                    .catch(() => setConfirmCancelOpen(false));
+                }}
+              >
+                강제 종료
+              </Button>
+            </>
+          }
+        />
+      </Dialog>
+    </>
   );
 }
