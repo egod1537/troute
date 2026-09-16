@@ -38,7 +38,7 @@ impl RoutingProvider for DevelopmentRoutingProvider {
     }
 }
 
-/// Visits non-start locations in input order and then returns to the start.
+/// Visits all locations in input order, preserving the fixed endpoints.
 ///
 /// This satisfies the structural solver contract but performs no optimization.
 #[derive(Debug, Clone, Copy, Default)]
@@ -53,11 +53,7 @@ impl RouteSolver for DevelopmentRouteSolver {
             ));
         }
 
-        let start = input.problem.start_index();
-        let mut visit_order = Vec::with_capacity(location_count + 1);
-        visit_order.push(start);
-        visit_order.extend((0..location_count).filter(|&index| index != start));
-        visit_order.push(start);
+        let visit_order = (0..location_count).collect();
         Ok(SolverSolution { visit_order })
     }
 }
@@ -71,8 +67,8 @@ mod tests {
         solver::{RouteSolver, SolverInput},
     };
 
-    fn problem_with_start_at(index: usize) -> OptimizationProblem {
-        let mut request: OptimizeRouteRequest = serde_json::from_str(
+    fn problem() -> OptimizationProblem {
+        let request: OptimizeRouteRequest = serde_json::from_str(
             r#"{
                 "job_id":"route-development-test",
                 "locations": [
@@ -80,18 +76,16 @@ mod tests {
                     {"id":"B","place_id":"b","open_time":"00:00","close_time":"23:59","stay_minutes":0},
                     {"id":"C","place_id":"c","open_time":"00:00","close_time":"23:59","stay_minutes":0}
                 ],
-                "start_location_id":"A",
                 "start_time":"09:00"
             }"#,
         )
         .unwrap();
-        request.start_location_id = request.locations[index].id.clone();
         request.try_into().unwrap()
     }
 
     #[test]
     fn routing_provider_builds_the_documented_fixed_matrix() {
-        let problem = problem_with_start_at(0);
+        let problem = problem();
         let matrix = DevelopmentRoutingProvider
             .travel_time_matrix(problem.locations())
             .unwrap();
@@ -108,8 +102,8 @@ mod tests {
     }
 
     #[test]
-    fn solver_starts_and_ends_at_the_selected_location() {
-        let problem = problem_with_start_at(1);
+    fn solver_preserves_the_fixed_start_and_end_locations() {
+        let problem = problem();
         let matrix = DevelopmentRoutingProvider
             .travel_time_matrix(problem.locations())
             .unwrap();
@@ -120,6 +114,16 @@ mod tests {
             })
             .unwrap();
 
-        assert_eq!(solution.visit_order, vec![1, 0, 2, 1]);
+        assert_eq!(solution.visit_order, vec![0, 1, 2]);
+        assert_eq!(problem.start_location().id(), "A");
+        assert_eq!(problem.end_location().id(), "C");
+        assert_eq!(
+            problem
+                .intermediate_locations()
+                .iter()
+                .map(|location| location.id())
+                .collect::<Vec<_>>(),
+            vec!["B"]
+        );
     }
 }

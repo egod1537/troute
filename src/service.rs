@@ -286,14 +286,22 @@ mod tests {
     fn valid_request() -> OptimizeRouteRequest {
         serde_json::from_value(serde_json::json!({
             "job_id": "route-service-test",
-            "locations": [{
-                "id": "A",
-                "place_id": "place-a",
-                "open_time": "00:00",
-                "close_time": "23:59",
-                "stay_minutes": 0
-            }],
-            "start_location_id": "A",
+            "locations": [
+                {
+                    "id": "A",
+                    "place_id": "place-a",
+                    "open_time": "00:00",
+                    "close_time": "23:59",
+                    "stay_minutes": 0
+                },
+                {
+                    "id": "B",
+                    "place_id": "place-b",
+                    "open_time": "00:00",
+                    "close_time": "23:59",
+                    "stay_minutes": 0
+                }
+            ],
             "start_time": "09:00"
         }))
         .unwrap()

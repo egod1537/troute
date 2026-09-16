@@ -13,8 +13,13 @@ impl RoutingProvider for FixedRoutingProvider {
         &self,
         _locations: &[Location],
     ) -> Result<TravelTimeMatrix, RoutingError> {
-        TravelTimeMatrix::new(vec![vec![0, 30, 25], vec![20, 0, 30], vec![30, 25, 0]])
-            .map_err(|error| RoutingError::Provider(error.to_string()))
+        TravelTimeMatrix::new(vec![
+            vec![0, 30, 25, 40],
+            vec![20, 0, 30, 30],
+            vec![30, 25, 0, 20],
+            vec![40, 30, 20, 0],
+        ])
+        .map_err(|error| RoutingError::Provider(error.to_string()))
     }
 }
 
@@ -23,7 +28,7 @@ struct FixedSolver;
 impl RouteSolver for FixedSolver {
     fn solve(&self, _input: SolverInput<'_>) -> Result<SolverSolution, SolverError> {
         Ok(SolverSolution {
-            visit_order: vec![0, 2, 1, 0],
+            visit_order: vec![0, 2, 1, 3],
         })
     }
 }
@@ -54,9 +59,15 @@ fn v0_pipeline_returns_ids_schedule_and_travel_total() {
                     "open_time": "11:00",
                     "close_time": "19:00",
                     "stay_minutes": 45
+                },
+                {
+                    "id": "D",
+                    "place_id": "google-place-id-d",
+                    "open_time": "00:00",
+                    "close_time": "23:59",
+                    "stay_minutes": 0
                 }
             ],
-            "start_location_id": "A",
             "start_time": "09:00"
         }"#,
     )
@@ -67,7 +78,7 @@ fn v0_pipeline_returns_ids_schedule_and_travel_total() {
         .unwrap();
     let json = serde_json::to_value(response).unwrap();
 
-    assert_eq!(json["total_travel_minutes"], 70);
+    assert_eq!(json["total_travel_minutes"], 80);
     assert_eq!(json["route"][0]["location_id"], "A");
     assert_eq!(json["route"][0]["departure_time"], "09:00");
     assert_eq!(json["route"][1]["location_id"], "C");
@@ -76,9 +87,9 @@ fn v0_pipeline_returns_ids_schedule_and_travel_total() {
     assert_eq!(json["route"][2]["location_id"], "B");
     assert_eq!(json["route"][2]["arrival_time"], "12:10");
     assert_eq!(json["route"][2]["departure_time"], "13:40");
-    assert_eq!(json["route"][3]["location_id"], "A");
-    assert_eq!(json["route"][3]["arrival_time"], "14:00");
-    assert!(json["route"][3].get("departure_time").is_none());
+    assert_eq!(json["route"][3]["location_id"], "D");
+    assert_eq!(json["route"][3]["arrival_time"], "14:10");
+    assert_eq!(json["route"][3]["departure_time"], "14:10");
 }
 
 #[test]
@@ -87,7 +98,6 @@ fn malformed_hhmm_time_is_rejected() {
         r#"{
             "job_id": "route-invalid-time-test",
             "locations": [],
-            "start_location_id": "A",
             "start_time": "9:00"
         }"#,
     );

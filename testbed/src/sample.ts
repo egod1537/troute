@@ -29,7 +29,6 @@ export function createSample(): RouteInput {
         stay_minutes: 45,
       },
     ],
-    start_location_id: "A",
     start_time: "09:00",
   };
 }

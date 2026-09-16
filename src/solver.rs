@@ -7,8 +7,8 @@ pub struct SolverInput<'a> {
     pub problem: &'a OptimizationProblem,
 }
 
-/// The visit order uses location indices and must include the start location
-/// as both its first and last element. No concrete solving strategy is fixed.
+/// The visit order uses every location index exactly once. It starts at index
+/// zero, ends at the final index, and may reorder only intermediate indices.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SolverSolution {
     pub visit_order: Vec<usize>,

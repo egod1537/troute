@@ -14,7 +14,7 @@ const routeResult = {
       arrival_time: "09:25",
       departure_time: "11:30",
     },
-    { order: 2, location_id: "A", arrival_time: "12:15" },
+    { order: 2, location_id: "C", arrival_time: "12:15" },
   ],
   total_travel_minutes: 70,
 };
@@ -107,7 +107,7 @@ test("job is inserted and selected before the request completes, then succeeds",
   releaseRoute();
   await expect(row).toHaveAttribute("data-status", "completed");
   await expect(row).toContainText("완료");
-  await expect(page.getByLabel("방문 순서")).toHaveText("A → B → A");
+  await expect(page.getByLabel("방문 순서")).toHaveText("A → B → C");
   await expect(page.getByRole("table")).toContainText("09:25");
   await expect(page.getByText("총 이동 시간", { exact: true })).toBeVisible();
   await expect(page.getByText("70분", { exact: true })).toBeVisible();

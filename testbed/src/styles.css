@@ -299,6 +299,11 @@ body,
   font-weight: 600;
 }
 
+.dialog-editor-help {
+  margin: 0 0 8px;
+  font-size: 12px;
+}
+
 .json-editor {
   font-family: "SFMono-Regular", Consolas, "Liberation Mono", monospace;
   font-size: 12px;

@@ -102,6 +102,10 @@ export function NewJobDialog({
             </Button>
           </ButtonGroup>
         </div>
+        <p className={`${Classes.TEXT_MUTED} dialog-editor-help`}>
+          locations[0]은 고정 start, 마지막 항목은 고정 destination이며 중간
+          항목만 최적화됩니다.
+        </p>
         <TextArea
           aria-label="요청 JSON"
           className="json-editor new-job-editor"

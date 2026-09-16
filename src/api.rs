@@ -16,7 +16,6 @@ const MAX_STRING_CHARACTERS: usize = 512;
 pub struct OptimizeRouteRequest {
     pub job_id: String,
     pub locations: Vec<LocationInput>,
-    pub start_location_id: String,
     pub start_time: TimeOfDay,
 }
 
@@ -50,8 +49,11 @@ impl TryFrom<OptimizeRouteRequest> for OptimizationProblem {
 
     fn try_from(request: OptimizeRouteRequest) -> Result<Self, Self::Error> {
         validate_job_id(&request.job_id).map_err(RequestValidationError::InvalidJobId)?;
-        if request.locations.is_empty() {
-            return Err(RequestValidationError::NoLocations);
+        if request.locations.len() < 2 {
+            return Err(RequestValidationError::TooFewLocations {
+                minimum: 2,
+                actual: request.locations.len(),
+            });
         }
         if request.locations.len() > MAX_LOCATIONS {
             return Err(RequestValidationError::TooManyLocations {
@@ -59,15 +61,6 @@ impl TryFrom<OptimizeRouteRequest> for OptimizationProblem {
                 actual: request.locations.len(),
             });
         }
-        if request.start_location_id.trim().is_empty() {
-            return Err(RequestValidationError::EmptyStartLocationId);
-        }
-        if request.start_location_id.chars().count() > MAX_STRING_CHARACTERS {
-            return Err(RequestValidationError::StartLocationIdTooLong {
-                maximum: MAX_STRING_CHARACTERS,
-            });
-        }
-
         let mut ids = HashSet::with_capacity(request.locations.len());
         let mut locations = Vec::with_capacity(request.locations.len());
 
@@ -111,18 +104,7 @@ impl TryFrom<OptimizeRouteRequest> for OptimizationProblem {
             ));
         }
 
-        let start_index = locations
-            .iter()
-            .position(|location| location.id() == request.start_location_id)
-            .ok_or(RequestValidationError::UnknownStartLocation(
-                request.start_location_id,
-            ))?;
-
-        Ok(OptimizationProblem::new(
-            locations,
-            start_index,
-            request.start_time,
-        ))
+        Ok(OptimizationProblem::new(locations, request.start_time))
     }
 }
 
@@ -151,8 +133,10 @@ impl OptimizeRouteResponse {
 pub enum RequestValidationError {
     #[error(transparent)]
     InvalidJobId(JobIdError),
-    #[error("at least one location is required")]
-    NoLocations,
+    #[error(
+        "locations must contain at least start and end locations (minimum {minimum}, actual {actual})"
+    )]
+    TooFewLocations { minimum: usize, actual: usize },
     #[error("locations contains {actual} items; at most {maximum} are allowed")]
     TooManyLocations { maximum: usize, actual: usize },
     #[error("location id must not be empty")]
@@ -165,16 +149,66 @@ pub enum RequestValidationError {
     PlaceIdTooLong { location_id: String, maximum: usize },
     #[error("duplicate location id: {0}")]
     DuplicateLocationId(String),
-    #[error("start_location_id must not be empty")]
-    EmptyStartLocationId,
-    #[error("start_location_id must not exceed {maximum} characters")]
-    StartLocationIdTooLong { maximum: usize },
-    #[error("start_location_id does not exist in locations: {0}")]
-    UnknownStartLocation(String),
     #[error("invalid time window for location {location_id}: {source}")]
     InvalidTimeWindow {
         location_id: String,
         #[source]
         source: DomainError,
     },
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    fn request_with_locations(location_ids: &[&str]) -> OptimizeRouteRequest {
+        serde_json::from_value(json!({
+            "job_id": "route-api-test",
+            "locations": location_ids
+                .iter()
+                .map(|id| json!({
+                    "id": id,
+                    "place_id": format!("place-{id}"),
+                    "open_time": "00:00",
+                    "close_time": "23:59",
+                    "stay_minutes": 0
+                }))
+                .collect::<Vec<_>>(),
+            "start_time": "09:00"
+        }))
+        .unwrap()
+    }
+
+    #[test]
+    fn zero_and_one_location_are_rejected() {
+        for ids in [&[][..], &["A"][..]] {
+            let error = OptimizationProblem::try_from(request_with_locations(ids)).unwrap_err();
+            assert!(matches!(
+                error,
+                RequestValidationError::TooFewLocations {
+                    minimum: 2,
+                    actual
+                } if actual == ids.len()
+            ));
+        }
+    }
+
+    #[test]
+    fn two_locations_define_start_and_end() {
+        let problem = OptimizationProblem::try_from(request_with_locations(&["A", "B"])).unwrap();
+
+        assert_eq!(problem.start_location().id(), "A");
+        assert_eq!(problem.end_location().id(), "B");
+        assert!(problem.intermediate_locations().is_empty());
+    }
+
+    #[test]
+    fn location_ids_remain_unique() {
+        let error = OptimizationProblem::try_from(request_with_locations(&["A", "A"])).unwrap_err();
+        assert!(matches!(
+            error,
+            RequestValidationError::DuplicateLocationId(id) if id == "A"
+        ));
+    }
 }

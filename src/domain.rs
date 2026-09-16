@@ -155,15 +155,14 @@ impl Location {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct OptimizationProblem {
     locations: Vec<Location>,
-    start_index: usize,
     start_time: TimeOfDay,
 }
 
 impl OptimizationProblem {
-    pub(crate) fn new(locations: Vec<Location>, start_index: usize, start_time: TimeOfDay) -> Self {
+    pub(crate) fn new(locations: Vec<Location>, start_time: TimeOfDay) -> Self {
+        debug_assert!(locations.len() >= 2);
         Self {
             locations,
-            start_index,
             start_time,
         }
     }
@@ -172,8 +171,28 @@ impl OptimizationProblem {
         &self.locations
     }
 
-    pub fn start_index(&self) -> usize {
-        self.start_index
+    pub fn start_location(&self) -> &Location {
+        self.locations
+            .first()
+            .expect("optimization problems contain a start location")
+    }
+
+    pub fn end_location(&self) -> &Location {
+        self.locations
+            .last()
+            .expect("optimization problems contain an end location")
+    }
+
+    pub fn intermediate_locations(&self) -> &[Location] {
+        &self.locations[1..self.locations.len() - 1]
+    }
+
+    pub fn start_location_index(&self) -> usize {
+        0
+    }
+
+    pub fn end_location_index(&self) -> usize {
+        self.locations.len() - 1
     }
 
     pub fn start_time(&self) -> TimeOfDay {

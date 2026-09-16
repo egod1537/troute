@@ -724,14 +724,22 @@ mod tests {
     fn valid_request() -> &'static str {
         r#"{
             "job_id":"route-http-test",
-            "locations":[{
-                "id":"place-1",
-                "place_id":"GOOGLE_PLACE_ID",
-                "open_time":"09:00",
-                "close_time":"18:00",
-                "stay_minutes":60
-            }],
-            "start_location_id":"place-1",
+            "locations":[
+                {
+                    "id":"place-1",
+                    "place_id":"GOOGLE_PLACE_ID_1",
+                    "open_time":"09:00",
+                    "close_time":"18:00",
+                    "stay_minutes":0
+                },
+                {
+                    "id":"place-2",
+                    "place_id":"GOOGLE_PLACE_ID_2",
+                    "open_time":"09:00",
+                    "close_time":"18:00",
+                    "stay_minutes":0
+                }
+            ],
             "start_time":"09:00"
         }"#
     }

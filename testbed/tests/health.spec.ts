@@ -63,7 +63,12 @@ test("New Job dialog validates JSON and regenerates the sample id", async ({
   const dialog = page.getByRole("dialog", { name: "새 Job" });
   const editor = dialog.getByLabel("요청 JSON");
   await expect(dialog).toBeVisible();
-  const firstId = JSON.parse(await editor.inputValue()).job_id;
+  const initialRequest = JSON.parse(await editor.inputValue());
+  const firstId = initialRequest.job_id;
+  expect(initialRequest.locations).toHaveLength(3);
+  await expect(
+    dialog.getByText(/locations\[0\].*고정 start/),
+  ).toBeVisible();
 
   await editor.fill("{ broken");
   await dialog.getByRole("button", { name: "검증" }).click();

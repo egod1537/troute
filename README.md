@@ -131,13 +131,14 @@ client uses a five-second timeout and is reused across requests.
 
 `POST /optimize` accepts `application/json`. Time values are strict 24-hour
 `HH:MM` strings on both request and response; numeric minute values and forms
-such as `9:00`, `24:00`, or `09:60` are rejected. Requests may contain 1 to 500
-locations. The required `job_id` is an opaque correlation value supplied by
+such as `9:00`, `24:00`, or `09:60` are rejected. Requests must contain 2 to 500
+locations. The first location is the fixed start, the last location is the
+fixed destination, and only locations between them may be reordered by the
+solver. The required `job_id` is an opaque correlation value supplied by
 Trasolve; it must be non-blank and at most 128 characters. Location IDs and
-Place IDs must be non-blank strings of at most 512 characters, location IDs
-must be unique, and `start_location_id` must match a location. Overnight
-windows are not supported, so `open_time` must not be later than `close_time`.
-The request body limit is 1 MiB.
+Place IDs must be non-blank strings of at most 512 characters, and location IDs
+must be unique. Overnight windows are not supported, so `open_time` must not be
+later than `close_time`. The request body limit is 1 MiB.
 
 ```sh
 curl -i -X POST http://127.0.0.1:8080/optimize \
@@ -148,9 +149,9 @@ curl -i -X POST http://127.0.0.1:8080/optimize \
       {
         "id": "place-1",
         "place_id": "GOOGLE_PLACE_ID_1",
-        "open_time": "09:00",
-        "close_time": "18:00",
-        "stay_minutes": 60
+        "open_time": "00:00",
+        "close_time": "23:59",
+        "stay_minutes": 0
       },
       {
         "id": "place-2",
@@ -158,9 +159,15 @@ curl -i -X POST http://127.0.0.1:8080/optimize \
         "open_time": "10:00",
         "close_time": "18:00",
         "stay_minutes": 45
+      },
+      {
+        "id": "place-3",
+        "place_id": "GOOGLE_PLACE_ID_3",
+        "open_time": "00:00",
+        "close_time": "23:59",
+        "stay_minutes": 0
       }
     ],
-    "start_location_id": "place-1",
     "start_time": "09:00"
   }'
 ```
@@ -183,18 +190,21 @@ The current deterministic development implementation returns:
       "departure_time": "10:45"
     },
     {
-      "location_id": "place-1",
+      "location_id": "place-3",
       "order": 2,
-      "arrival_time": "11:00"
+      "arrival_time": "11:00",
+      "departure_time": "11:00"
     }
   ],
   "total_travel_minutes": 30
 }
 ```
 
-The start location is the v0 depot: its stay duration and opening window are
-ignored for the initial departure and final return. A missing
-`departure_time` is omitted rather than serialized as `null`.
+For `[A, B, C, D]`, `A` and `D` remain fixed while the solver may return an
+intermediate order such as `[A, C, B, D]`. The start location's stay duration
+and opening window are ignored for the initial departure. Intermediate and
+destination locations retain their time-window and `stay_minutes` behavior. A
+missing `departure_time` is omitted rather than serialized as `null`.
 
 All endpoint failures use a JSON envelope rather than an HTML error page:
 
@@ -217,14 +227,13 @@ the supported integration is server-to-server.
 
 `DevelopmentRoutingProvider` supplies zero minutes on the matrix diagonal and
 a fixed 15 minutes between every pair of different locations.
-`DevelopmentRouteSolver` starts at the selected location, visits all other
-locations in request order, and returns to the start. This behavior is
-deterministic and exercises the real `RouteOptimizationService` and schedule,
-but it is **not route optimization and does not use Google travel data**. The
-implementations are isolated in `src/development.rs` so they can be replaced
-without changing the HTTP handler or wire contract. Schedule infeasibility is
-returned as an error; the placeholders do not alter request semantics or invent
-a successful route.
+`DevelopmentRouteSolver` preserves the input order, including the fixed first
+and last locations. This behavior is deterministic and exercises the real
+`RouteOptimizationService` and schedule, but it is **not route optimization and
+does not use Google travel data**. The implementations are isolated in
+`src/development.rs` so they can be replaced without changing the HTTP handler
+or wire contract. Schedule infeasibility is returned as an error; the
+placeholders do not alter request semantics or invent a successful route.
 
 ### Trasolve integration
 

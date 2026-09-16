@@ -13,7 +13,6 @@ export interface RouteInput {
     close_time: string;
     stay_minutes: number;
   }[];
-  start_location_id: string;
   start_time: string;
 }
 
@@ -69,14 +68,14 @@ export function parseInput(text: string): RouteInput {
     !nonempty(input.job_id) ||
     [...input.job_id].length > 128 ||
     !Array.isArray(input.locations) ||
-    !input.locations.length ||
-    !nonempty(input.start_location_id) ||
+    input.locations.length < 2 ||
     !time(input.start_time)
   ) {
     throw new Error(
-      "요청에는 job_id(1~128자), locations, start_location_id, start_time(HH:MM)이 필요합니다.",
+      "요청에는 job_id(1~128자), start와 destination을 포함한 2개 이상의 locations, start_time(HH:MM)이 필요합니다.",
     );
   }
+  const locationIds = new Set<string>();
   for (const [index, location] of input.locations.entries()) {
     if (
       !object(location) ||
@@ -90,6 +89,10 @@ export function parseInput(text: string): RouteInput {
         `locations[${index}]에는 id, place_id, HH:MM 형식의 open_time/close_time, 0 이상의 정수 stay_minutes가 필요합니다.`,
       );
     }
+    if (locationIds.has(location.id)) {
+      throw new Error(`locations의 id는 고유해야 합니다: ${location.id}`);
+    }
+    locationIds.add(location.id);
   }
   // Domain validation and all route calculations belong to the backend.
   return input as unknown as RouteInput;

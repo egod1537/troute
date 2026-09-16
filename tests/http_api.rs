@@ -63,9 +63,15 @@ fn valid_request() -> Value {
                 "open_time": "09:00",
                 "close_time": "18:00",
                 "stay_minutes": 30
+            },
+            {
+                "id": "place-3",
+                "place_id": "GOOGLE_PLACE_ID_3",
+                "open_time": "09:00",
+                "close_time": "18:00",
+                "stay_minutes": 0
             }
         ],
-        "start_location_id": "place-1",
         "start_time": "09:00"
     })
 }
@@ -540,8 +546,31 @@ async fn valid_optimize_request_uses_the_service_pipeline() {
     assert_eq!(response.body["route"][1]["location_id"], "place-2");
     assert_eq!(response.body["route"][1]["arrival_time"], "09:15");
     assert_eq!(response.body["route"][1]["departure_time"], "09:45");
-    assert_eq!(response.body["route"][2]["location_id"], "place-1");
-    assert!(response.body["route"][2].get("departure_time").is_none());
+    assert_eq!(response.body["route"][2]["location_id"], "place-3");
+    assert_eq!(response.body["route"][2]["arrival_time"], "10:00");
+    assert_eq!(response.body["route"][2]["departure_time"], "10:00");
+}
+
+#[tokio::test]
+async fn two_locations_form_a_direct_start_to_destination_route() {
+    let mut request = valid_request();
+    let locations = request["locations"].as_array().unwrap();
+    let start = locations.first().unwrap().clone();
+    let destination = locations.last().unwrap().clone();
+    request["locations"] = json!([start, destination]);
+
+    let response = send(
+        Method::POST,
+        "/optimize",
+        Some("application/json"),
+        request.to_string(),
+    )
+    .await;
+
+    assert_eq!(response.status, StatusCode::OK);
+    assert_eq!(response.body["route"].as_array().unwrap().len(), 2);
+    assert_eq!(response.body["route"][0]["location_id"], "place-1");
+    assert_eq!(response.body["route"][1]["location_id"], "place-3");
 }
 
 #[tokio::test]
@@ -585,10 +614,10 @@ async fn invalid_requests_return_stable_json_errors_without_panicking() {
     invalid_time["start_time"] = json!("9:00");
     let mut empty_locations = valid_request();
     empty_locations["locations"] = json!([]);
+    let mut one_location = valid_request();
+    one_location["locations"] = json!([one_location["locations"][0].clone()]);
     let mut duplicate_ids = valid_request();
     duplicate_ids["locations"][1]["id"] = json!("place-1");
-    let mut unknown_start = valid_request();
-    unknown_start["start_location_id"] = json!("missing");
     let mut invalid_window = valid_request();
     invalid_window["locations"][0]["open_time"] = json!("19:00");
     invalid_window["locations"][0]["close_time"] = json!("18:00");
@@ -608,10 +637,8 @@ async fn invalid_requests_return_stable_json_errors_without_panicking() {
             })
             .collect(),
     );
-    too_many_locations["start_location_id"] = json!("place-0");
     let mut location_id_too_long = valid_request();
     location_id_too_long["locations"][0]["id"] = json!("x".repeat(513));
-    location_id_too_long["start_location_id"] = json!("x".repeat(513));
     let mut unknown_field = valid_request();
     unknown_field["unexpected"] = json!(true);
 
@@ -622,8 +649,8 @@ async fn invalid_requests_return_stable_json_errors_without_panicking() {
         missing_job_id,
         invalid_time,
         empty_locations,
+        one_location,
         duplicate_ids,
-        unknown_start,
         invalid_window,
         incorrect_type,
         too_many_locations,
