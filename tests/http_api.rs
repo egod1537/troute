@@ -8,7 +8,15 @@ use axum::{
 };
 use http_body_util::BodyExt;
 use serde_json::{json, Value};
-use std::{sync::Arc, time::Duration};
+use std::{
+    fs,
+    path::PathBuf,
+    sync::{
+        atomic::{AtomicU64, Ordering},
+        Arc,
+    },
+    time::Duration,
+};
 use tokio::{net::TcpListener, sync::mpsc, task::JoinHandle, time::sleep};
 use tower::ServiceExt;
 use troute::{
@@ -18,9 +26,32 @@ use troute::{
         JobObservationRecorder, JobTimelineEntry, JobTimelineStore, ObservationDirection,
         ObservationPeer,
     },
+    storage::{FileJobStore, FileJobTimelineStore},
     trasolve::TrasolveClient,
     RouteOptimizationService,
 };
+
+static NEXT_TEST_DIRECTORY: AtomicU64 = AtomicU64::new(1);
+
+struct TestDirectory(PathBuf);
+
+impl TestDirectory {
+    fn new() -> Self {
+        let path = std::env::temp_dir().join(format!(
+            "troute-http-storage-test-{}-{}",
+            std::process::id(),
+            NEXT_TEST_DIRECTORY.fetch_add(1, Ordering::Relaxed)
+        ));
+        fs::create_dir(&path).unwrap();
+        Self(path)
+    }
+}
+
+impl Drop for TestDirectory {
+    fn drop(&mut self) {
+        let _ = fs::remove_dir_all(&self.0);
+    }
+}
 
 fn app() -> Router {
     http::router(RouteOptimizationService::new(
@@ -44,6 +75,17 @@ fn app_with_observation(trasolve: Option<TrasolveClient>) -> (Router, JobObserva
         Some(observation.clone()),
     );
     (app, observation)
+}
+
+fn app_with_file_storage(data_dir: &std::path::Path, trasolve: Option<TrasolveClient>) -> Router {
+    let observation =
+        JobObservationRecorder::new(Arc::new(FileJobTimelineStore::new(data_dir).unwrap()));
+    http::router_with_storage(
+        RouteOptimizationService::new(DevelopmentRoutingProvider, DevelopmentRouteSolver),
+        trasolve,
+        Some(observation),
+        Some(Arc::new(FileJobStore::new(data_dir).unwrap())),
+    )
 }
 
 fn valid_request() -> Value {
@@ -118,6 +160,176 @@ async fn health_remains_available() {
     let response = send(Method::GET, "/health", None, String::new()).await;
     assert_eq!(response.status, StatusCode::OK);
     assert_eq!(response.body, json!({ "status": "ok" }));
+}
+
+#[tokio::test]
+async fn persistent_job_api_restores_completed_jobs_and_rejects_duplicates() {
+    let temporary = TestDirectory::new();
+    let app = app_with_file_storage(&temporary.0, None);
+    let response = send_to(
+        app.clone(),
+        Method::POST,
+        "/optimize",
+        Some("application/json"),
+        valid_request().to_string(),
+    )
+    .await;
+    assert_eq!(response.status, StatusCode::OK);
+
+    let duplicate = send_to(
+        app.clone(),
+        Method::POST,
+        "/optimize",
+        Some("application/json"),
+        valid_request().to_string(),
+    )
+    .await;
+    assert_error(duplicate, StatusCode::CONFLICT, "DUPLICATE_JOB_ID");
+
+    let list = send_to(
+        app.clone(),
+        Method::GET,
+        "/integration/jobs?limit=50",
+        None,
+        String::new(),
+    )
+    .await;
+    assert_eq!(list.status, StatusCode::OK);
+    assert_eq!(list.body["jobs"].as_array().unwrap().len(), 1);
+    assert_eq!(list.body["jobs"][0]["status"], "completed");
+
+    let detail = send_to(
+        app.clone(),
+        Method::GET,
+        "/integration/jobs/route-http-integration-test",
+        None,
+        String::new(),
+    )
+    .await;
+    assert_eq!(detail.status, StatusCode::OK);
+    assert_eq!(detail.body["request"], valid_request());
+    assert_eq!(detail.body["state"]["progress"], 100);
+    assert_eq!(detail.body["result"], response.body);
+    assert!(detail.body["error"].is_null());
+
+    let timeline = send_to(
+        app,
+        Method::GET,
+        "/integration/jobs/route-http-integration-test/timeline",
+        None,
+        String::new(),
+    )
+    .await;
+    assert_eq!(timeline.status, StatusCode::OK);
+    assert_eq!(timeline.body["entries"].as_array().unwrap().len(), 2);
+    assert!(temporary
+        .0
+        .join("jobs/route-http-integration-test/request.json")
+        .is_file());
+    assert!(temporary
+        .0
+        .join("jobs/route-http-integration-test/state.json")
+        .is_file());
+    assert!(temporary
+        .0
+        .join("jobs/route-http-integration-test/result.json")
+        .is_file());
+    assert!(temporary
+        .0
+        .join("jobs/route-http-integration-test/timeline.jsonl")
+        .is_file());
+}
+
+#[tokio::test]
+async fn persistent_timeline_records_real_callback_pairs() {
+    let temporary = TestDirectory::new();
+    let (base_url, mut callback_events, _server) =
+        spawn_job_event_mock(StatusCode::NO_CONTENT).await;
+    let app = app_with_file_storage(&temporary.0, Some(TrasolveClient::new(base_url).unwrap()));
+
+    let response = send_to(
+        app.clone(),
+        Method::POST,
+        "/optimize",
+        Some("application/json"),
+        valid_request().to_string(),
+    )
+    .await;
+    assert_eq!(response.status, StatusCode::OK);
+    let mut callbacks = 0;
+    while callback_events.try_recv().is_ok() {
+        callbacks += 1;
+    }
+    assert_eq!(callbacks, 5);
+
+    let timeline = send_to(
+        app,
+        Method::GET,
+        "/integration/jobs/route-http-integration-test/timeline",
+        None,
+        String::new(),
+    )
+    .await;
+    let entries = timeline.body["entries"].as_array().unwrap();
+    assert_eq!(entries.len(), 12);
+    assert_eq!(
+        entries
+            .iter()
+            .filter(|entry| entry["source"] == "troute" && entry["target"] == "trasolve")
+            .count(),
+        5
+    );
+    assert_eq!(
+        entries
+            .iter()
+            .filter(|entry| entry["source"] == "trasolve" && entry["target"] == "troute")
+            .count(),
+        5
+    );
+}
+
+#[tokio::test]
+async fn persistent_job_failure_writes_error_and_terminal_state() {
+    let temporary = TestDirectory::new();
+    let app = app_with_file_storage(&temporary.0, None);
+    let mut request = valid_request();
+    request["job_id"] = json!("route-persistent-failure");
+    request["locations"][1]["close_time"] = json!("09:10");
+
+    let response = send_to(
+        app.clone(),
+        Method::POST,
+        "/optimize",
+        Some("application/json"),
+        request.to_string(),
+    )
+    .await;
+    assert_error(
+        response,
+        StatusCode::UNPROCESSABLE_ENTITY,
+        "NO_FEASIBLE_ROUTE",
+    );
+
+    let detail = send_to(
+        app,
+        Method::GET,
+        "/integration/jobs/route-persistent-failure",
+        None,
+        String::new(),
+    )
+    .await;
+    assert_eq!(detail.status, StatusCode::OK);
+    assert_eq!(detail.body["state"]["status"], "failed");
+    assert!(detail.body["state"]["completed_at"].is_number());
+    assert_eq!(detail.body["error"]["code"], "NO_FEASIBLE_ROUTE");
+    assert!(temporary
+        .0
+        .join("jobs/route-persistent-failure/error.json")
+        .is_file());
+    assert!(!temporary
+        .0
+        .join("jobs/route-persistent-failure/result.json")
+        .exists());
 }
 
 #[tokio::test]

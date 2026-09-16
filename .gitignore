@@ -4,6 +4,8 @@ node_modules/
 /testbed/dist/
 /testbed/test-results/
 /testbed/playwright-report/
+.local/
+runtime/
 .env
 .env.*
 !.env.example

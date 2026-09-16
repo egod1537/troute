@@ -26,6 +26,57 @@ export interface RouteResponse {
   total_travel_minutes: number;
 }
 
+export type StoredJobStatus = "pending" | "running" | "completed" | "failed";
+
+export interface StoredJobState {
+  job_id: string;
+  status: StoredJobStatus;
+  stage?: string | null;
+  progress: number;
+  last_message?: string | null;
+  created_at: number;
+  updated_at: number;
+  completed_at?: number | null;
+}
+
+export interface StoredJobSummary {
+  job_id: string;
+  status: StoredJobStatus;
+  created_at: number;
+  updated_at: number;
+}
+
+export interface StoredJobError {
+  code: string;
+  message: string;
+  detail: string;
+}
+
+export interface StoredJobRecord {
+  request: RouteInput;
+  state: StoredJobState;
+  result?: RouteResponse | null;
+  error?: StoredJobError | null;
+}
+
+export interface StoredTimelineEntry {
+  id: string;
+  pair_id: string;
+  timestamp_ms: number;
+  direction: "REQUEST" | "RESPONSE";
+  source: "testbed" | "troute" | "trasolve";
+  target: "testbed" | "troute" | "trasolve";
+  method?: string | null;
+  path?: string | null;
+  status?: number | null;
+  latency_ms?: number | null;
+  headers?: Record<string, string> | null;
+  query?: unknown;
+  body?: unknown;
+  raw?: string | null;
+  error?: string | null;
+}
+
 export interface ApiResponse {
   method: string;
   path: string;
@@ -200,4 +251,33 @@ export async function runRoute(
     );
   const response = await request(ROUTE_PATH, input);
   return { response, route: parseRoute(response) };
+}
+
+async function integrationJson<T>(path: string): Promise<T> {
+  const response = await fetch(`${API_BASE}/${path.replace(/^\//, "")}`, {
+    cache: "no-store",
+  });
+  if (!response.ok) throw new Error(`HTTP ${response.status} ${response.statusText}`);
+  return (await response.json()) as T;
+}
+
+export async function listRecentJobs(limit = 50): Promise<StoredJobSummary[]> {
+  const response = await integrationJson<{ jobs: StoredJobSummary[] }>(
+    `/integration/jobs?limit=${limit}`,
+  );
+  return response.jobs;
+}
+
+export function getStoredJob(jobId: string): Promise<StoredJobRecord> {
+  return integrationJson(`/integration/jobs/${encodeURIComponent(jobId)}`);
+}
+
+export async function getStoredTimeline(
+  jobId: string,
+): Promise<StoredTimelineEntry[]> {
+  const response = await integrationJson<{
+    job_id: string;
+    entries: StoredTimelineEntry[];
+  }>(`/integration/jobs/${encodeURIComponent(jobId)}/timeline`);
+  return response.entries;
 }

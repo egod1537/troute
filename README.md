@@ -406,32 +406,47 @@ After successful delivery, the job is expected to be `completed` with progress
 events followed by the result event. The Trasolve job endpoint owns that stored
 state; troute remains synchronous and does not write Trip storage directly.
 
-### Testbed job observation timeline
+### Local job records and observation timeline
 
-Set `TROUTE_ENABLE_TESTBED_OBSERVATION=true` to record the real HTTP boundaries
-around each parsed `/optimize` request and each outbound Trasolve job callback.
-The flag defaults to `false`; invalid values fail startup. Observation is
-best-effort, in memory only, and has no effect on optimization or callback
-delivery. Keep it disabled on deployments where the integration endpoint
-should not expose developer diagnostics.
-
-Read a job timeline with:
+troute stores validated optimize requests and their execution state as readable
+UTF-8 JSON under `TROUTE_DATA_DIR`. The default is `.local/troute`; Docker uses
+`/data`. Each job has its own directory:
 
 ```text
+.local/troute/
+├── index.json
+└── jobs/<encoded-job-id>/
+    ├── request.json
+    ├── state.json
+    ├── result.json       # successful jobs only
+    ├── error.json        # failed jobs only
+    └── timeline.jsonl
+```
+
+`state.json`, result/error files, and `index.json` are replaced atomically via a
+temporary file and rename. `timeline.jsonl` is append-only with one complete
+`JobTimelineEntry` JSON value per line. Job IDs are safely encoded only for the
+directory name; the original ID remains unchanged in stored JSON and APIs.
+
+An existing job directory is never overwritten. Reusing a `job_id` returns HTTP
+409 with `DUPLICATE_JOB_ID`. At startup, completed and failed jobs are retained;
+pending or running jobs are marked failed with `PROCESS_RESTARTED`. There is no
+automatic retention deletion in this version.
+
+Read recent jobs, one stored job, or its timeline with:
+
+```text
+GET /integration/jobs?limit=50
+GET /integration/jobs/{job_id}
 GET /integration/jobs/{job_id}/timeline
 ```
 
-The endpoint returns HTTP 200 with `{ "job_id": "...", "entries": [] }` when
-observation is disabled or the job is unknown. Entries are sorted by millisecond
-timestamp, preserving insertion order when timestamps match. Each real HTTP
-exchange has separate `REQUEST` and `RESPONSE` entries sharing a `pair_id`.
-Callback HTTP rejections, connection failures, and timeouts remain visible as
-response entries; failures without an HTTP response have no status.
-
-Storage retains at most 100 jobs and 500 entries per job. A new job beyond the
-job limit evicts the oldest-created job; a new entry beyond a job's entry limit
-evicts that job's oldest entry. Appending to an existing job does not refresh
-its job eviction position. Restarting troute clears all observations.
+An unknown timeline returns HTTP 200 with an empty `entries` list; an unknown
+job detail returns 404. Timeline entries are sorted by millisecond timestamp,
+preserving file insertion order when timestamps match. Each real HTTP exchange
+has separate `REQUEST` and `RESPONSE` entries sharing a `pair_id`. Callback HTTP
+rejections, connection failures, and timeouts remain visible as response
+entries; failures without an HTTP response have no status.
 
 Only `Content-Type`, `Accept`, and `User-Agent` headers are eligible for
 recording. Authorization, cookies, API keys, and other headers are never stored.
@@ -456,14 +471,15 @@ Compose publishes the host port on `127.0.0.1` only. The application still binds
 to `0.0.0.0` inside the container, so containers on its Docker network can reach
 it. Both application and host ports default to `8080`.
 
-Compose passes through `TRASOLVE_BASE_URL` when it is set and passes
-`TROUTE_ENABLE_TESTBED_OBSERVATION`, defaulting the latter to `false`. The
-checked-in `.env.example` enables observation for local testbed use. Inside the
-troute container, `127.0.0.1` refers to that container, not the Docker host or a
-Trasolve container. Set the backend URL to an address actually reachable from
-the troute container, such as the Trasolve Compose service name when both
-services share a network. The source code makes no host-specific networking
-assumption.
+Compose passes through `TRASOLVE_BASE_URL` when it is set, sets
+`TROUTE_DATA_DIR=/data`, and bind-mounts `./runtime/troute:/data`. Both
+`.local/` and `runtime/` are ignored by Git. `docker compose build`, `up`, and
+the deployment script do not remove the host runtime directory, so records
+survive image and container replacement. Inside the troute container,
+`127.0.0.1` refers to that container, not the Docker host or a Trasolve
+container. Set the backend URL to an address actually reachable from the
+troute container, such as the Trasolve Compose service name when both services
+share a network. The source code makes no host-specific networking assumption.
 
 If the host port is already occupied, create a local configuration:
 
@@ -489,8 +505,10 @@ job-centric workspace creates optimize requests from a JSON dialog, shows each
 request immediately in the Jobs sidebar, and keeps the structured route result,
 raw response, HTTP status, and round-trip latency with the selected job.
 
-Testbed job history is session-local and resets on page reload. It is a frontend
-observation model, not an authoritative copy of server-side job state.
+On page load, the testbed reads the recent server-side job index, restores each
+Job view model, selects the newest job, and fetches its stored Timeline. Browser
+state remains a view model; the local troute files are the authoritative
+execution record. Reloading the page no longer discards completed history.
 
 The testbed supports Light, Dark, and System themes from the Navbar control.
 System is the default and follows browser/OS color-scheme changes. An explicit
@@ -549,8 +567,9 @@ port through your existing private connection; it does not require exposing
 the API port or publishing a public domain.
 
 The displayed request latency measures the latest browser round trip, including
-the proxy and response transfer. It is not solver execution time and is not
-stored as history or persisted.
+the proxy and response transfer. It is not solver execution time. Server-side
+Timeline latency is persisted, while this browser-only measurement is available
+only for requests made in the current page session.
 
 The main watcher runs in a separate production clone; each new main commit rebuilds and updates
 both services. Deployment succeeds only when API health **and** testbed HTTP

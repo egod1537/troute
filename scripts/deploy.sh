@@ -142,6 +142,9 @@ deploy_main() {
   deployment_started=true
   set_github_status "$deployed_sha" pending 'Deploying to production'
 
+  # Runtime job records live outside Git and must survive image/container replacement.
+  mkdir -p runtime/troute
+
   # Build must succeed before Compose replaces the existing container.
   echo 'Building troute and testbed images'
   TROUTE_COMMIT_SHA="$deployed_sha" docker compose build

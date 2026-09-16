@@ -29,13 +29,13 @@ pub struct LocationInput {
     pub stay_minutes: u32,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
 pub struct OptimizeRouteResponse {
     pub route: Vec<RouteStopOutput>,
     pub total_travel_minutes: u32,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
 pub struct RouteStopOutput {
     pub location_id: String,
     pub order: usize,

@@ -1,10 +1,14 @@
-use std::{env, error::Error, net::SocketAddr, num::NonZeroU16, process::ExitCode, sync::Arc};
+use std::{
+    env, error::Error, net::SocketAddr, num::NonZeroU16, path::PathBuf, process::ExitCode,
+    sync::Arc,
+};
 
 use tokio::net::TcpListener;
 use troute::{
     development::{DevelopmentRouteSolver, DevelopmentRoutingProvider},
     http,
-    observation::{InMemoryJobTimelineStore, JobObservationRecorder},
+    observation::JobObservationRecorder,
+    storage::{FileJobStore, FileJobTimelineStore, JobStore},
     trasolve::TrasolveClient,
     RouteOptimizationService,
 };
@@ -34,15 +38,15 @@ async fn run() -> Result<(), Box<dyn Error>> {
         Err(env::VarError::NotPresent) => None,
         Err(error) => return Err(error.into()),
     };
-    let observation_enabled = match env::var("TROUTE_ENABLE_TESTBED_OBSERVATION") {
-        Ok(value) => value
-            .parse::<bool>()
-            .map_err(|_| "TROUTE_ENABLE_TESTBED_OBSERVATION must be `true` or `false`")?,
-        Err(env::VarError::NotPresent) => false,
+    let data_dir = match env::var("TROUTE_DATA_DIR") {
+        Ok(value) if !value.trim().is_empty() => PathBuf::from(value),
+        Ok(_) => return Err("TROUTE_DATA_DIR must not be empty".into()),
+        Err(env::VarError::NotPresent) => PathBuf::from(".local/troute"),
         Err(error) => return Err(error.into()),
     };
-    let observation = observation_enabled
-        .then(|| JobObservationRecorder::new(Arc::new(InMemoryJobTimelineStore::default())));
+    let job_store = Arc::new(FileJobStore::new(&data_dir)?);
+    let recovered_jobs = job_store.recover_interrupted()?;
+    let observation = JobObservationRecorder::new(Arc::new(FileJobTimelineStore::new(&data_dir)?));
     let address = SocketAddr::from(([0, 0, 0, 0], port));
     println!("troute server starting; bind address: {address}");
     println!(
@@ -53,18 +57,12 @@ async fn run() -> Result<(), Box<dyn Error>> {
             "not configured"
         }
     );
-    println!(
-        "Testbed job observation: {}",
-        if observation_enabled {
-            "enabled"
-        } else {
-            "disabled"
-        }
-    );
+    println!("Local job data directory: {}", data_dir.display());
+    println!("Recovered interrupted jobs: {recovered_jobs}");
     let listener = TcpListener::bind(address).await?;
     let optimizer =
         RouteOptimizationService::new(DevelopmentRoutingProvider, DevelopmentRouteSolver);
-    let app = http::router_with_observation(optimizer, trasolve, observation);
+    let app = http::router_with_storage(optimizer, trasolve, Some(observation), Some(job_store));
 
     println!("troute server listening on http://{address}");
     axum::serve(listener, app)

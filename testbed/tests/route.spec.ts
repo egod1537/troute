@@ -197,3 +197,94 @@ test("malformed successful responses fail without losing inspection data", async
   );
   await expect(page.getByRole("table")).toHaveCount(0);
 });
+
+test("reload restores recent jobs and fetches the selected timeline", async ({
+  page,
+}) => {
+  let timelineCalls = 0;
+  await page.route("**/api/integration/jobs?limit=50", (route) =>
+    route.fulfill({
+      json: {
+        jobs: [
+          {
+            job_id: "route-persisted",
+            status: "completed",
+            created_at: 1789521000000,
+            updated_at: 1789521005000,
+          },
+        ],
+      },
+    }),
+  );
+  await page.route("**/api/integration/jobs/route-persisted/timeline", (route) => {
+    timelineCalls += 1;
+    return route.fulfill({
+      json: {
+        job_id: "route-persisted",
+        entries: [
+          {
+            id: "evt-1",
+            pair_id: "opt-1",
+            timestamp_ms: 1789521000000,
+            direction: "REQUEST",
+            source: "testbed",
+            target: "troute",
+            method: "POST",
+            path: "/optimize",
+          },
+        ],
+      },
+    });
+  });
+  await page.route("**/api/integration/jobs/route-persisted", (route) =>
+    route.fulfill({
+      json: {
+        request: {
+          job_id: "route-persisted",
+          locations: [
+            {
+              id: "A",
+              place_id: "place-a",
+              open_time: "00:00",
+              close_time: "23:59",
+              stay_minutes: 0,
+            },
+            {
+              id: "C",
+              place_id: "place-c",
+              open_time: "00:00",
+              close_time: "23:59",
+              stay_minutes: 0,
+            },
+          ],
+          start_time: "09:00",
+        },
+        state: {
+          job_id: "route-persisted",
+          status: "completed",
+          stage: "scheduling",
+          progress: 100,
+          last_message: "Building itinerary schedule.",
+          created_at: 1789521000000,
+          updated_at: 1789521005000,
+          completed_at: 1789521005000,
+        },
+        result: routeResult,
+        error: null,
+      },
+    }),
+  );
+
+  await page.goto("/");
+  const restored = page.getByRole("option", { name: /route-persisted/ });
+  await expect(restored).toBeVisible();
+  await expect(restored).toHaveAttribute("aria-selected", "true");
+  await expect(page.getByRole("heading", { name: "route-persisted" })).toBeVisible();
+  await expect(page.getByLabel("방문 순서")).toHaveText("A → B → C");
+  await expect.poll(() => timelineCalls).toBe(1);
+
+  await page.reload();
+  await expect(page.getByRole("option", { name: /route-persisted/ })).toBeVisible();
+  await expect(page.getByRole("heading", { name: "route-persisted" })).toBeVisible();
+  await expect.poll(() => timelineCalls).toBe(2);
+});

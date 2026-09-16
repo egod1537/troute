@@ -24,7 +24,7 @@ export interface TimelineEntry {
   error?: string | null;
 }
 
-/** Browser-session observation model; it is not the server job API contract. */
+/** Testbed view model hydrated from server records and local request lifecycle. */
 export interface TestbedJob {
   id: string;
   status: TestbedJobStatus;

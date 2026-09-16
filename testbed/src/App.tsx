@@ -1,6 +1,15 @@
 import { useEffect, useMemo, useState } from "react";
 import { Classes } from "@blueprintjs/core";
-import { ApiError, checkHealth, runRoute, type RouteInput } from "./api";
+import {
+  ApiError,
+  checkHealth,
+  getStoredJob,
+  getStoredTimeline,
+  listRecentJobs,
+  runRoute,
+  type RouteInput,
+  type StoredJobRecord,
+} from "./api";
 import { AppHeader, type HealthState } from "./components/AppHeader";
 import { JobDetail } from "./components/detail/JobDetail";
 import { JobSidebar } from "./components/jobs/JobSidebar";
@@ -38,6 +47,47 @@ export function App({ initialThemeMode }: AppProps) {
     void refreshHealth();
   }, []);
 
+  useEffect(() => {
+    let cancelled = false;
+    void (async () => {
+      try {
+        const summaries = await listRecentJobs();
+        const records = await Promise.all(
+          summaries.map((summary) => getStoredJob(summary.job_id)),
+        );
+        if (cancelled) return;
+        const restored = records.map(jobFromStoredRecord);
+        setJobs((current) => {
+          const currentIds = new Set(current.map((job) => job.id));
+          return [
+            ...current,
+            ...restored.filter((job) => !currentIds.has(job.id)),
+          ].sort((left, right) => right.createdAt - left.createdAt);
+        });
+        setSelectedJobId((current) => current ?? restored[0]?.id ?? null);
+      } catch {
+        // History is an integration aid; an unavailable history endpoint must
+        // not prevent health checks or new optimize requests.
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
+  useEffect(() => {
+    if (!selectedJobId) return;
+    let cancelled = false;
+    void getStoredTimeline(selectedJobId)
+      .then((timeline) => {
+        if (!cancelled) updateJob(selectedJobId, { timeline });
+      })
+      .catch(() => undefined);
+    return () => {
+      cancelled = true;
+    };
+  }, [selectedJobId]);
+
   function updateJob(jobId: string, update: Partial<TestbedJob>) {
     setJobs((current) =>
       current.map((job) => (job.id === jobId ? { ...job, ...update } : job)),
@@ -73,6 +123,10 @@ export function App({ initialThemeMode }: AppProps) {
         error: (error as Error).message,
         response: error instanceof ApiError ? error.response : undefined,
       });
+    } finally {
+      void getStoredTimeline(request.job_id)
+        .then((timeline) => updateJob(request.job_id, { timeline }))
+        .catch(() => undefined);
     }
   }
 
@@ -133,4 +187,23 @@ export function App({ initialThemeMode }: AppProps) {
       />
     </div>
   );
+}
+
+function jobFromStoredRecord(record: StoredJobRecord): TestbedJob {
+  const error = record.error
+    ? `${record.error.code}: ${record.error.message}${record.error.detail ? ` (${record.error.detail})` : ""}`
+    : undefined;
+  return {
+    id: record.state.job_id,
+    status: record.state.status,
+    createdAt: record.state.created_at,
+    completedAt: record.state.completed_at ?? undefined,
+    progress: record.state.progress,
+    stage: record.state.stage ?? undefined,
+    message: record.state.last_message ?? undefined,
+    error,
+    request: record.request,
+    timeline: [],
+    route: record.result ?? undefined,
+  };
 }

@@ -15,6 +15,7 @@ pub mod routing;
 pub mod schedule;
 pub mod service;
 pub mod solver;
+pub mod storage;
 pub mod trasolve;
 
 pub use api::{OptimizeRouteRequest, OptimizeRouteResponse};
@@ -27,3 +28,7 @@ pub use observation::{
     ObservationDirection, ObservationPeer,
 };
 pub use service::RouteOptimizationService;
+pub use storage::{
+    FileJobStore, FileJobTimelineStore, JobIndexEntry, JobState, JobStatus, JobStore,
+    JobStoreError, StoredJob, StoredJobError,
+};

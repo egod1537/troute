@@ -5,18 +5,19 @@ use std::{
 
 use axum::{
     body::Body,
-    extract::{rejection::JsonRejection, DefaultBodyLimit, Path, State},
+    extract::{rejection::JsonRejection, DefaultBodyLimit, Path, Query, State},
     http::{header, HeaderMap, HeaderValue, Request, StatusCode},
     response::{IntoResponse, Response},
     routing::{get, post},
     Json, Router,
 };
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use serde_json::json;
 use tokio::{sync::mpsc, task::JoinHandle, time::timeout};
 
 use crate::{
     api::{OptimizeRouteRequest, OptimizeRouteResponse},
+    domain::OptimizationProblem,
     events::{
         ErrorEventData, JobEventContext, JobEventType, NoopOptimizationEventReporter,
         OptimizationErrorCode, OptimizationEventReporter, ProgressEventData, ProgressStage,
@@ -29,6 +30,7 @@ use crate::{
     schedule::ScheduleError,
     service::{OptimizationServiceError, RouteOptimizationService},
     solver::{RouteSolver, SolverError},
+    storage::{JobIndexEntry, JobStore, JobStoreError, StoredJob, StoredJobError},
     trasolve::{TrasolveClient, TrasolveClientError, TrasolveHealthResponse},
 };
 
@@ -66,6 +68,63 @@ enum QueuedJobEvent {
 
 struct ChannelOptimizationEventReporter {
     sender: mpsc::UnboundedSender<QueuedJobEvent>,
+}
+
+struct PersistentOptimizationEventReporter<'a> {
+    job_id: &'a str,
+    store: Option<&'a Arc<dyn JobStore>>,
+    delegate: &'a dyn OptimizationEventReporter,
+}
+
+impl PersistentOptimizationEventReporter<'_> {
+    fn log_failure(&self, operation: &str, result: Result<(), JobStoreError>) {
+        if let Err(error) = result {
+            eprintln!(
+                "job persistence failed; job_id={}; operation={operation}; error={error}",
+                self.job_id
+            );
+        }
+    }
+}
+
+impl OptimizationEventReporter for PersistentOptimizationEventReporter<'_> {
+    fn progress(&self, stage: ProgressStage, progress: u8, message: Option<&str>) {
+        if let Some(store) = self.store {
+            self.log_failure(
+                "update_progress",
+                store.update_progress(self.job_id, stage, progress, message),
+            );
+        }
+        self.delegate.progress(stage, progress, message);
+    }
+
+    fn error(&self, code: OptimizationErrorCode, message: &str, detail: &str) {
+        if let Some(store) = self.store {
+            let code = serde_json::to_value(code)
+                .ok()
+                .and_then(|value| value.as_str().map(str::to_owned))
+                .unwrap_or_else(|| "INTERNAL_ERROR".to_owned());
+            self.log_failure(
+                "save_error",
+                store.save_error(
+                    self.job_id,
+                    &StoredJobError {
+                        code,
+                        message: message.to_owned(),
+                        detail: detail.to_owned(),
+                    },
+                ),
+            );
+        }
+        self.delegate.error(code, message, detail);
+    }
+
+    fn result(&self, response: &OptimizeRouteResponse) {
+        if let Some(store) = self.store {
+            self.log_failure("save_result", store.save_result(self.job_id, response));
+        }
+        self.delegate.result(response);
+    }
 }
 
 impl ChannelOptimizationEventReporter {
@@ -189,6 +248,7 @@ struct AppState {
     optimizer: Arc<dyn Optimizer>,
     trasolve: Option<TrasolveClient>,
     observation: Option<JobObservationRecorder>,
+    job_store: Option<Arc<dyn JobStore>>,
 }
 
 #[derive(Debug, Serialize)]
@@ -206,6 +266,16 @@ struct TrasolveIntegrationHealthResponse {
 struct JobTimelineResponse {
     job_id: String,
     entries: Vec<JobTimelineEntry>,
+}
+
+#[derive(Debug, Serialize)]
+struct JobListResponse {
+    jobs: Vec<JobIndexEntry>,
+}
+
+#[derive(Debug, Deserialize)]
+struct JobListQuery {
+    limit: Option<usize>,
 }
 
 #[derive(Debug, Serialize)]
@@ -314,6 +384,23 @@ impl ApiError {
         }
     }
 
+    fn from_storage(error: JobStoreError) -> Self {
+        match error {
+            JobStoreError::DuplicateJob(job_id) => Self::new(
+                StatusCode::CONFLICT,
+                "DUPLICATE_JOB_ID",
+                "A job with this job_id already exists.",
+                job_id,
+            ),
+            source => Self::new(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "STORAGE_ERROR",
+                "Job records could not be stored.",
+                source.to_string(),
+            ),
+        }
+    }
+
     fn trasolve_not_configured() -> Self {
         Self::new(
             StatusCode::SERVICE_UNAVAILABLE,
@@ -390,7 +477,7 @@ where
     P: RoutingProvider + Send + Sync + 'static,
     S: RouteSolver + Send + Sync + 'static,
 {
-    router_with_observation(optimizer, None, None)
+    router_with_storage(optimizer, None, None, None)
 }
 
 /// Builds the HTTP application with an optional reusable Trasolve client.
@@ -402,7 +489,7 @@ where
     P: RoutingProvider + Send + Sync + 'static,
     S: RouteSolver + Send + Sync + 'static,
 {
-    router_with_observation(optimizer, trasolve, None)
+    router_with_storage(optimizer, trasolve, None, None)
 }
 
 /// Builds the HTTP application with optional Trasolve and testbed observation support.
@@ -410,6 +497,20 @@ pub fn router_with_observation<P, S>(
     optimizer: RouteOptimizationService<P, S>,
     trasolve: Option<TrasolveClient>,
     observation: Option<JobObservationRecorder>,
+) -> Router
+where
+    P: RoutingProvider + Send + Sync + 'static,
+    S: RouteSolver + Send + Sync + 'static,
+{
+    router_with_storage(optimizer, trasolve, observation, None)
+}
+
+/// Builds the HTTP application with persistent job and timeline storage.
+pub fn router_with_storage<P, S>(
+    optimizer: RouteOptimizationService<P, S>,
+    trasolve: Option<TrasolveClient>,
+    observation: Option<JobObservationRecorder>,
+    job_store: Option<Arc<dyn JobStore>>,
 ) -> Router
 where
     P: RoutingProvider + Send + Sync + 'static,
@@ -427,6 +528,8 @@ where
             "/integration/trasolve/health",
             get(trasolve_integration_health),
         )
+        .route("/integration/jobs", get(list_jobs))
+        .route("/integration/jobs/{job_id}", get(get_job))
         .route("/integration/jobs/{job_id}/timeline", get(job_timeline))
         .fallback(not_found)
         .method_not_allowed_fallback(method_not_allowed)
@@ -435,6 +538,7 @@ where
             optimizer: Arc::new(optimizer),
             trasolve,
             observation,
+            job_store,
         })
 }
 
@@ -448,8 +552,17 @@ async fn optimize(
     request: Result<Json<OptimizeRouteRequest>, JsonRejection>,
 ) -> Result<Json<OptimizeRouteResponse>, ApiError> {
     let Json(request) = request.map_err(ApiError::from_json_rejection)?;
+    OptimizationProblem::try_from(request.clone())
+        .map_err(OptimizationServiceError::InvalidRequest)
+        .map_err(ApiError::from_service)?;
     let job_id = request.job_id.clone();
     let started = Instant::now();
+    if let Some(store) = &state.job_store {
+        store.create_job(&request).map_err(ApiError::from_storage)?;
+        store
+            .mark_running(&job_id)
+            .map_err(ApiError::from_storage)?;
+    }
     let pair_id = state
         .observation
         .as_ref()
@@ -475,11 +588,16 @@ async fn optimize(
         }
     };
     let noop_reporter = NoopOptimizationEventReporter;
-    let reporter: &dyn OptimizationEventReporter = match &callback {
+    let delegate: &dyn OptimizationEventReporter = match &callback {
         Some(callback) => &callback.reporter,
         None => &noop_reporter,
     };
-    let result = state.optimizer.optimize_with_reporter(request, reporter);
+    let reporter = PersistentOptimizationEventReporter {
+        job_id: &job_id,
+        store: state.job_store.as_ref(),
+        delegate,
+    };
+    let result = state.optimizer.optimize_with_reporter(request, &reporter);
 
     if let Some(callback) = callback {
         callback.finish().await;
@@ -516,6 +634,36 @@ async fn optimize(
             Err(error)
         }
     }
+}
+
+async fn list_jobs(
+    State(state): State<AppState>,
+    Query(query): Query<JobListQuery>,
+) -> Result<Json<JobListResponse>, ApiError> {
+    let limit = query.limit.unwrap_or(50).min(500);
+    let jobs = match &state.job_store {
+        Some(store) => store.list_recent(limit).map_err(ApiError::from_storage)?,
+        None => Vec::new(),
+    };
+    Ok(Json(JobListResponse { jobs }))
+}
+
+async fn get_job(
+    State(state): State<AppState>,
+    Path(job_id): Path<String>,
+) -> Result<Json<StoredJob>, ApiError> {
+    let job = match &state.job_store {
+        Some(store) => store.get_job(&job_id).map_err(ApiError::from_storage)?,
+        None => None,
+    };
+    job.map(Json).ok_or_else(|| {
+        ApiError::new(
+            StatusCode::NOT_FOUND,
+            "JOB_NOT_FOUND",
+            "The requested job does not exist.",
+            job_id,
+        )
+    })
 }
 
 fn record_optimize_response(
@@ -602,9 +750,8 @@ async fn method_not_allowed<B>(request: Request<B>) -> Response {
             .insert(header::ALLOW, HeaderValue::from_static("POST"));
     } else if matches!(
         request.uri().path(),
-        "/health" | "/integration/trasolve/health"
-    ) || (request.uri().path().starts_with("/integration/jobs/")
-        && request.uri().path().ends_with("/timeline"))
+        "/health" | "/integration/trasolve/health" | "/integration/jobs"
+    ) || request.uri().path().starts_with("/integration/jobs/")
     {
         response
             .headers_mut()
