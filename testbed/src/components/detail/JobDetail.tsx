@@ -33,8 +33,8 @@ export function JobDetail({ job }: { job: TestbedJob | null }) {
       <Card className="job-detail job-detail-empty" elevation={1} compact>
         <NonIdealState
           icon="search"
-          title="Select a job to inspect its execution."
-          description="New jobs appear in the sidebar as soon as they are created."
+          title="실행 정보를 확인할 Job을 선택하세요."
+          description="새 Job은 생성 즉시 사이드바에 표시됩니다."
         />
       </Card>
     );
@@ -49,15 +49,15 @@ export function JobDetail({ job }: { job: TestbedJob | null }) {
   return (
     <Card className="job-detail" elevation={1} compact>
       <div className="detail-heading">
-        <h1 className={Classes.HEADING}>Job Detail</h1>
-        <span className={Classes.TEXT_MUTED}>Timeline arrives in Task 3</span>
+        <h1 className={Classes.HEADING}>Job 상세</h1>
+        <span className={Classes.TEXT_MUTED}>Timeline은 Task 3에서 제공</span>
       </div>
       <Divider />
       <div className="job-detail-content">
         <JobSummary job={job} />
 
         {job.error && (
-          <Callout compact intent={Intent.DANGER} role="alert" title="Job failed">
+          <Callout compact intent={Intent.DANGER} role="alert" title="요청 실패">
             {job.error}
           </Callout>
         )}
@@ -67,15 +67,15 @@ export function JobDetail({ job }: { job: TestbedJob | null }) {
             <div className="route-overview">
               <div>
                 <h2 id="route-title" className={Classes.HEADING}>
-                  Route
+                  경로
                 </h2>
-                <div aria-label="Visit order">
+                <div aria-label="방문 순서">
                   {job.route.route.map((stop) => stop.location_id).join(" → ")}
                 </div>
               </div>
               <div>
-                <span className={Classes.TEXT_MUTED}>Total travel</span>
-                <strong>{job.route.total_travel_minutes} min</strong>
+                <span className={Classes.TEXT_MUTED}>총 이동 시간</span>
+                <strong>{job.route.total_travel_minutes}분</strong>
               </div>
             </div>
             <div className="table-scroll">
@@ -84,10 +84,10 @@ export function JobDetail({ job }: { job: TestbedJob | null }) {
               >
                 <thead>
                   <tr>
-                    <th>Order</th>
-                    <th>Location</th>
-                    <th>Arrival</th>
-                    <th>Departure</th>
+                    <th>순서</th>
+                    <th>위치</th>
+                    <th>도착</th>
+                    <th>출발</th>
                   </tr>
                 </thead>
                 <tbody>
@@ -108,7 +108,7 @@ export function JobDetail({ job }: { job: TestbedJob | null }) {
         <section className="raw-response" aria-labelledby="raw-title">
           <div className="raw-heading">
             <h2 id="raw-title" className={Classes.HEADING}>
-              Latest response
+              최근 Response
             </h2>
             <div className="response-metadata" aria-live="polite">
               {job.response && (
@@ -132,24 +132,24 @@ export function JobDetail({ job }: { job: TestbedJob | null }) {
                     await navigator.clipboard.writeText(raw);
                     setCopied(true);
                   } catch {
-                    setCopyError("Copy failed. Select and copy the response manually.");
+                    setCopyError("복사 실패. 응답을 선택해 직접 복사하세요.");
                   }
                 }}
               >
-                {copied ? "Copied" : "Copy"}
+                {copied ? "복사됨" : "복사"}
               </Button>
             </div>
           </div>
           {copyError && <Callout intent={Intent.WARNING}>{copyError}</Callout>}
           <pre
             className={`${Classes.CODE_BLOCK} raw-output`}
-            aria-label="Raw API response"
+            aria-label="Raw API 응답"
             aria-busy={job.status === "pending" || job.status === "running"}
           >
             {raw ||
               (job.status === "pending" || job.status === "running"
-                ? "Waiting for the API…"
-                : "No response received.")}
+                ? "API 응답 대기 중…"
+                : "아직 응답이 없습니다.")}
           </pre>
         </section>
       </div>

@@ -39,10 +39,10 @@ body,
 }
 
 .troute-icon {
+  display: block;
   width: 18px;
   height: 18px;
   flex: 0 0 18px;
-  color: currentColor;
 }
 
 .navbar-endpoint {

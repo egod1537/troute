@@ -25,7 +25,7 @@ test("defaults to system mode and resolves the current system preference", async
   await page.emulateMedia({ colorScheme: "dark" });
   await page.goto("/");
 
-  await expect(page.getByRole("button", { name: "Theme: System" })).toBeVisible();
+  await expect(page.getByRole("button", { name: "테마: 시스템" })).toBeVisible();
   await expect(page.locator("html")).toHaveAttribute("data-theme", "dark");
   await expect(appShell(page)).toHaveAttribute("data-theme", "dark");
   await expect(appShell(page)).toHaveClass(/bp6-dark/);
@@ -37,7 +37,7 @@ test("restores saved light mode independently of a dark system", async ({ page }
   await storeTheme(page, "light");
   await page.goto("/");
 
-  await expect(page.getByRole("button", { name: "Theme: Light" })).toBeVisible();
+  await expect(page.getByRole("button", { name: "테마: 라이트" })).toBeVisible();
   await expect(appShell(page)).toHaveAttribute("data-theme", "light");
   await expect(appShell(page)).not.toHaveClass(/bp6-dark/);
 });
@@ -47,15 +47,16 @@ test("restores saved dark mode independently of a light system", async ({ page }
   await storeTheme(page, "dark");
   await page.goto("/");
 
-  await expect(page.getByRole("button", { name: "Theme: Dark" })).toBeVisible();
+  await expect(page.getByRole("button", { name: "테마: 다크" })).toBeVisible();
   await expect(appShell(page)).toHaveAttribute("data-theme", "dark");
   await expect(appShell(page)).toHaveClass(/bp6-dark/);
+  await expect(page.locator(".navbar-brand .troute-icon")).toBeVisible();
 
-  await page.getByRole("button", { name: "New Job" }).click();
+  await page.getByRole("button", { name: "새 Job" }).click();
   await expect(page.locator(".bp6-portal:has(.new-job-dialog)")).toHaveClass(
     /bp6-dark/,
   );
-  await expect(page.getByRole("dialog", { name: "New Job" })).toBeVisible();
+  await expect(page.getByRole("dialog", { name: "새 Job" })).toBeVisible();
 });
 
 test("invalid saved values fall back to system mode", async ({ page }) => {
@@ -63,7 +64,7 @@ test("invalid saved values fall back to system mode", async ({ page }) => {
   await storeTheme(page, "sepia");
   await page.goto("/");
 
-  await expect(page.getByRole("button", { name: "Theme: System" })).toBeVisible();
+  await expect(page.getByRole("button", { name: "테마: 시스템" })).toBeVisible();
   await expect(appShell(page)).toHaveAttribute("data-theme", "dark");
   await expect(appShell(page)).toHaveClass(/bp6-dark/);
 });
@@ -74,24 +75,24 @@ test("theme control switches modes, stores the choice, and restores it", async (
   await page.emulateMedia({ colorScheme: "light" });
   await page.goto("/");
 
-  await page.getByRole("button", { name: "Theme: System" }).click();
-  await page.getByRole("menuitem", { name: "Dark" }).click();
+  await page.getByRole("button", { name: "테마: 시스템" }).click();
+  await page.getByRole("menuitem", { name: "다크" }).click();
   await expect(appShell(page)).toHaveClass(/bp6-dark/);
   expect(
     await page.evaluate((key) => localStorage.getItem(key), STORAGE_KEY),
   ).toBe("dark");
 
   await page.reload();
-  await expect(page.getByRole("button", { name: "Theme: Dark" })).toBeVisible();
+  await expect(page.getByRole("button", { name: "테마: 다크" })).toBeVisible();
   await expect(appShell(page)).toHaveClass(/bp6-dark/);
 
-  await page.getByRole("button", { name: "Theme: Dark" }).click();
-  await page.getByRole("menuitem", { name: "Light" }).click();
+  await page.getByRole("button", { name: "테마: 다크" }).click();
+  await page.getByRole("menuitem", { name: "라이트" }).click();
   await expect(appShell(page)).not.toHaveClass(/bp6-dark/);
   await expect(appShell(page)).toHaveAttribute("data-theme", "light");
 
-  await page.getByRole("button", { name: "Theme: Light" }).click();
-  await page.getByRole("menuitem", { name: "System" }).click();
+  await page.getByRole("button", { name: "테마: 라이트" }).click();
+  await page.getByRole("menuitem", { name: "시스템" }).click();
   await expect(appShell(page)).not.toHaveClass(/bp6-dark/);
   expect(
     await page.evaluate((key) => localStorage.getItem(key), STORAGE_KEY),

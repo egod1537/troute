@@ -24,32 +24,35 @@ function healthIntent(health: HealthState) {
 }
 
 function CommitIndicator() {
+  const commitLabel = BUILD_COMMIT.fullSha
+    ? BUILD_COMMIT.shortSha
+    : "알 수 없음";
   const tag = (
     <Tag
-      aria-label={`Commit ${BUILD_COMMIT.shortSha}`}
+      aria-label={`commit ${commitLabel}`}
       className={`${Classes.MONOSPACE_TEXT} navbar-commit`}
       icon="git-commit"
       minimal
       title={
         BUILD_COMMIT.fullSha
-          ? `Commit ${BUILD_COMMIT.fullSha}`
-          : "Commit unknown"
+          ? `commit ${BUILD_COMMIT.fullSha}`
+          : "commit 알 수 없음"
       }
     >
       <span className="navbar-commit-prefix">commit </span>
-      {BUILD_COMMIT.shortSha}
+      {commitLabel}
     </Tag>
   );
 
   if (!BUILD_COMMIT.url) return tag;
   return (
     <a
-      aria-label={`Commit ${BUILD_COMMIT.fullSha}`}
+      aria-label={`commit ${BUILD_COMMIT.fullSha}`}
       className="navbar-commit-link"
       href={BUILD_COMMIT.url}
       target="_blank"
       rel="noreferrer"
-      title={`Commit ${BUILD_COMMIT.fullSha}`}
+      title={`commit ${BUILD_COMMIT.fullSha}`}
     >
       {tag}
     </a>
@@ -73,23 +76,23 @@ export function AppHeader({
 }: AppHeaderProps) {
   const healthLabel =
     health === "online"
-      ? "Online"
+      ? "정상"
       : health === "offline"
-        ? "Offline"
-        : "Checking";
+        ? "연결 실패"
+        : "확인 중";
 
   return (
     <Navbar className="app-navbar">
       <NavbarGroup align={Alignment.START}>
         <NavbarHeading className="navbar-brand">
           <TrouteIcon />
-          <span>troute testbed</span>
+          <span>troute 테스트베드</span>
         </NavbarHeading>
         <NavbarDivider />
         <code
           className={`${Classes.MONOSPACE_TEXT} ${Classes.TEXT_MUTED} navbar-endpoint`}
         >
-          {API_BASE} · {ROUTE_PATH ? `POST ${ROUTE_PATH}` : "GET /health only"}
+          {API_BASE} · {ROUTE_PATH ? `POST ${ROUTE_PATH}` : "GET /health 전용"}
         </code>
         <NavbarDivider />
         <CommitIndicator />
@@ -111,8 +114,8 @@ export function AppHeader({
           {healthLabel}
         </Tag>
         <Button
-          aria-label="Refresh API health"
-          title="Refresh API health"
+          aria-label="API 상태 새로고침"
+          title="API 상태 새로고침"
           icon="refresh"
           loading={healthRefreshing}
           disabled={healthRefreshing}

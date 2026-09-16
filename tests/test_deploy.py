@@ -47,6 +47,7 @@ class DeploymentTests(unittest.TestCase):
             "REAL_GIT": GIT,
             "TEST_FAILURE": "",
             "TEST_HEALTH": "ok",
+            "GITHUB_TOKEN": "",
         }
         self.executable("git", '''#!/bin/bash
 if [[ "${TEST_FAILURE:-}" == fetch && "$1" == fetch ]]; then exit 1; fi
@@ -61,10 +62,20 @@ exec "$REAL_GIT" "$@"
 printf '%s\\n' "$*" >> "$TEST_ROOT/docker.log"
 case "$*" in
   "compose build")
+    printf 'docker-build\\n' >> "$TEST_ROOT/events.log"
     printf '%s\n' "${TROUTE_COMMIT_SHA:-}" > "$TEST_ROOT/commit-sha.log"
-    [[ "${TEST_FAILURE:-}" != build ]]
+    if [[ "${TEST_FAILURE:-}" == interrupt ]]; then
+      kill -TERM "$PPID"
+      exit 143
+    fi
+    if [[ "${TEST_FAILURE:-}" == build ]]; then
+      exit "${TEST_FAILURE_EXIT_CODE:-1}"
+    fi
     ;;
-  "compose up -d --no-build") [[ "${TEST_FAILURE:-}" != up ]] ;;
+  "compose up -d --no-build")
+    printf 'docker-up\\n' >> "$TEST_ROOT/events.log"
+    [[ "${TEST_FAILURE:-}" != up ]]
+    ;;
   "compose ps --all --quiet troute") echo troute-container ;;
   "compose ps --all --quiet testbed") echo testbed-container ;;
   inspect*testbed-container) echo 18081 ;;
@@ -74,15 +85,23 @@ esac
         self.executable("curl", '''#!/bin/bash
 printf '%s\\n' "$*" >> "$TEST_ROOT/curl.log"
 url="${!#}"
+if [[ "$url" == https://api.github.com/repos/egod1537/troute/statuses/* ]]; then
+  cat > /dev/null
+  printf 'github-status %s\\n' "$*" >> "$TEST_ROOT/events.log"
+  [[ "${TEST_FAILURE:-}" != github-status ]]
+  exit
+fi
 while [[ $# -gt 0 ]]; do
   if [[ "$1" == --output ]]; then output=$2; shift; fi
   shift
 done
 if [[ "$url" == http://127.0.0.1:18081/ ]]; then
+  printf 'health-testbed\\n' >> "$TEST_ROOT/events.log"
   printf '<html>testbed</html>' > "$output"
   if [[ "${TEST_FAILURE:-}" == testbed-health ]]; then printf 503; else printf 200; fi
   exit 0
 fi
+printf 'health-troute\\n' >> "$TEST_ROOT/events.log"
 case "${TEST_HEALTH:-ok}" in
   ok) printf '{"status":"ok"}' > "$output"; printf 200 ;;
   wrong-body) printf '{"status":"failed"}' > "$output"; printf 200 ;;
@@ -190,6 +209,90 @@ fi
         self.assertTrue(lock.exists())
         self.assertNotIn("compose build", (self.root / "docker.log").read_text())
 
+    def test_github_status_uses_deployed_sha_and_stable_context(self):
+        token = "github_pat_test-secret-never-log"
+        result = self.deploy(GITHUB_TOKEN=token)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        sha = self.git("-C", str(self.checkout), "rev-parse", "HEAD")
+        statuses = self.github_status_lines()
+        self.assertEqual(len(statuses), 2)
+        self.assertTrue(all(f"/statuses/{sha}" in line for line in statuses))
+        self.assertTrue(all('"context":"deploy/troute"' in line for line in statuses))
+        self.assertIn('"state":"pending"', statuses[0])
+        self.assertIn('"description":"Deploying to production"', statuses[0])
+        self.assertIn('"state":"success"', statuses[1])
+        self.assertIn(
+            '"description":"Production deployment succeeded"', statuses[1]
+        )
+        events = (self.root / "events.log").read_text()
+        self.assertLess(events.index('"state":"pending"'), events.index("docker-build"))
+        self.assertLess(events.index("health-testbed"), events.index('"state":"success"'))
+        self.assertNotIn(token, result.stdout + result.stderr)
+        self.assertNotIn(token, (self.root / "curl.log").read_text())
+        self.assertNotIn(token, events)
+
+        redeploy = self.deploy(GITHUB_TOKEN=token)
+        self.assertEqual(redeploy.returncode, 0, redeploy.stdout + redeploy.stderr)
+        repeated_statuses = self.github_status_lines()
+        self.assertEqual(len(repeated_statuses), 4)
+        self.assertTrue(
+            all('"context":"deploy/troute"' in line for line in repeated_statuses)
+        )
+        self.assertTrue(all(f"/statuses/{sha}" in line for line in repeated_statuses))
+
+    def test_deployment_failures_publish_failure_and_preserve_exit_code(self):
+        token = "github_pat_test-failure"
+        cases = (
+            ("build", {"TEST_FAILURE_EXIT_CODE": "42"}, 42),
+            ("up", {}, 1),
+            ("troute-health", {"TEST_HEALTH": "bad-status"}, 1),
+            ("testbed-health", {}, 1),
+        )
+        for failure, extra, expected_code in cases:
+            with self.subTest(failure=failure):
+                for name in ("curl.log", "docker.log", "events.log"):
+                    path = self.root / name
+                    if path.exists():
+                        path.unlink()
+                overrides = {"GITHUB_TOKEN": token, **extra}
+                if failure != "troute-health":
+                    overrides["TEST_FAILURE"] = failure
+                result = self.deploy(**overrides)
+                self.assertEqual(result.returncode, expected_code)
+                statuses = self.github_status_lines()
+                self.assertEqual(len(statuses), 2)
+                self.assertIn('"state":"pending"', statuses[0])
+                self.assertIn('"state":"failure"', statuses[1])
+                self.assertIn(
+                    '"description":"Production deployment failed"', statuses[1]
+                )
+
+    def test_missing_token_disables_reporting_without_failing_deployment(self):
+        result = self.deploy(GITHUB_TOKEN="")
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn("GitHub deployment status reporting disabled", result.stdout)
+        self.assertEqual(self.github_status_lines(), [])
+
+    def test_github_api_failure_is_only_a_warning(self):
+        token = "github_pat_test-api-failure"
+        result = self.deploy(GITHUB_TOKEN=token, TEST_FAILURE="github-status")
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertEqual(len(self.github_status_lines()), 2)
+        self.assertIn("GitHub deployment status update failed", result.stderr)
+        self.assertNotIn(token, result.stdout + result.stderr)
+
+    def test_interruption_publishes_interrupted_failure(self):
+        result = self.deploy(
+            GITHUB_TOKEN="github_pat_test-interrupt", TEST_FAILURE="interrupt"
+        )
+        self.assertEqual(result.returncode, 143)
+        statuses = self.github_status_lines()
+        self.assertEqual(len(statuses), 2)
+        self.assertIn('"state":"failure"', statuses[1])
+        self.assertIn(
+            '"description":"Production deployment interrupted"', statuses[1]
+        )
+
     def watch(self, command="--once", **overrides):
         result = subprocess.run(
             ["/bin/bash", str(self.checkout / "auto-deploy.sh"), command],
@@ -205,6 +308,16 @@ fi
     def build_count(self):
         path = self.root / "docker.log"
         return path.read_text().count("compose build") if path.exists() else 0
+
+    def github_status_lines(self):
+        path = self.root / "curl.log"
+        if not path.exists():
+            return []
+        return [
+            line
+            for line in path.read_text().splitlines()
+            if "api.github.com/repos/egod1537/troute/statuses/" in line
+        ]
 
     def clean_main(self):
         self.git("-C", str(self.checkout), "fetch", "origin")

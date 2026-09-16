@@ -53,10 +53,10 @@ export function NewJobDialog({
       const request = parseInput(input);
       if (existingJobIds.has(request.job_id)) {
         throw new Error(
-          `A job with id "${request.job_id}" already exists in this session.`,
+          `job_id "${request.job_id}"가 이 세션에 이미 존재합니다.`,
         );
       }
-      setValidation({ valid: true, message: "Valid" });
+      setValidation({ valid: true, message: "유효함" });
       return request;
     } catch (error) {
       setValidation({ valid: false, message: (error as Error).message });
@@ -83,26 +83,27 @@ export function NewJobDialog({
     <Dialog
       className="new-job-dialog"
       isOpen={isOpen}
+      isCloseButtonShown={false}
       onClose={onClose}
       portalClassName={dark ? Classes.DARK : undefined}
-      title="New Job"
+      title="새 Job"
       icon="new-object"
       canEscapeKeyClose
     >
       <DialogBody>
         <div className="dialog-editor-heading">
-          <span>Optimize request JSON</span>
+          <span>최적화 요청 JSON</span>
           <ButtonGroup size="small" variant="minimal">
             <Button icon="code" onClick={format}>
-              Format
+              포맷
             </Button>
             <Button icon="reset" onClick={reset}>
-              Reset sample
+              샘플 복원
             </Button>
           </ButtonGroup>
         </div>
         <TextArea
-          aria-label="Request JSON"
+          aria-label="요청 JSON"
           className="json-editor new-job-editor"
           fill
           intent={validation?.valid === false ? Intent.DANGER : Intent.NONE}
@@ -117,14 +118,14 @@ export function NewJobDialog({
         <div className="dialog-validation" aria-live="polite">
           {validation?.valid ? (
             <Tag icon="tick" intent={Intent.SUCCESS} minimal>
-              Valid
+              유효함
             </Tag>
           ) : validation ? (
             <Callout
               compact
               intent={Intent.DANGER}
               role="alert"
-              title="Invalid request"
+              title="요청 형식 오류"
             >
               {validation.message}
             </Callout>
@@ -134,12 +135,12 @@ export function NewJobDialog({
       <DialogFooter
         actions={
           <>
-            <Button onClick={onClose}>Cancel</Button>
+            <Button onClick={onClose}>취소</Button>
             <Button icon="tick" onClick={parseAndValidate}>
-              Validate
+              검증
             </Button>
             <Button icon="play" intent={Intent.PRIMARY} onClick={create}>
-              Create Job
+              Job 생성
             </Button>
           </>
         }

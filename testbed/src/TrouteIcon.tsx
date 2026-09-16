@@ -1,12 +1,10 @@
 export function TrouteIcon() {
   return (
-    <svg
+    <img
       aria-hidden="true"
+      alt=""
       className="troute-icon"
-      focusable="false"
-      viewBox="0 0 24 24"
-    >
-      <use href="/troute-icon.svg#troute-icon" />
-    </svg>
+      src="/troute-icon.svg"
+    />
   );
 }

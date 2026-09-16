@@ -50,7 +50,7 @@ export function App({ initialThemeMode }: AppProps) {
     updateJob(request.job_id, {
       status: "running",
       stage: "optimizing",
-      message: "POST /optimize is in progress.",
+      message: "POST /optimize 실행 중.",
     });
 
     try {
@@ -60,7 +60,7 @@ export function App({ initialThemeMode }: AppProps) {
         completedAt: Date.now(),
         progress: 100,
         stage: "completed",
-        message: "The optimize request completed.",
+        message: "최적화 요청 완료.",
         response: result.response,
         route: result.route,
       });
@@ -69,7 +69,7 @@ export function App({ initialThemeMode }: AppProps) {
         status: "failed",
         completedAt: Date.now(),
         stage: "failed",
-        message: "The optimize request failed.",
+        message: "최적화 요청 실패.",
         error: (error as Error).message,
         response: error instanceof ApiError ? error.response : undefined,
       });
@@ -83,7 +83,7 @@ export function App({ initialThemeMode }: AppProps) {
       createdAt: Date.now(),
       progress: 0,
       stage: "queued",
-      message: "Waiting to start the optimize request.",
+      message: "최적화 요청 실행 대기 중.",
       request,
       timeline: [],
     };

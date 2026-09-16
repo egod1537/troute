@@ -20,7 +20,7 @@ export function JobSidebar({
       <div className="sidebar-heading">
         <h1 className={Classes.HEADING}>Jobs</h1>
         <Button icon="plus" intent="primary" onClick={onNewJob}>
-          New Job
+          새 Job
         </Button>
       </div>
       <Divider />

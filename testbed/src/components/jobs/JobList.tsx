@@ -14,8 +14,8 @@ export function JobList({ jobs, selectedJobId, onSelect }: JobListProps) {
       <NonIdealState
         className="job-list-empty"
         icon="inbox"
-        title="No jobs yet"
-        description="Create a job to run an optimization request."
+        title="아직 Job이 없습니다"
+        description="새 Job을 생성해 최적화 요청을 실행하세요."
       />
     );
   }
@@ -25,7 +25,7 @@ export function JobList({ jobs, selectedJobId, onSelect }: JobListProps) {
   );
 
   return (
-    <div className="job-list" role="listbox" aria-label="Testbed jobs">
+    <div className="job-list" role="listbox" aria-label="테스트베드 Jobs">
       {orderedJobs.map((job) => (
         <JobListItem
           key={job.id}

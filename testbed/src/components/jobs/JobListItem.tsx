@@ -34,7 +34,10 @@ export function JobListItem({ job, selected, onSelect }: JobListItemProps) {
         </Tag>
       </span>
       <span className={`${Classes.TEXT_MUTED} job-list-item-secondary`}>
-        {job.progress}% · {new Date(job.createdAt).toLocaleTimeString()}
+        {job.progress}% ·{" "}
+        {new Date(job.createdAt).toLocaleTimeString("ko-KR", {
+          hour12: false,
+        })}
       </span>
     </button>
   );

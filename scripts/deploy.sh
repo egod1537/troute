@@ -5,6 +5,40 @@ set -euo pipefail
 export PATH="$PATH:$HOME/.docker/bin:$HOME/.orbstack/bin:/opt/homebrew/bin:/usr/local/bin"
 export GIT_TERMINAL_PROMPT=0
 
+github_status_disabled_logged=false
+
+set_github_status() {
+  local sha=$1 state=$2 description=$3 payload
+  if [[ -z "${GITHUB_TOKEN:-}" ]]; then
+    if [[ "$github_status_disabled_logged" != true ]]; then
+      echo 'GitHub deployment status reporting disabled'
+      github_status_disabled_logged=true
+    fi
+    return 0
+  fi
+
+  printf -v payload \
+    '{"state":"%s","context":"deploy/troute","description":"%s","target_url":"https://troute.mangagaki.net"}' \
+    "$state" "$description"
+  # Read the authorization header through curl's stdin config so the token is
+  # neither exposed in argv nor written to deployment logs.
+  if ! printf 'header = "Authorization: Bearer %s"\n' "$GITHUB_TOKEN" | \
+      curl --silent --show-error --fail \
+        --config - \
+        --connect-timeout 5 \
+        --max-time 10 \
+        --request POST \
+        --header 'Accept: application/vnd.github+json' \
+        --header 'X-GitHub-Api-Version: 2022-11-28' \
+        --header 'Content-Type: application/json' \
+        --output /dev/null \
+        --data "$payload" \
+        "https://api.github.com/repos/egod1537/troute/statuses/$sha"; then
+    printf 'Warning: GitHub deployment status update failed (%s).\n' "$state" >&2
+  fi
+  return 0
+}
+
 fail() {
   printf 'Deployment failed: %s\n' "$1" >&2
   exit 1
@@ -51,16 +85,35 @@ deploy_main() {
   lock_dir="$(git rev-parse --git-common-dir)/troute-deploy.lock"
   mkdir "$lock_dir" 2>/dev/null || fail 'Another deployment is running, or its deployment lock needs inspection.'
   response_file=''
+  deployed_sha=''
+  deployment_started=false
+  deployment_succeeded=false
+  deployment_interrupted=false
   # Invoked indirectly by the EXIT trap.
   # shellcheck disable=SC2329
   cleanup() {
+    local exit_code=$? failure_description='Production deployment failed'
+    trap - EXIT INT TERM HUP
+    if [[ "$deployment_interrupted" == true ]]; then
+      failure_description='Production deployment interrupted'
+    fi
+    if [[ "$deployment_started" == true && "$deployment_succeeded" != true && $exit_code -ne 0 ]]; then
+      set_github_status "$deployed_sha" failure "$failure_description"
+    fi
     if [[ -n "$response_file" ]]; then rm -f -- "$response_file"; fi
-    rmdir -- "$lock_dir"
+    rmdir -- "$lock_dir" || true
+    exit "$exit_code"
+  }
+  # Invoked indirectly by signal traps.
+  # shellcheck disable=SC2329
+  interrupt() {
+    deployment_interrupted=true
+    exit "$1"
   }
   trap 'cleanup' EXIT
-  trap 'exit 130' INT
-  trap 'exit 143' TERM
-  trap 'exit 129' HUP
+  trap 'interrupt 130' INT
+  trap 'interrupt 143' TERM
+  trap 'interrupt 129' HUP
 
   echo 'Fetching origin/main'
   git fetch --no-tags origin +refs/heads/main:refs/remotes/origin/main
@@ -86,6 +139,9 @@ deploy_main() {
   [[ "$deployed_sha" =~ ^[0-9a-f]{40}$ ]] || fail 'Checked-out deployment SHA is invalid.'
   echo "Repository updated to main at ${deployed_sha:0:7}"
 
+  deployment_started=true
+  set_github_status "$deployed_sha" pending 'Deploying to production'
+
   # Build must succeed before Compose replaces the existing container.
   echo 'Building troute and testbed images'
   TROUTE_COMMIT_SHA="$deployed_sha" docker compose build
@@ -95,6 +151,8 @@ deploy_main() {
   response_file=$(mktemp "${TMPDIR:-/tmp}/troute-health.XXXXXX")
   check_service troute /health json
   check_service testbed / html
+  deployment_succeeded=true
+  set_github_status "$deployed_sha" success 'Production deployment succeeded'
   echo 'Deployment succeeded: troute /health and testbed / returned HTTP 200'
 
 }

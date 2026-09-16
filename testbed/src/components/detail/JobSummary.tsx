@@ -11,11 +11,18 @@ const STATUS_INTENTS = {
 
 function formatElapsed(milliseconds: number) {
   const totalSeconds = Math.max(0, milliseconds) / 1000;
-  if (totalSeconds < 60) return `${totalSeconds.toFixed(1)}s`;
+  if (totalSeconds < 60) return `${totalSeconds.toFixed(1)}초`;
   const minutes = Math.floor(totalSeconds / 60);
   const seconds = Math.floor(totalSeconds % 60);
-  return `${minutes}m ${seconds.toString().padStart(2, "0")}s`;
+  return `${minutes}분 ${seconds.toString().padStart(2, "0")}초`;
 }
+
+const STAGE_LABELS: Record<string, string> = {
+  queued: "대기",
+  optimizing: "최적화",
+  completed: "완료",
+  failed: "오류",
+};
 
 function useElapsed(job: TestbedJob) {
   const [, setTick] = useState(0);
@@ -39,7 +46,7 @@ export function JobSummary({ job }: { job: TestbedJob }) {
           <h2 id="job-summary-title" className={Classes.HEADING}>
             {job.id}
           </h2>
-          <span className={Classes.TEXT_MUTED}>Frontend observation model</span>
+          <span className={Classes.TEXT_MUTED}>프론트엔드 관찰 모델</span>
         </div>
         <Tag intent={STATUS_INTENTS[job.status]}>
           {JOB_STATUS_LABELS[job.status]}
@@ -48,28 +55,32 @@ export function JobSummary({ job }: { job: TestbedJob }) {
 
       <dl className="job-facts">
         <div>
-          <dt>Status</dt>
+          <dt>상태</dt>
           <dd>{JOB_STATUS_LABELS[job.status]}</dd>
         </div>
         <div>
-          <dt>Progress</dt>
+          <dt>진행률</dt>
           <dd>{job.progress}%</dd>
         </div>
         <div>
-          <dt>Stage</dt>
-          <dd>{job.stage ?? "—"}</dd>
+          <dt>단계</dt>
+          <dd>{job.stage ? (STAGE_LABELS[job.stage] ?? job.stage) : "—"}</dd>
         </div>
         <div>
-          <dt>Created</dt>
-          <dd>{new Date(job.createdAt).toLocaleString()}</dd>
+          <dt>생성 시각</dt>
+          <dd>
+            {new Date(job.createdAt).toLocaleString("ko-KR", {
+              hour12: false,
+            })}
+          </dd>
         </div>
         <div>
-          <dt>Elapsed</dt>
+          <dt>경과 시간</dt>
           <dd>{elapsed}</dd>
         </div>
       </dl>
       <ProgressBar
-        aria-label={`Job progress ${job.progress}%`}
+        aria-label={`Job 진행률 ${job.progress}%`}
         intent={STATUS_INTENTS[job.status]}
         value={job.progress / 100}
         animate={job.status === "running"}

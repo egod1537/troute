@@ -4,6 +4,7 @@ COPY testbed/package.json testbed/package-lock.json ./
 RUN npm ci
 COPY testbed/tsconfig.json testbed/vite.config.ts testbed/index.html ./
 COPY testbed/src ./src
+COPY testbed/public ./public
 COPY assets /app/assets
 ARG VITE_TROUTE_API_BASE_URL=/api
 ARG VITE_TROUTE_ROUTE_PATH=

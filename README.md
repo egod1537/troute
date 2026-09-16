@@ -488,6 +488,12 @@ System is the default and follows browser/OS color-scheme changes. An explicit
 selection is stored locally in the browser under `troute.testbed.theme`; theme
 selection is frontend-only and does not affect API requests or behavior.
 
+The project icon geometry is canonical in `assets/troute-icon.svg`. The testbed
+serves the favicon and Navbar image from `testbed/public/troute-icon.svg`; that
+copy uses an explicit Blueprint blue because browser favicons cannot reliably
+inherit `currentColor`. Vite validates that the public copy differs from the
+canonical SVG only by this explicit color, preventing the two from drifting.
+
 The Rust API implements `GET /health` and `POST /optimize`. Configure
 `VITE_TROUTE_ROUTE_PATH=/optimize` to make the primary action submit the editor
 payload; otherwise it continues to run a health check. The client renders
@@ -605,6 +611,32 @@ deployment failed without stopping the API.
 Health checks retry up to 20 times at 3-second intervals with a 5-second request
 timeout. Only success updates `deployed-commit`. The same failed commit waits
 300 seconds after failure before retrying; a newer commit bypasses that delay.
+
+The deploy script also reports the exact checked-out commit through GitHub's
+Commit Status API under the stable `deploy/troute` context. It publishes
+`pending` before the image build, `success` only after both health checks pass,
+and `failure` when build, startup, health checks, or an interrupt fails the
+deployment. The check links to `https://troute.mangagaki.net`. Status reporting
+is best-effort: a missing token or GitHub API outage is logged but never changes
+the deployment result or its original exit code.
+
+Set `GITHUB_TOKEN` only in the Mac mini deployment user's private runtime
+environment. For a fine-grained PAT, grant repository access only to
+`egod1537/troute` and **Commit statuses: Read and write**. No administration,
+Actions, or contents-write permission is required. For the installed cron job,
+an environment assignment in that user's private crontab is sufficient; the
+installer preserves unrelated crontab lines:
+
+```text
+GITHUB_TOKEN=github_pat_REPLACE_ON_THE_DEPLOYMENT_HOST
+```
+
+Do not add this value to the repository, `.env.example`, Compose configuration,
+or frontend build arguments. `crontab -l` will reveal a crontab assignment to
+that local user, so protect the deployment account accordingly. If
+`GITHUB_TOKEN` is absent, the script logs
+`GitHub deployment status reporting disabled` and deploys normally.
+
 To change the delay for future cron runs, reinstall with, for example:
 
 ```sh

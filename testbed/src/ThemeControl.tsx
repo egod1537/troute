@@ -14,9 +14,9 @@ interface ThemeControlProps {
 }
 
 const LABELS: Record<ThemeMode, string> = {
-  system: "System",
-  light: "Light",
-  dark: "Dark",
+  system: "시스템",
+  light: "라이트",
+  dark: "다크",
 };
 
 function themeIcon(mode: ThemeMode) {
@@ -26,7 +26,7 @@ function themeIcon(mode: ThemeMode) {
 
 export function ThemeControl({ mode, onChange }: ThemeControlProps) {
   const menu = (
-    <Menu aria-label="Theme">
+    <Menu aria-label="테마">
       {(["system", "light", "dark"] as const).map((option) => (
         <MenuItem
           active={mode === option}
@@ -48,8 +48,8 @@ export function ThemeControl({ mode, onChange }: ThemeControlProps) {
       inheritDarkTheme
     >
       <Button
-        aria-label={`Theme: ${LABELS[mode]}`}
-        title={`Theme: ${LABELS[mode]}`}
+        aria-label={`테마: ${LABELS[mode]}`}
+        title="테마 변경"
         icon={themeIcon(mode)}
         variant="minimal"
       />

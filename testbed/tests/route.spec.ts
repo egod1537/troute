@@ -26,9 +26,9 @@ test.beforeEach(async ({ page }) => {
 });
 
 async function openJobDialog(page: Page, jobId?: string) {
-  await page.getByRole("button", { name: "New Job" }).click();
-  const dialog = page.getByRole("dialog", { name: "New Job" });
-  const editor = dialog.getByLabel("Request JSON");
+  await page.getByRole("button", { name: "새 Job" }).click();
+  const dialog = page.getByRole("dialog", { name: "새 Job" });
+  const editor = dialog.getByLabel("요청 JSON");
   if (jobId) {
     const input = JSON.parse(await editor.inputValue());
     input.job_id = jobId;
@@ -39,7 +39,7 @@ async function openJobDialog(page: Page, jobId?: string) {
 
 async function createJob(page: Page, jobId: string) {
   const { dialog } = await openJobDialog(page, jobId);
-  await dialog.getByRole("button", { name: "Create Job" }).click();
+  await dialog.getByRole("button", { name: "Job 생성" }).click();
 }
 
 test("valid build commit and API health controls remain in the header", async ({
@@ -48,16 +48,16 @@ test("valid build commit and API health controls remain in the header", async ({
   await page.goto("/");
 
   const commit = page.getByRole("link", {
-    name: "Commit 3f4f8d25686fe955582295e1e47334c7a277c681",
+    name: "commit 3f4f8d25686fe955582295e1e47334c7a277c681",
   });
   await expect(commit).toContainText("commit 3f4f8d2");
   await expect(commit).toHaveAttribute(
     "href",
     "https://github.com/egod1537/troute/commit/3f4f8d25686fe955582295e1e47334c7a277c681",
   );
-  await expect(page.getByLabel("API Online")).toBeVisible();
+  await expect(page.getByLabel("API 정상")).toBeVisible();
   await expect(
-    page.getByRole("button", { name: "Refresh API health" }),
+    page.getByRole("button", { name: "API 상태 새로고침" }),
   ).toBeVisible();
 });
 
@@ -91,6 +91,7 @@ test("job is inserted and selected before the request completes, then succeeds",
   const row = page.getByRole("option", { name: /route-immediate/ });
   await expect(row).toBeVisible();
   await expect(row).toHaveAttribute("aria-selected", "true");
+  await expect(page.getByRole("heading", { name: "Job 상세" })).toBeVisible();
   await expect(page.getByRole("heading", { name: "route-immediate" })).toBeVisible();
   await expect(row).toHaveAttribute("data-status", "running");
   await expect
@@ -105,15 +106,18 @@ test("job is inserted and selected before the request completes, then succeeds",
 
   releaseRoute();
   await expect(row).toHaveAttribute("data-status", "completed");
-  await expect(row).toContainText("DONE");
-  await expect(page.getByLabel("Visit order")).toHaveText("A → B → A");
+  await expect(row).toContainText("완료");
+  await expect(page.getByLabel("방문 순서")).toHaveText("A → B → A");
   await expect(page.getByRole("table")).toContainText("09:25");
-  await expect(page.getByText("70 min", { exact: true })).toBeVisible();
+  await expect(page.getByText("총 이동 시간", { exact: true })).toBeVisible();
+  await expect(page.getByText("70분", { exact: true })).toBeVisible();
   await expect(page.getByText("HTTP 200", { exact: true })).toBeVisible();
   await expect(page.getByText(/\d+\.\d ms/)).toBeVisible();
-  await expect(page.getByLabel("Raw API response")).toContainText(
+  await expect(page.getByLabel("Raw API 응답")).toContainText(
     "total_travel_minutes",
   );
+  await page.getByRole("button", { name: "복사", exact: true }).click();
+  await expect(page.getByRole("button", { name: "복사됨" })).toBeVisible();
 });
 
 test("duplicate ids are rejected and newest jobs sort first", async ({ page }) => {
@@ -128,12 +132,12 @@ test("duplicate ids are rejected and newest jobs sort first", async ({ page }) =
   ).toHaveAttribute("data-status", "completed");
 
   const duplicate = await openJobDialog(page, "route-first");
-  await duplicate.dialog.getByRole("button", { name: "Create Job" }).click();
+  await duplicate.dialog.getByRole("button", { name: "Job 생성" }).click();
   await expect(duplicate.dialog.getByRole("alert")).toContainText(
-    "already exists in this session",
+    "이 세션에 이미 존재합니다",
   );
   await expect(page.getByRole("option", { name: /route-first/ })).toHaveCount(1);
-  await duplicate.dialog.getByRole("button", { name: "Cancel" }).click();
+  await duplicate.dialog.getByRole("button", { name: "취소" }).click();
 
   await createJob(page, "route-second");
   await expect(
@@ -167,10 +171,10 @@ test("request failure transitions the selected job to failed", async ({ page }) 
   await createJob(page, "route-failed");
   const row = page.getByRole("option", { name: /route-failed/ });
   await expect(row).toHaveAttribute("data-status", "failed");
-  await expect(row).toContainText("ERROR");
+  await expect(row).toContainText("오류");
   await expect(page.getByRole("alert")).toContainText("HTTP 422");
   await expect(page.getByText("HTTP 422", { exact: true })).toBeVisible();
-  await expect(page.getByLabel("Raw API response")).toContainText(
+  await expect(page.getByLabel("Raw API 응답")).toContainText(
     "infeasible route",
   );
 });
@@ -187,8 +191,8 @@ test("malformed successful responses fail without losing inspection data", async
   await expect(
     page.getByRole("option", { name: /route-malformed/ }),
   ).toHaveAttribute("data-status", "failed");
-  await expect(page.getByRole("alert")).toContainText("Malformed route response");
-  await expect(page.getByLabel("Raw API response")).toContainText(
+  await expect(page.getByRole("alert")).toContainText("경로 응답 형식 오류");
+  await expect(page.getByLabel("Raw API 응답")).toContainText(
     "incorrect shape",
   );
   await expect(page.getByRole("table")).toHaveCount(0);

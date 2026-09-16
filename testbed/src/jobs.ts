@@ -41,8 +41,8 @@ export interface TestbedJob {
 }
 
 export const JOB_STATUS_LABELS: Record<TestbedJobStatus, string> = {
-  pending: "PENDING",
-  running: "RUNNING",
-  completed: "DONE",
-  failed: "ERROR",
+  pending: "대기",
+  running: "실행 중",
+  completed: "완료",
+  failed: "오류",
 };

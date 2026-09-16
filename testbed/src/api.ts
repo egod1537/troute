@@ -61,8 +61,8 @@ export function parseInput(text: string): RouteInput {
   let input: unknown;
   try {
     input = JSON.parse(text);
-  } catch (error) {
-    throw new Error(`Invalid JSON: ${(error as Error).message}`);
+  } catch {
+    throw new Error("JSON 형식 오류: 올바른 JSON인지 확인하세요.");
   }
   if (
     !object(input) ||
@@ -74,7 +74,7 @@ export function parseInput(text: string): RouteInput {
     !time(input.start_time)
   ) {
     throw new Error(
-      "Input requires job_id (1-128 characters), locations, start_location_id, and start_time (HH:MM).",
+      "요청에는 job_id(1~128자), locations, start_location_id, start_time(HH:MM)이 필요합니다.",
     );
   }
   for (const [index, location] of input.locations.entries()) {
@@ -87,7 +87,7 @@ export function parseInput(text: string): RouteInput {
       !unsigned(location.stay_minutes)
     ) {
       throw new Error(
-        `locations[${index}] requires id, place_id, HH:MM opening/closing times, and non-negative integer stay_minutes.`,
+        `locations[${index}]에는 id, place_id, HH:MM 형식의 open_time/close_time, 0 이상의 정수 stay_minutes가 필요합니다.`,
       );
     }
   }
@@ -99,7 +99,7 @@ export function parseRoute(response: ApiResponse): RouteResponse {
   const data = response.body;
   if (object(data) && ("error" in data || data.status === "infeasible")) {
     throw new ApiError(
-      "The backend reported a solver error or infeasible route. Inspect the raw response.",
+      "backend가 solver 오류 또는 실행 불가능한 경로를 반환했습니다. Raw response를 확인하세요.",
       response,
     );
   }
@@ -118,7 +118,7 @@ export function parseRoute(response: ApiResponse): RouteResponse {
     )
   ) {
     throw new ApiError(
-      "Malformed route response: expected route stops and total_travel_minutes.",
+      "경로 응답 형식 오류: route 항목과 total_travel_minutes가 필요합니다.",
       response,
     );
   }
@@ -144,7 +144,7 @@ async function request(
     raw = await response.text();
   } catch (error) {
     throw new ApiError(
-      `API connection failed: ${(error as Error).message}. Check the API and proxy configuration.`,
+      `API 연결 실패: ${(error as Error).message}. API와 proxy 설정을 확인하세요.`,
     );
   }
   const result: ApiResponse = {
@@ -160,7 +160,7 @@ async function request(
   } catch {
     throw new ApiError(
       response.ok
-        ? "Malformed response: the API did not return JSON."
+        ? "응답 형식 오류: API가 JSON을 반환하지 않았습니다."
         : `HTTP ${response.status} ${response.statusText}`,
       result,
     );
@@ -181,7 +181,7 @@ export async function checkHealth(): Promise<ApiResponse> {
     response.body.status !== "ok"
   ) {
     throw new ApiError(
-      "Malformed health response: expected HTTP 200 and status ok.",
+      "Health 응답 형식 오류: HTTP 200과 status ok가 필요합니다.",
       response,
     );
   }
@@ -193,7 +193,7 @@ export async function runRoute(
 ): Promise<{ response: ApiResponse; route: RouteResponse }> {
   if (!ROUTE_PATH)
     throw new Error(
-      "No route endpoint is configured. This API currently supports health checks only.",
+      "경로 endpoint가 설정되지 않았습니다. 현재 API는 health check만 지원합니다.",
     );
   const response = await request(ROUTE_PATH, input);
   return { response, route: parseRoute(response) };
