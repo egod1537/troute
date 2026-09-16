@@ -1,9 +1,10 @@
-use std::{env, error::Error, net::SocketAddr, num::NonZeroU16, process::ExitCode};
+use std::{env, error::Error, net::SocketAddr, num::NonZeroU16, process::ExitCode, sync::Arc};
 
 use tokio::net::TcpListener;
 use troute::{
     development::{DevelopmentRouteSolver, DevelopmentRoutingProvider},
     http,
+    observation::{InMemoryJobTimelineStore, JobObservationRecorder},
     trasolve::TrasolveClient,
     RouteOptimizationService,
 };
@@ -33,6 +34,15 @@ async fn run() -> Result<(), Box<dyn Error>> {
         Err(env::VarError::NotPresent) => None,
         Err(error) => return Err(error.into()),
     };
+    let observation_enabled = match env::var("TROUTE_ENABLE_TESTBED_OBSERVATION") {
+        Ok(value) => value
+            .parse::<bool>()
+            .map_err(|_| "TROUTE_ENABLE_TESTBED_OBSERVATION must be `true` or `false`")?,
+        Err(env::VarError::NotPresent) => false,
+        Err(error) => return Err(error.into()),
+    };
+    let observation = observation_enabled
+        .then(|| JobObservationRecorder::new(Arc::new(InMemoryJobTimelineStore::default())));
     let address = SocketAddr::from(([0, 0, 0, 0], port));
     println!("troute server starting; bind address: {address}");
     println!(
@@ -43,10 +53,18 @@ async fn run() -> Result<(), Box<dyn Error>> {
             "not configured"
         }
     );
+    println!(
+        "Testbed job observation: {}",
+        if observation_enabled {
+            "enabled"
+        } else {
+            "disabled"
+        }
+    );
     let listener = TcpListener::bind(address).await?;
     let optimizer =
         RouteOptimizationService::new(DevelopmentRoutingProvider, DevelopmentRouteSolver);
-    let app = http::router_with_trasolve(optimizer, trasolve);
+    let app = http::router_with_observation(optimizer, trasolve, observation);
 
     println!("troute server listening on http://{address}");
     axum::serve(listener, app)

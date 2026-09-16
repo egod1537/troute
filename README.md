@@ -397,6 +397,36 @@ After successful delivery, the job is expected to be `completed` with progress
 events followed by the result event. The Trasolve job endpoint owns that stored
 state; troute remains synchronous and does not write Trip storage directly.
 
+### Testbed job observation timeline
+
+Set `TROUTE_ENABLE_TESTBED_OBSERVATION=true` to record the real HTTP boundaries
+around each parsed `/optimize` request and each outbound Trasolve job callback.
+The flag defaults to `false`; invalid values fail startup. Observation is
+best-effort, in memory only, and has no effect on optimization or callback
+delivery. Keep it disabled on deployments where the integration endpoint
+should not expose developer diagnostics.
+
+Read a job timeline with:
+
+```text
+GET /integration/jobs/{job_id}/timeline
+```
+
+The endpoint returns HTTP 200 with `{ "job_id": "...", "entries": [] }` when
+observation is disabled or the job is unknown. Entries are sorted by millisecond
+timestamp, preserving insertion order when timestamps match. Each real HTTP
+exchange has separate `REQUEST` and `RESPONSE` entries sharing a `pair_id`.
+Callback HTTP rejections, connection failures, and timeouts remain visible as
+response entries; failures without an HTTP response have no status.
+
+Storage retains at most 100 jobs and 500 entries per job. A new job beyond the
+job limit evicts the oldest-created job; a new entry beyond a job's entry limit
+evicts that job's oldest entry. Appending to an existing job does not refresh
+its job eviction position. Restarting troute clears all observations.
+
+Only `Content-Type`, `Accept`, and `User-Agent` headers are eligible for
+recording. Authorization, cookies, API keys, and other headers are never stored.
+
 ## Docker
 
 The multi-stage Dockerfile builds the binary and copies it into a Debian slim
@@ -417,11 +447,14 @@ Compose publishes the host port on `127.0.0.1` only. The application still binds
 to `0.0.0.0` inside the container, so containers on its Docker network can reach
 it. Both application and host ports default to `8080`.
 
-Compose passes through `TRASOLVE_BASE_URL` when it is set. Inside the troute
-container, `127.0.0.1` refers to that container, not the Docker host or a
-Trasolve container. Set the variable to an address actually reachable from the
-troute container, such as the Trasolve Compose service name when both services
-share a network. The source code makes no host-specific networking assumption.
+Compose passes through `TRASOLVE_BASE_URL` when it is set and passes
+`TROUTE_ENABLE_TESTBED_OBSERVATION`, defaulting the latter to `false`. The
+checked-in `.env.example` enables observation for local testbed use. Inside the
+troute container, `127.0.0.1` refers to that container, not the Docker host or a
+Trasolve container. Set the backend URL to an address actually reachable from
+the troute container, such as the Trasolve Compose service name when both
+services share a network. The source code makes no host-specific networking
+assumption.
 
 If the host port is already occupied, create a local configuration:
 
@@ -442,10 +475,18 @@ exited container; it does not detect an unresponsive process.
 ## Developer testbed
 
 `testbed/` is a compact Blueprint + React + TypeScript + Vite API playground for
-developers, separate from the Rust API and the Trasolve user interface. It
-provides API health, an editable optimize request, request validation, route
-execution, a structured route result, the raw response, HTTP status, and the
-latest round-trip latency.
+developers, separate from the Rust API and the Trasolve user interface. Its
+job-centric workspace creates optimize requests from a JSON dialog, shows each
+request immediately in the Jobs sidebar, and keeps the structured route result,
+raw response, HTTP status, and round-trip latency with the selected job.
+
+Testbed job history is session-local and resets on page reload. It is a frontend
+observation model, not an authoritative copy of server-side job state.
+
+The testbed supports Light, Dark, and System themes from the Navbar control.
+System is the default and follows browser/OS color-scheme changes. An explicit
+selection is stored locally in the browser under `troute.testbed.theme`; theme
+selection is frontend-only and does not affect API requests or behavior.
 
 The Rust API implements `GET /health` and `POST /optimize`. Configure
 `VITE_TROUTE_ROUTE_PATH=/optimize` to make the primary action submit the editor

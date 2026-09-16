@@ -8,12 +8,16 @@ use axum::{
 };
 use http_body_util::BodyExt;
 use serde_json::{json, Value};
-use std::time::Duration;
+use std::{sync::Arc, time::Duration};
 use tokio::{net::TcpListener, sync::mpsc, task::JoinHandle, time::sleep};
 use tower::ServiceExt;
 use troute::{
     development::{DevelopmentRouteSolver, DevelopmentRoutingProvider},
     http,
+    observation::{
+        JobObservationRecorder, JobTimelineEntry, JobTimelineStore, ObservationDirection,
+        ObservationPeer,
+    },
     trasolve::TrasolveClient,
     RouteOptimizationService,
 };
@@ -30,6 +34,16 @@ fn app_with_trasolve(trasolve: TrasolveClient) -> Router {
         RouteOptimizationService::new(DevelopmentRoutingProvider, DevelopmentRouteSolver),
         Some(trasolve),
     )
+}
+
+fn app_with_observation(trasolve: Option<TrasolveClient>) -> (Router, JobObservationRecorder) {
+    let observation = JobObservationRecorder::in_memory();
+    let app = http::router_with_observation(
+        RouteOptimizationService::new(DevelopmentRoutingProvider, DevelopmentRouteSolver),
+        trasolve,
+        Some(observation.clone()),
+    );
+    (app, observation)
 }
 
 fn valid_request() -> Value {
@@ -71,10 +85,11 @@ async fn send_to(
     if let Some(content_type) = content_type {
         builder = builder.header(header::CONTENT_TYPE, content_type);
     }
-    let response = app
-        .oneshot(builder.body(Body::from(body)).unwrap())
-        .await
-        .unwrap();
+    send_request_to(app, builder.body(Body::from(body)).unwrap()).await
+}
+
+async fn send_request_to(app: Router, request: Request<Body>) -> Response {
+    let response = app.oneshot(request).await.unwrap();
     let status = response.status();
     let headers = response.headers().clone();
     let bytes = response.into_body().collect().await.unwrap().to_bytes();
@@ -97,6 +112,203 @@ async fn health_remains_available() {
     let response = send(Method::GET, "/health", None, String::new()).await;
     assert_eq!(response.status, StatusCode::OK);
     assert_eq!(response.body, json!({ "status": "ok" }));
+}
+
+#[tokio::test]
+async fn optimize_traffic_is_paired_and_available_from_the_timeline_endpoint() {
+    let (app, observation) = app_with_observation(None);
+    let body = valid_request();
+    let request = Request::builder()
+        .method(Method::POST)
+        .uri("/optimize")
+        .header(header::CONTENT_TYPE, "application/json")
+        .header(header::AUTHORIZATION, "Bearer must-not-be-recorded")
+        .header(header::COOKIE, "session=must-not-be-recorded")
+        .header("x-api-key", "must-not-be-recorded")
+        .body(Body::from(body.to_string()))
+        .unwrap();
+    let response = send_request_to(app.clone(), request).await;
+
+    assert_eq!(response.status, StatusCode::OK);
+    let entries = observation.list("route-http-integration-test");
+    assert_eq!(entries.len(), 2);
+    assert_eq!(entries[0].pair_id, entries[1].pair_id);
+    assert_ne!(entries[0].id, entries[1].id);
+    assert_eq!(entries[0].direction, ObservationDirection::Request);
+    assert_eq!(entries[0].source, ObservationPeer::Testbed);
+    assert_eq!(entries[0].target, ObservationPeer::Troute);
+    assert_eq!(entries[0].method.as_deref(), Some("POST"));
+    assert_eq!(entries[0].path.as_deref(), Some("/optimize"));
+    assert_eq!(entries[0].body.as_ref().unwrap(), &body);
+    let headers = entries[0].headers.as_ref().unwrap();
+    assert_eq!(headers.len(), 1);
+    assert_eq!(headers["content-type"], "application/json");
+    assert!(!headers.contains_key("authorization"));
+    assert!(!headers.contains_key("cookie"));
+    assert!(!headers.contains_key("x-api-key"));
+    assert_eq!(entries[1].direction, ObservationDirection::Response);
+    assert_eq!(entries[1].source, ObservationPeer::Troute);
+    assert_eq!(entries[1].target, ObservationPeer::Testbed);
+    assert_eq!(entries[1].status, Some(200));
+    assert_eq!(entries[1].body.as_ref().unwrap(), &response.body);
+    assert!(entries[1].latency_ms.unwrap() >= 0.0);
+
+    let timeline = send_to(
+        app.clone(),
+        Method::GET,
+        "/integration/jobs/route-http-integration-test/timeline",
+        None,
+        String::new(),
+    )
+    .await;
+    assert_eq!(timeline.status, StatusCode::OK);
+    assert_eq!(timeline.body["job_id"], "route-http-integration-test");
+    assert_eq!(timeline.body["entries"].as_array().unwrap().len(), 2);
+    assert_eq!(timeline.body["entries"][0]["direction"], "REQUEST");
+    assert_eq!(timeline.body["entries"][1]["direction"], "RESPONSE");
+
+    let unknown = send_to(
+        app,
+        Method::GET,
+        "/integration/jobs/unknown/timeline",
+        None,
+        String::new(),
+    )
+    .await;
+    assert_eq!(unknown.status, StatusCode::OK);
+    assert_eq!(unknown.body, json!({ "job_id": "unknown", "entries": [] }));
+}
+
+#[tokio::test]
+async fn optimize_timeline_contains_real_callback_request_response_pairs() {
+    let (base_url, mut callback_events, _server) =
+        spawn_job_event_mock(StatusCode::NO_CONTENT).await;
+    let (app, observation) = app_with_observation(Some(TrasolveClient::new(base_url).unwrap()));
+
+    let response = send_to(
+        app,
+        Method::POST,
+        "/optimize",
+        Some("application/json"),
+        valid_request().to_string(),
+    )
+    .await;
+
+    assert_eq!(response.status, StatusCode::OK);
+    let mut delivered = 0;
+    while callback_events.try_recv().is_ok() {
+        delivered += 1;
+    }
+    assert_eq!(delivered, 5);
+
+    let entries = observation.list("route-http-integration-test");
+    assert_eq!(entries.len(), 12);
+    let callback_requests = entries
+        .iter()
+        .filter(|entry| {
+            entry.direction == ObservationDirection::Request
+                && entry.source == ObservationPeer::Troute
+                && entry.target == ObservationPeer::Trasolve
+        })
+        .collect::<Vec<_>>();
+    let callback_responses = entries
+        .iter()
+        .filter(|entry| {
+            entry.direction == ObservationDirection::Response
+                && entry.source == ObservationPeer::Trasolve
+                && entry.target == ObservationPeer::Troute
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(callback_requests.len(), 5);
+    assert_eq!(callback_responses.len(), 5);
+    for request in callback_requests {
+        let response = callback_responses
+            .iter()
+            .find(|response| response.pair_id == request.pair_id)
+            .unwrap();
+        assert_eq!(response.status, Some(204));
+    }
+}
+
+#[tokio::test]
+async fn timeline_endpoint_sorts_by_timestamp_and_preserves_equal_time_order() {
+    let (app, observation) = app_with_observation(None);
+    let mut latest = observed_entry(&observation, "latest");
+    let mut first_equal = observed_entry(&observation, "first-equal");
+    let mut second_equal = observed_entry(&observation, "second-equal");
+    latest.timestamp_ms = 20;
+    first_equal.timestamp_ms = 10;
+    second_equal.timestamp_ms = 10;
+    observation.append("ordered-job", latest);
+    observation.append("ordered-job", first_equal);
+    observation.append("ordered-job", second_equal);
+
+    let response = send_to(
+        app,
+        Method::GET,
+        "/integration/jobs/ordered-job/timeline",
+        None,
+        String::new(),
+    )
+    .await;
+
+    assert_eq!(response.status, StatusCode::OK);
+    assert_eq!(
+        response.body["entries"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|entry| entry["pair_id"].as_str().unwrap())
+            .collect::<Vec<_>>(),
+        vec!["first-equal", "second-equal", "latest"]
+    );
+}
+
+struct PanickingTimelineStore;
+
+impl JobTimelineStore for PanickingTimelineStore {
+    fn append(&self, _job_id: &str, _entry: JobTimelineEntry) {
+        panic!("simulated observation failure");
+    }
+
+    fn list(&self, _job_id: &str) -> Vec<JobTimelineEntry> {
+        panic!("simulated observation failure");
+    }
+
+    fn clear(&self, _job_id: &str) {
+        panic!("simulated observation failure");
+    }
+}
+
+#[tokio::test]
+async fn observation_failure_does_not_affect_optimize() {
+    let observation = JobObservationRecorder::new(Arc::new(PanickingTimelineStore));
+    let app = http::router_with_observation(
+        RouteOptimizationService::new(DevelopmentRoutingProvider, DevelopmentRouteSolver),
+        None,
+        Some(observation),
+    );
+
+    let response = send_to(
+        app,
+        Method::POST,
+        "/optimize",
+        Some("application/json"),
+        valid_request().to_string(),
+    )
+    .await;
+
+    assert_eq!(response.status, StatusCode::OK);
+    assert_eq!(response.body["total_travel_minutes"], 30);
+}
+
+fn observed_entry(observation: &JobObservationRecorder, pair_id: &str) -> JobTimelineEntry {
+    observation.entry(
+        pair_id,
+        ObservationDirection::Request,
+        ObservationPeer::Testbed,
+        ObservationPeer::Troute,
+    )
 }
 
 #[tokio::test]

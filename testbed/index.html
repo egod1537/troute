@@ -5,6 +5,25 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <meta name="theme-color" content="#141a21" />
     <meta name="description" content="Developer testbed for troute inputs, routes, and request timing." />
+    <link rel="icon" type="image/svg+xml" href="/troute-icon.svg" />
+    <script>
+      (() => {
+        let mode = "system";
+        try {
+          const stored = localStorage.getItem("troute.testbed.theme");
+          if (stored === "light" || stored === "dark" || stored === "system") {
+            mode = stored;
+          }
+        } catch {
+          // System mode remains available when browser storage is unavailable.
+        }
+        const prefersDark = matchMedia("(prefers-color-scheme: dark)").matches;
+        document.documentElement.dataset.theme =
+          mode === "dark" || (mode === "system" && prefersDark)
+            ? "dark"
+            : "light";
+      })();
+    </script>
     <title>troute · testbed</title>
   </head>
   <body>

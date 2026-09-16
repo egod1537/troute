@@ -11,7 +11,7 @@ export default defineConfig({
   projects: [
     {
       name: "health-only",
-      testMatch: "health.spec.ts",
+      testMatch: ["health.spec.ts", "theme.spec.ts"],
       use: { baseURL: "http://127.0.0.1:4173" },
     },
     {

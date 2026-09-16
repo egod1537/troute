@@ -5,11 +5,13 @@ services:
     environment:
       - TROUTE_PORT=${TROUTE_PORT:-8080}
       - TRASOLVE_BASE_URL
+      - TROUTE_ENABLE_TESTBED_OBSERVATION=${TROUTE_ENABLE_TESTBED_OBSERVATION:-false}
     ports:
       - "127.0.0.1:${TROUTE_HOST_PORT:-8080}:${TROUTE_PORT:-8080}"
   testbed:
     build:
-      context: ./testbed
+      context: .
+      dockerfile: testbed/Dockerfile
       args:
         VITE_TROUTE_API_BASE_URL: ${VITE_TROUTE_API_BASE_URL:-/api}
         VITE_TROUTE_ROUTE_PATH: ${VITE_TROUTE_ROUTE_PATH:-}

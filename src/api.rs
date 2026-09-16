@@ -11,7 +11,7 @@ use crate::events::{validate_job_id, JobIdError};
 const MAX_LOCATIONS: usize = 500;
 const MAX_STRING_CHARACTERS: usize = 512;
 
-#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct OptimizeRouteRequest {
     pub job_id: String,
@@ -20,7 +20,7 @@ pub struct OptimizeRouteRequest {
     pub start_time: TimeOfDay,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct LocationInput {
     pub id: String,

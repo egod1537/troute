@@ -10,6 +10,7 @@ pub mod domain;
 pub mod events;
 pub mod http;
 pub mod matrix;
+pub mod observation;
 pub mod routing;
 pub mod schedule;
 pub mod service;
@@ -20,5 +21,9 @@ pub use api::{OptimizeRouteRequest, OptimizeRouteResponse};
 pub use events::{
     ErrorEventData, JobEvent, JobEventContext, JobEventType, OptimizationErrorCode,
     OptimizationEventReporter, ProgressEventData, ProgressStage,
+};
+pub use observation::{
+    InMemoryJobTimelineStore, JobObservationRecorder, JobTimelineEntry, JobTimelineStore,
+    ObservationDirection, ObservationPeer,
 };
 pub use service::RouteOptimizationService;

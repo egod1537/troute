@@ -1,14 +1,18 @@
-use std::{sync::Arc, time::Duration};
+use std::{
+    sync::Arc,
+    time::{Duration, Instant},
+};
 
 use axum::{
     body::Body,
-    extract::{rejection::JsonRejection, DefaultBodyLimit, State},
-    http::{header, HeaderValue, Request, StatusCode},
+    extract::{rejection::JsonRejection, DefaultBodyLimit, Path, State},
+    http::{header, HeaderMap, HeaderValue, Request, StatusCode},
     response::{IntoResponse, Response},
     routing::{get, post},
     Json, Router,
 };
 use serde::Serialize;
+use serde_json::json;
 use tokio::{sync::mpsc, task::JoinHandle, time::timeout};
 
 use crate::{
@@ -16,6 +20,10 @@ use crate::{
     events::{
         ErrorEventData, JobEventContext, JobEventType, NoopOptimizationEventReporter,
         OptimizationErrorCode, OptimizationEventReporter, ProgressEventData, ProgressStage,
+    },
+    observation::{
+        allowlisted_headers, JobObservationRecorder, JobTimelineEntry, ObservationDirection,
+        ObservationHeaders, ObservationPeer,
     },
     routing::{RoutingError, RoutingProvider},
     schedule::ScheduleError,
@@ -180,6 +188,7 @@ impl JobCallbackSession {
 struct AppState {
     optimizer: Arc<dyn Optimizer>,
     trasolve: Option<TrasolveClient>,
+    observation: Option<JobObservationRecorder>,
 }
 
 #[derive(Debug, Serialize)]
@@ -191,6 +200,12 @@ struct HealthResponse {
 struct TrasolveIntegrationHealthResponse {
     status: &'static str,
     trasolve: TrasolveHealthResponse,
+}
+
+#[derive(Debug, Serialize)]
+struct JobTimelineResponse {
+    job_id: String,
+    entries: Vec<JobTimelineEntry>,
 }
 
 #[derive(Debug, Serialize)]
@@ -375,7 +390,7 @@ where
     P: RoutingProvider + Send + Sync + 'static,
     S: RouteSolver + Send + Sync + 'static,
 {
-    router_with_trasolve(optimizer, None)
+    router_with_observation(optimizer, None, None)
 }
 
 /// Builds the HTTP application with an optional reusable Trasolve client.
@@ -387,6 +402,24 @@ where
     P: RoutingProvider + Send + Sync + 'static,
     S: RouteSolver + Send + Sync + 'static,
 {
+    router_with_observation(optimizer, trasolve, None)
+}
+
+/// Builds the HTTP application with optional Trasolve and testbed observation support.
+pub fn router_with_observation<P, S>(
+    optimizer: RouteOptimizationService<P, S>,
+    trasolve: Option<TrasolveClient>,
+    observation: Option<JobObservationRecorder>,
+) -> Router
+where
+    P: RoutingProvider + Send + Sync + 'static,
+    S: RouteSolver + Send + Sync + 'static,
+{
+    let trasolve = trasolve.map(|client| match &observation {
+        Some(observation) => client.with_observation(observation.clone()),
+        None => client,
+    });
+
     Router::new()
         .route("/health", get(health))
         .route("/optimize", post(optimize))
@@ -394,12 +427,14 @@ where
             "/integration/trasolve/health",
             get(trasolve_integration_health),
         )
+        .route("/integration/jobs/{job_id}/timeline", get(job_timeline))
         .fallback(not_found)
         .method_not_allowed_fallback(method_not_allowed)
         .layer(DefaultBodyLimit::max(MAX_REQUEST_BODY_BYTES))
         .with_state(AppState {
             optimizer: Arc::new(optimizer),
             trasolve,
+            observation,
         })
 }
 
@@ -409,9 +444,29 @@ async fn health() -> Json<HealthResponse> {
 
 async fn optimize(
     State(state): State<AppState>,
+    headers: HeaderMap,
     request: Result<Json<OptimizeRouteRequest>, JsonRejection>,
 ) -> Result<Json<OptimizeRouteResponse>, ApiError> {
     let Json(request) = request.map_err(ApiError::from_json_rejection)?;
+    let job_id = request.job_id.clone();
+    let started = Instant::now();
+    let pair_id = state
+        .observation
+        .as_ref()
+        .map(|observation| observation.next_pair_id("opt"));
+    if let (Some(observation), Some(pair_id)) = (&state.observation, &pair_id) {
+        let mut entry = observation.entry(
+            pair_id,
+            ObservationDirection::Request,
+            ObservationPeer::Testbed,
+            ObservationPeer::Troute,
+        );
+        entry.method = Some("POST".to_owned());
+        entry.path = Some("/optimize".to_owned());
+        entry.headers = allowlisted_headers(&headers);
+        entry.body = serde_json::to_value(&request).ok();
+        observation.append(&job_id, entry);
+    }
     let callback = match &state.trasolve {
         Some(client) => JobCallbackSession::start(client.clone(), request.job_id.clone()),
         None => {
@@ -430,7 +485,89 @@ async fn optimize(
         callback.finish().await;
     }
 
-    result.map(Json).map_err(ApiError::from_service)
+    match result {
+        Ok(response) => {
+            record_optimize_response(
+                state.observation.as_ref(),
+                &job_id,
+                pair_id.as_deref(),
+                started,
+                StatusCode::OK,
+                serde_json::to_value(&response).ok(),
+            );
+            Ok(Json(response))
+        }
+        Err(error) => {
+            let error = ApiError::from_service(error);
+            let body = json!({
+                "error": {
+                    "code": error.code,
+                    "message": error.message,
+                }
+            });
+            record_optimize_response(
+                state.observation.as_ref(),
+                &job_id,
+                pair_id.as_deref(),
+                started,
+                error.status,
+                Some(body),
+            );
+            Err(error)
+        }
+    }
+}
+
+fn record_optimize_response(
+    observation: Option<&JobObservationRecorder>,
+    job_id: &str,
+    pair_id: Option<&str>,
+    started: Instant,
+    status: StatusCode,
+    body: Option<serde_json::Value>,
+) {
+    let (Some(observation), Some(pair_id)) = (observation, pair_id) else {
+        return;
+    };
+    let mut entry = observation.entry(
+        pair_id,
+        ObservationDirection::Response,
+        ObservationPeer::Troute,
+        ObservationPeer::Testbed,
+    );
+    entry.status = Some(status.as_u16());
+    entry.latency_ms = Some(started.elapsed().as_secs_f64() * 1_000.0);
+    entry.headers = Some(ObservationHeaders::from([(
+        header::CONTENT_TYPE.as_str().to_owned(),
+        "application/json".to_owned(),
+    )]));
+    entry.body = body;
+    observation.append(job_id, entry);
+}
+
+async fn job_timeline(
+    State(state): State<AppState>,
+    Path(job_id): Path<String>,
+) -> Json<JobTimelineResponse> {
+    let mut indexed_entries = state
+        .observation
+        .as_ref()
+        .map(|observation| observation.list(&job_id))
+        .unwrap_or_default()
+        .into_iter()
+        .enumerate()
+        .collect::<Vec<_>>();
+    indexed_entries.sort_by(|(left_index, left), (right_index, right)| {
+        left.timestamp_ms
+            .cmp(&right.timestamp_ms)
+            .then_with(|| left_index.cmp(right_index))
+    });
+    let entries = indexed_entries
+        .into_iter()
+        .map(|(_, entry)| entry)
+        .collect();
+
+    Json(JobTimelineResponse { job_id, entries })
 }
 
 async fn trasolve_integration_health(
@@ -466,7 +603,9 @@ async fn method_not_allowed<B>(request: Request<B>) -> Response {
     } else if matches!(
         request.uri().path(),
         "/health" | "/integration/trasolve/health"
-    ) {
+    ) || (request.uri().path().starts_with("/integration/jobs/")
+        && request.uri().path().ends_with("/timeline"))
+    {
         response
             .headers_mut()
             .insert(header::ALLOW, HeaderValue::from_static("GET,HEAD"));
