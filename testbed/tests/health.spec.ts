@@ -26,7 +26,7 @@ test("health-only shell preserves header controls and job-centric layout", async
   ).toBe(true);
   await expect(page.locator('link[rel="icon"]')).toHaveAttribute(
     "href",
-    "/troute-icon.svg",
+    "/troute-icon.svg?v=2",
   );
   await expect(page).toHaveTitle("troute · 테스트베드");
   await expect(page.locator("html")).toHaveAttribute("lang", "ko");

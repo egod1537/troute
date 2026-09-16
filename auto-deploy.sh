@@ -60,7 +60,12 @@ run_once() {
   record last-status deploying
   # This is a separate Bash process: failures inside deploy.sh retain errexit.
   result=0
-  /bin/bash "$repo_root/scripts/deploy.sh" "$repo_root" "$sha" || result=$?
+  # State files remain private, but deployment checkout/build artifacts should
+  # not inherit the watcher's restrictive umask (public files must be readable).
+  (
+    umask 022
+    /bin/bash "$repo_root/scripts/deploy.sh" "$repo_root" "$sha"
+  ) || result=$?
   if (( result == 0 )); then
     record deployed-commit "$sha"
     record next-retry-at 0

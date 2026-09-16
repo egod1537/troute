@@ -14,6 +14,9 @@ RUN npm run build
 
 FROM nginx:stable-alpine AS runtime
 COPY --from=builder /app/testbed/dist /usr/share/nginx/html
+# The deployment watcher protects its state with umask 077. Normalize the
+# public build output so the unprivileged Nginx workers can always read it.
+RUN chmod -R a+rX /usr/share/nginx/html
 COPY testbed/nginx.conf.template /etc/nginx/templates/default.conf.template
 ENV TROUTE_PORT=8080
 ENV NGINX_ENVSUBST_FILTER=^TROUTE_PORT$

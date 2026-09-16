@@ -9,7 +9,7 @@ services:
     volumes:
       - ./runtime/troute:/data
     ports:
-      - "127.0.0.1:${TROUTE_HOST_PORT:-8080}:${TROUTE_PORT:-8080}"
+      - "127.0.0.1:${TROUTE_HOST_PORT:-18080}:${TROUTE_PORT:-8080}"
   testbed:
     build:
       context: .

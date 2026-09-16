@@ -47,6 +47,7 @@ class DeploymentTests(unittest.TestCase):
             "REAL_GIT": GIT,
             "TEST_FAILURE": "",
             "TEST_HEALTH": "ok",
+            "TEST_FAVICON": "ok",
             "GITHUB_TOKEN": "",
         }
         self.executable("git", '''#!/bin/bash
@@ -99,6 +100,16 @@ if [[ "$url" == http://127.0.0.1:18081/ ]]; then
   printf 'health-testbed\\n' >> "$TEST_ROOT/events.log"
   printf '<html>testbed</html>' > "$output"
   if [[ "${TEST_FAILURE:-}" == testbed-health ]]; then printf 503; else printf 200; fi
+  exit 0
+fi
+if [[ "$url" == http://127.0.0.1:18081/troute-icon.svg ]]; then
+  printf 'health-favicon\\n' >> "$TEST_ROOT/events.log"
+  case "${TEST_FAVICON:-ok}" in
+    ok) printf '<svg></svg>' > "$output"; printf '200\\nimage/svg+xml' ;;
+    bad-status) printf '<svg></svg>' > "$output"; printf '404\\nimage/svg+xml' ;;
+    empty) : > "$output"; printf '200\\nimage/svg+xml' ;;
+    wrong-mime) printf '<html></html>' > "$output"; printf '200\\ntext/html' ;;
+  esac
   exit 0
 fi
 printf 'health-troute\\n' >> "$TEST_ROOT/events.log"
@@ -163,6 +174,10 @@ fi
         )
         self.assertIn("http://127.0.0.1:18080/health", (self.root / "curl.log").read_text())
         self.assertIn("http://127.0.0.1:18081/", (self.root / "curl.log").read_text())
+        self.assertIn(
+            "http://127.0.0.1:18081/troute-icon.svg",
+            (self.root / "curl.log").read_text(),
+        )
         self.assertFalse((self.checkout / ".git/troute-deploy.lock").exists())
 
     def test_git_failures_stop_before_build(self):
@@ -192,6 +207,20 @@ fi
                 self.assertNotEqual(result.returncode, 0)
                 self.assertIn("20/20 failed", result.stdout)
                 self.assertEqual(len((self.root / "curl.log").read_text().splitlines()), 20)
+
+    def test_favicon_check_rejects_status_empty_body_and_wrong_mime(self):
+        for favicon in ("bad-status", "empty", "wrong-mime"):
+            with self.subTest(favicon=favicon):
+                (self.root / "curl.log").write_text("")
+                result = self.deploy(TEST_FAVICON=favicon)
+                self.assertNotEqual(result.returncode, 0)
+                self.assertIn("static asset check attempt 20/20 failed", result.stdout)
+                favicon_calls = [
+                    line
+                    for line in (self.root / "curl.log").read_text().splitlines()
+                    if "/troute-icon.svg" in line
+                ]
+                self.assertEqual(len(favicon_calls), 20)
 
     def test_tracked_remote_env_is_rejected_before_reset(self):
         (self.origin / ".env").write_text("must-not-replace-runtime-config\n")
@@ -227,6 +256,8 @@ fi
         events = (self.root / "events.log").read_text()
         self.assertLess(events.index('"state":"pending"'), events.index("docker-build"))
         self.assertLess(events.index("health-testbed"), events.index('"state":"success"'))
+        self.assertLess(events.index("health-favicon"), events.index('"state":"success"'))
+        self.assertIn("[deploy] GitHub status reporting: enabled", result.stdout)
         self.assertNotIn(token, result.stdout + result.stderr)
         self.assertNotIn(token, (self.root / "curl.log").read_text())
         self.assertNotIn(token, events)
@@ -247,6 +278,7 @@ fi
             ("up", {}, 1),
             ("troute-health", {"TEST_HEALTH": "bad-status"}, 1),
             ("testbed-health", {}, 1),
+            ("favicon-health", {"TEST_FAVICON": "bad-status"}, 1),
         )
         for failure, extra, expected_code in cases:
             with self.subTest(failure=failure):
@@ -255,7 +287,7 @@ fi
                     if path.exists():
                         path.unlink()
                 overrides = {"GITHUB_TOKEN": token, **extra}
-                if failure != "troute-health":
+                if failure not in ("troute-health", "favicon-health"):
                     overrides["TEST_FAILURE"] = failure
                 result = self.deploy(**overrides)
                 self.assertEqual(result.returncode, expected_code)
@@ -270,7 +302,10 @@ fi
     def test_missing_token_disables_reporting_without_failing_deployment(self):
         result = self.deploy(GITHUB_TOKEN="")
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
-        self.assertIn("GitHub deployment status reporting disabled", result.stdout)
+        self.assertIn(
+            "[deploy] GitHub status reporting: disabled (GITHUB_TOKEN missing)",
+            result.stdout,
+        )
         self.assertEqual(self.github_status_lines(), [])
 
     def test_github_api_failure_is_only_a_warning(self):
@@ -279,6 +314,8 @@ fi
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         self.assertEqual(len(self.github_status_lines()), 2)
         self.assertIn("GitHub deployment status update failed", result.stderr)
+        sha = self.git("-C", str(self.checkout), "rev-parse", "HEAD")
+        self.assertIn(f"state=success, sha={sha[:7]}", result.stderr)
         self.assertNotIn(token, result.stdout + result.stderr)
 
     def test_interruption_publishes_interrupted_failure(self):

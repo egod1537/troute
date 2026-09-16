@@ -247,11 +247,16 @@ Trasolve browser/client
   -> provider -> solver -> schedule
 ```
 
-Run troute on port 8080, then start the Trasolve backend with:
+Run troute with Docker Compose on the Mac mini host, then start a host-native
+Trasolve backend with:
 
 ```sh
-TROUTE_BASE_URL=http://127.0.0.1:8080 npm run dev -w @trasolve/backend
+TROUTE_BASE_URL=http://127.0.0.1:18080 npm run dev -w @trasolve/backend
 ```
+
+When both services share a Docker network, use `http://troute:8080` instead.
+For a directly executed `cargo run`, the non-container default remains
+`http://127.0.0.1:8080` unless `TROUTE_PORT` is overridden.
 
 `POST http://127.0.0.1:43127/api/troute/optimize` accepts the same request body.
 The Trasolve browser never connects directly to troute. The public
@@ -483,7 +488,7 @@ runtime image. It runs as a non-root user without the Rust toolchain.
 ```sh
 docker compose build
 docker compose up -d
-curl -i http://localhost:8080/health
+curl -i http://127.0.0.1:18080/health
 docker compose logs -f troute
 docker compose down
 ```
@@ -493,7 +498,8 @@ and run in the background, use `docker compose up -d --build`.
 
 Compose publishes the host port on `127.0.0.1` only. The application still binds
 to `0.0.0.0` inside the container, so containers on its Docker network can reach
-it. Both application and host ports default to `8080`.
+it. The application/container port defaults to `8080`; the host port defaults
+to `18080` because SFTPGo uses host port `8080` on the deployment Mac.
 
 Compose passes through `TRASOLVE_BASE_URL` when it is set, sets
 `TROUTE_DATA_DIR=/data`, and bind-mounts `./runtime/troute:/data`. Both
@@ -505,16 +511,18 @@ container. Set the backend URL to an address actually reachable from the
 troute container, such as the Trasolve Compose service name when both services
 share a network. The source code makes no host-specific networking assumption.
 
-If the host port is already occupied, create a local configuration:
+To make the host and container ports explicit, create a local configuration:
 
 ```sh
 cp .env.example .env
 ```
 
-Set `TROUTE_HOST_PORT=18080` in `.env`, then run `docker compose up -d --build`
-and check `http://localhost:18080/health`. `TROUTE_HOST_PORT` changes only the
-published host port; `TROUTE_PORT` sets the application/container port. Compose
-automatically reads `.env` and keeps the port mapping consistent.
+The example already sets `TROUTE_HOST_PORT=18080` and `TROUTE_PORT=8080`. Run
+`docker compose up -d --build` and check `http://127.0.0.1:18080/health`.
+`TROUTE_HOST_PORT` changes only the published host port; `TROUTE_PORT` sets the
+application/container port. Compose automatically reads `.env` and keeps the
+port mapping consistent. Do not use `127.0.0.1:18080` from another container;
+the testbed uses the Docker-network address `troute:8080`.
 
 No API container healthcheck is configured: the slim runtime has no HTTP client,
 and adding one solely for this check is unnecessary at this stage. Verify
@@ -546,6 +554,9 @@ serves the favicon and Navbar image from `testbed/public/troute-icon.svg`; that
 copy uses an explicit Blueprint blue because browser favicons cannot reliably
 inherit `currentColor`. Vite validates that the public copy differs from the
 canonical SVG only by this explicit color, preventing the two from drifting.
+The browser link uses the deterministic `?v=2` suffix to invalidate stale
+favicon cache entries. The production image normalizes all Vite output to
+world-readable files so the unprivileged Nginx workers can serve public assets.
 
 The Rust API implements `GET /health` and `POST /optimize`. Configure
 `VITE_TROUTE_ROUTE_PATH=/optimize` to make the primary action submit the editor
@@ -659,16 +670,17 @@ in place. If main advances between polling and fetch, deployment is deferred
 to the next poll so the recorded SHA always matches the code being built.
 
 Success requires the API `/health` to return HTTP 200 and `{"status":"ok"}`,
-and the testbed `/` to return HTTP 200. Both published host ports are discovered
-from their containers, including `.env` overrides. A testbed failure marks the
-deployment failed without stopping the API.
+the testbed `/` to return HTTP 200, and `/troute-icon.svg` to return a non-empty
+HTTP 200 response whose Content-Type starts with `image/svg+xml`. Both published
+host ports are discovered from their containers, including `.env` overrides. A
+testbed or favicon failure marks the deployment failed without stopping the API.
 Health checks retry up to 20 times at 3-second intervals with a 5-second request
 timeout. Only success updates `deployed-commit`. The same failed commit waits
 300 seconds after failure before retrying; a newer commit bypasses that delay.
 
 The deploy script also reports the exact checked-out commit through GitHub's
 Commit Status API under the stable `deploy/troute` context. It publishes
-`pending` before the image build, `success` only after both health checks pass,
+`pending` before the image build, `success` only after all health checks pass,
 and `failure` when build, startup, health checks, or an interrupt fails the
 deployment. The check links to `https://troute.mangagaki.net`. Status reporting
 is best-effort: a missing token or GitHub API outage is logged but never changes
@@ -689,7 +701,10 @@ Do not add this value to the repository, `.env.example`, Compose configuration,
 or frontend build arguments. `crontab -l` will reveal a crontab assignment to
 that local user, so protect the deployment account accordingly. If
 `GITHUB_TOKEN` is absent, the script logs
-`GitHub deployment status reporting disabled` and deploys normally.
+`[deploy] GitHub status reporting: disabled (GITHUB_TOKEN missing)` and deploys
+normally. When configured it logs only that reporting is enabled, never the
+token value. API failures include the attempted state and seven-character SHA
+for diagnosis without exposing the authorization header.
 
 To change the delay for future cron runs, reinstall with, for example:
 
@@ -820,7 +835,7 @@ TROUTE_URL=http://troute:8080
 The default Compose network is isolated from other Compose projects. To use
 the service hostname from Trasolve, connect its backend to the same network.
 A backend running directly on this host can instead use
-`TROUTE_URL=http://localhost:8080` (or the configured host port).
+`TROUTE_URL=http://127.0.0.1:18080`.
 `TROUTE_URL` belongs to the backend configuration, not the troute server.
 
 For future previews, build each branch from a separate checkout and run it as

@@ -5,15 +5,9 @@ set -euo pipefail
 export PATH="$PATH:$HOME/.docker/bin:$HOME/.orbstack/bin:/opt/homebrew/bin:/usr/local/bin"
 export GIT_TERMINAL_PROMPT=0
 
-github_status_disabled_logged=false
-
 set_github_status() {
   local sha=$1 state=$2 description=$3 payload
   if [[ -z "${GITHUB_TOKEN:-}" ]]; then
-    if [[ "$github_status_disabled_logged" != true ]]; then
-      echo 'GitHub deployment status reporting disabled'
-      github_status_disabled_logged=true
-    fi
     return 0
   fi
 
@@ -34,9 +28,18 @@ set_github_status() {
         --output /dev/null \
         --data "$payload" \
         "https://api.github.com/repos/egod1537/troute/statuses/$sha"; then
-    printf 'Warning: GitHub deployment status update failed (%s).\n' "$state" >&2
+    printf 'Warning: GitHub deployment status update failed (state=%s, sha=%s).\n' \
+      "$state" "${sha:0:7}" >&2
   fi
   return 0
+}
+
+log_github_status_config() {
+  if [[ -n "${GITHUB_TOKEN:-}" ]]; then
+    echo '[deploy] GitHub status reporting: enabled'
+  else
+    echo '[deploy] GitHub status reporting: disabled (GITHUB_TOKEN missing)'
+  fi
 }
 
 fail() {
@@ -68,6 +71,34 @@ check_service() {
     if (( attempt < 20 )); then sleep 3; fi
   done
   fail "$service $endpoint did not pass its health check within the retry limit."
+}
+
+check_static_asset() {
+  local service=$1 endpoint=$2 expected_content_type=$3
+  local container_id host_port metadata status content_type attempt
+  container_id=$(docker compose ps --all --quiet "$service")
+  [[ -n "$container_id" && "$container_id" != *$'\n'* ]] || fail "Expected exactly one $service container."
+  host_port=$(docker inspect --format '{{range .NetworkSettings.Ports}}{{range .}}{{if eq .HostIp "127.0.0.1"}}{{println .HostPort}}{{end}}{{end}}{{end}}' "$container_id")
+  [[ "$host_port" =~ ^[0-9]{1,5}$ ]] || fail "Expected one $service port published on 127.0.0.1."
+  echo "Checking $service static asset $endpoint (up to 20 attempts)"
+  for ((attempt = 1; attempt <= 20; attempt++)); do
+    metadata=''
+    if metadata=$(curl --silent --show-error --noproxy '*' \
+        --connect-timeout 2 --max-time 5 \
+        --output "$response_file" --write-out $'%{http_code}\n%{content_type}' \
+        "http://127.0.0.1:$host_port$endpoint"); then
+      status=${metadata%%$'\n'*}
+      content_type=${metadata#*$'\n'}
+      if [[ "$metadata" == *$'\n'* && "$status" == 200 && -s "$response_file" \
+          && "$content_type" == "$expected_content_type"* ]]; then
+        echo "$service $endpoint passed: HTTP 200, Content-Type $content_type"
+        return 0
+      fi
+    fi
+    echo "$service static asset check attempt $attempt/20 failed"
+    if (( attempt < 20 )); then sleep 3; fi
+  done
+  fail "$service $endpoint did not return a non-empty HTTP 200 $expected_content_type response."
 }
 
 deploy_main() {
@@ -139,6 +170,7 @@ deploy_main() {
   [[ "$deployed_sha" =~ ^[0-9a-f]{40}$ ]] || fail 'Checked-out deployment SHA is invalid.'
   echo "Repository updated to main at ${deployed_sha:0:7}"
 
+  log_github_status_config
   deployment_started=true
   set_github_status "$deployed_sha" pending 'Deploying to production'
 
@@ -154,9 +186,10 @@ deploy_main() {
   response_file=$(mktemp "${TMPDIR:-/tmp}/troute-health.XXXXXX")
   check_service troute /health json
   check_service testbed / html
+  check_static_asset testbed /troute-icon.svg image/svg+xml
   deployment_succeeded=true
   set_github_status "$deployed_sha" success 'Production deployment succeeded'
-  echo 'Deployment succeeded: troute /health and testbed / returned HTTP 200'
+  echo 'Deployment succeeded: API, testbed, and favicon checks passed'
 
 }
 
