@@ -24,6 +24,7 @@ export function JobListItem({ job, selected, onSelect }: JobListItemProps) {
       aria-selected={selected}
       data-job-id={job.id}
       data-status={job.status}
+      data-updated-at={job.updatedAt}
       onClick={onSelect}
     >
       <span className="job-list-item-primary">
@@ -36,7 +37,7 @@ export function JobListItem({ job, selected, onSelect }: JobListItemProps) {
       </span>
       <span className={`${Classes.TEXT_MUTED} job-list-item-secondary`}>
         {job.progress}% ·{" "}
-        {new Date(job.createdAt).toLocaleTimeString("ko-KR", {
+        {new Date(job.updatedAt).toLocaleTimeString("ko-KR", {
           hour12: false,
         })}
       </span>

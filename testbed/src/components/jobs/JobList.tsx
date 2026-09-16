@@ -1,5 +1,5 @@
 import { NonIdealState } from "@blueprintjs/core";
-import type { TestbedJob } from "../../jobs";
+import { sortJobsNewestFirst, type TestbedJob } from "../../jobs";
 import { JobListItem } from "./JobListItem";
 
 interface JobListProps {
@@ -20,9 +20,7 @@ export function JobList({ jobs, selectedJobId, onSelect }: JobListProps) {
     );
   }
 
-  const orderedJobs = [...jobs].sort(
-    (left, right) => right.createdAt - left.createdAt,
-  );
+  const orderedJobs = sortJobsNewestFirst(jobs);
 
   return (
     <div className="job-list" role="listbox" aria-label="테스트베드 Jobs">

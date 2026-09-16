@@ -1,4 +1,9 @@
-import type { ApiResponse, RouteInput, RouteResponse } from "./api";
+import type {
+  ApiResponse,
+  RouteInput,
+  RouteResponse,
+  StoredJobRecord,
+} from "./api";
 
 export type TestbedJobStatus =
   | "pending"
@@ -30,6 +35,7 @@ export interface TestbedJob {
   id: string;
   status: TestbedJobStatus;
   createdAt: number;
+  updatedAt: number;
   completedAt?: number;
   progress: number;
   stage?: string;
@@ -39,6 +45,8 @@ export interface TestbedJob {
   timeline: TimelineEntry[];
   response?: ApiResponse;
   route?: RouteResponse;
+  /** Last persisted version merged from the server; absent for browser-only jobs. */
+  serverUpdatedAt?: number;
 }
 
 export const JOB_STATUS_LABELS: Record<TestbedJobStatus, string> = {
@@ -48,3 +56,35 @@ export const JOB_STATUS_LABELS: Record<TestbedJobStatus, string> = {
   failed: "오류",
   cancelled: "취소됨",
 };
+
+export function mergeStoredJob(
+  record: StoredJobRecord,
+  existing?: TestbedJob,
+): TestbedJob {
+  const error = record.error
+    ? `${record.error.code}: ${record.error.message}${record.error.detail ? ` (${record.error.detail})` : ""}`
+    : undefined;
+  return {
+    id: record.state.job_id,
+    status: record.state.status,
+    createdAt: record.state.created_at,
+    updatedAt: record.state.updated_at,
+    completedAt: record.state.completed_at ?? undefined,
+    progress: record.state.progress,
+    stage: record.state.stage ?? undefined,
+    message: record.state.last_message ?? undefined,
+    error,
+    request: record.request,
+    timeline: existing?.timeline ?? [],
+    response: existing?.response,
+    route: record.result ?? existing?.route,
+    serverUpdatedAt: record.state.updated_at,
+  };
+}
+
+export function sortJobsNewestFirst(jobs: TestbedJob[]): TestbedJob[] {
+  return [...jobs].sort(
+    (left, right) =>
+      right.createdAt - left.createdAt || left.id.localeCompare(right.id),
+  );
+}

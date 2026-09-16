@@ -6,17 +6,16 @@ import {
   checkHealth,
   getStoredJob,
   getStoredTimeline,
-  listRecentJobs,
   runRoute,
   type RouteInput,
-  type StoredJobRecord,
 } from "./api";
 import { AppHeader, type HealthState } from "./components/AppHeader";
 import { JobDetail } from "./components/detail/JobDetail";
 import { JobSidebar } from "./components/jobs/JobSidebar";
 import { NewJobDialog } from "./components/jobs/NewJobDialog";
-import type { TestbedJob } from "./jobs";
+import { mergeStoredJob, type TestbedJob } from "./jobs";
 import { type ThemeMode, useTheme } from "./theme";
+import { useJobListRefresh } from "./useJobListRefresh";
 
 interface AppProps {
   initialThemeMode?: ThemeMode;
@@ -32,6 +31,13 @@ export function App({ initialThemeMode }: AppProps) {
   const [newJobOpen, setNewJobOpen] = useState(false);
   const [cancellingJobId, setCancellingJobId] = useState<string | null>(null);
   const [cancelError, setCancelError] = useState("");
+  const { refreshJobs, refreshingJobs, jobRefreshFailed } = useJobListRefresh({
+    jobs,
+    setJobs,
+    setSelectedJobId,
+  });
+  const selectedJob =
+    jobs.find((job) => job.id === selectedJobId) ?? null;
 
   async function refreshHealth() {
     setHealthRefreshing(true);
@@ -51,46 +57,47 @@ export function App({ initialThemeMode }: AppProps) {
   }, []);
 
   useEffect(() => {
-    let cancelled = false;
-    void (async () => {
-      try {
-        const summaries = await listRecentJobs();
-        const records = await Promise.all(
-          summaries.map((summary) => getStoredJob(summary.job_id)),
-        );
-        if (cancelled) return;
-        const restored = records.map(jobFromStoredRecord);
-        setJobs((current) => {
-          const currentIds = new Set(current.map((job) => job.id));
-          return [
-            ...current,
-            ...restored.filter((job) => !currentIds.has(job.id)),
-          ].sort((left, right) => right.createdAt - left.createdAt);
-        });
-        setSelectedJobId((current) => current ?? restored[0]?.id ?? null);
-      } catch {
-        // History is an integration aid; an unavailable history endpoint must
-        // not prevent health checks or new optimize requests.
-      }
-    })();
-    return () => {
-      cancelled = true;
-    };
-  }, []);
-
-  useEffect(() => {
     if (!selectedJobId) return;
     setCancelError("");
-    let cancelled = false;
-    void getStoredTimeline(selectedJobId)
-      .then((timeline) => {
-        if (!cancelled) updateJob(selectedJobId, { timeline });
-      })
-      .catch(() => undefined);
-    return () => {
-      cancelled = true;
+    let disposed = false;
+    let inFlight = false;
+    let controller: AbortController | null = null;
+    const refreshSelectedJob = async () => {
+      if (inFlight) return;
+      inFlight = true;
+      controller = new AbortController();
+      try {
+        const [record, timeline] = await Promise.all([
+          getStoredJob(selectedJobId, controller.signal),
+          getStoredTimeline(selectedJobId, controller.signal),
+        ]);
+        if (disposed) return;
+        setJobs((current) =>
+          current.map((job) =>
+            job.id === selectedJobId
+              ? { ...mergeStoredJob(record, job), timeline }
+              : job,
+          ),
+        );
+      } catch {
+        // A browser-created Job may not be persisted yet. List/detail polling
+        // retries without replacing the current UI state with an error screen.
+      } finally {
+        inFlight = false;
+      }
     };
-  }, [selectedJobId]);
+    void refreshSelectedJob();
+    const active =
+      selectedJob?.status === "pending" || selectedJob?.status === "running";
+    const interval = active
+      ? window.setInterval(() => void refreshSelectedJob(), 1_000)
+      : undefined;
+    return () => {
+      disposed = true;
+      if (interval !== undefined) window.clearInterval(interval);
+      controller?.abort();
+    };
+  }, [selectedJobId, selectedJob?.status]);
 
   function updateJob(jobId: string, update: Partial<TestbedJob>) {
     setJobs((current) =>
@@ -113,6 +120,7 @@ export function App({ initialThemeMode }: AppProps) {
     await new Promise<void>((resolve) => requestAnimationFrame(() => resolve()));
     updateActiveJob(request.job_id, {
       status: "running",
+      updatedAt: Date.now(),
       stage: "optimizing",
       message: "POST /optimize 실행 중.",
     });
@@ -121,6 +129,7 @@ export function App({ initialThemeMode }: AppProps) {
       const result = await runRoute(request);
       updateActiveJob(request.job_id, {
         status: "completed",
+        updatedAt: Date.now(),
         completedAt: Date.now(),
         progress: 100,
         stage: "completed",
@@ -131,6 +140,7 @@ export function App({ initialThemeMode }: AppProps) {
     } catch (error) {
       updateActiveJob(request.job_id, {
         status: "failed",
+        updatedAt: Date.now(),
         completedAt: Date.now(),
         stage: "failed",
         message: "최적화 요청 실패.",
@@ -151,6 +161,7 @@ export function App({ initialThemeMode }: AppProps) {
       await cancelStoredJob(jobId);
       updateJob(jobId, {
         status: "cancelled",
+        updatedAt: Date.now(),
         completedAt: Date.now(),
         message: "요청에 의해 Job이 종료되었습니다.",
         error: undefined,
@@ -170,6 +181,7 @@ export function App({ initialThemeMode }: AppProps) {
       id: request.job_id,
       status: "pending",
       createdAt: Date.now(),
+      updatedAt: Date.now(),
       progress: 0,
       stage: "queued",
       message: "최적화 요청 실행 대기 중.",
@@ -183,8 +195,6 @@ export function App({ initialThemeMode }: AppProps) {
     void executeJob(request);
   }
 
-  const selectedJob =
-    jobs.find((job) => job.id === selectedJobId) ?? null;
   const existingJobIds = useMemo(
     () => new Set(jobs.map((job) => job.id)),
     [jobs],
@@ -207,7 +217,10 @@ export function App({ initialThemeMode }: AppProps) {
         <JobSidebar
           jobs={jobs}
           selectedJobId={selectedJobId}
+          refreshing={refreshingJobs}
+          refreshFailed={jobRefreshFailed}
           onNewJob={() => setNewJobOpen(true)}
+          onRefresh={() => void refreshJobs()}
           onSelect={setSelectedJobId}
         />
         <JobDetail
@@ -228,23 +241,4 @@ export function App({ initialThemeMode }: AppProps) {
       />
     </div>
   );
-}
-
-function jobFromStoredRecord(record: StoredJobRecord): TestbedJob {
-  const error = record.error
-    ? `${record.error.code}: ${record.error.message}${record.error.detail ? ` (${record.error.detail})` : ""}`
-    : undefined;
-  return {
-    id: record.state.job_id,
-    status: record.state.status,
-    createdAt: record.state.created_at,
-    completedAt: record.state.completed_at ?? undefined,
-    progress: record.state.progress,
-    stage: record.state.stage ?? undefined,
-    message: record.state.last_message ?? undefined,
-    error,
-    request: record.request,
-    timeline: [],
-    route: record.result ?? undefined,
-  };
 }

@@ -258,32 +258,44 @@ export async function runRoute(
   return { response, route: parseRoute(response) };
 }
 
-async function integrationJson<T>(path: string): Promise<T> {
+async function integrationJson<T>(path: string, signal?: AbortSignal): Promise<T> {
   const response = await fetch(`${API_BASE}/${path.replace(/^\//, "")}`, {
     cache: "no-store",
+    signal,
   });
   if (!response.ok) throw new Error(`HTTP ${response.status} ${response.statusText}`);
   return (await response.json()) as T;
 }
 
-export async function listRecentJobs(limit = 50): Promise<StoredJobSummary[]> {
+export async function listRecentJobs(
+  limit = 50,
+  signal?: AbortSignal,
+): Promise<StoredJobSummary[]> {
   const response = await integrationJson<{ jobs: StoredJobSummary[] }>(
     `/integration/jobs?limit=${limit}`,
+    signal,
   );
   return response.jobs;
 }
 
-export function getStoredJob(jobId: string): Promise<StoredJobRecord> {
-  return integrationJson(`/integration/jobs/${encodeURIComponent(jobId)}`);
+export function getStoredJob(
+  jobId: string,
+  signal?: AbortSignal,
+): Promise<StoredJobRecord> {
+  return integrationJson(
+    `/integration/jobs/${encodeURIComponent(jobId)}`,
+    signal,
+  );
 }
 
 export async function getStoredTimeline(
   jobId: string,
+  signal?: AbortSignal,
 ): Promise<StoredTimelineEntry[]> {
   const response = await integrationJson<{
     job_id: string;
     entries: StoredTimelineEntry[];
-  }>(`/integration/jobs/${encodeURIComponent(jobId)}/timeline`);
+  }>(`/integration/jobs/${encodeURIComponent(jobId)}/timeline`, signal);
   return response.entries;
 }
 

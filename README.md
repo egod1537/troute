@@ -543,6 +543,11 @@ state remains a view model; the local troute files are the authoritative
 execution record. Reloading the page no longer discards completed history.
 Pending and running Job details expose `Job 강제 종료`; confirmation sends the
 cancel API request and renders the terminal state as `취소됨` with warning intent.
+The Jobs sidebar refreshes recent server history every two seconds while the
+page is visible. It merges by `job_id`, preserves the current selection and
+browser-only inspection data, and refreshes the selected active Job detail once
+per second. The compact refresh button indicates in-flight synchronization and
+also supports an immediate manual retry without reloading the page.
 
 The testbed supports Light, Dark, and System themes from the Navbar control.
 System is the default and follows browser/OS color-scheme changes. An explicit
