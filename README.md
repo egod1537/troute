@@ -166,6 +166,27 @@ Place IDs must be non-blank strings of at most 512 characters, and location IDs
 must be unique. Overnight windows are not supported, so `open_time` must not be
 later than `close_time`. The request body limit is 1 MiB.
 
+For manual progress, SSE, and cancellation testing, a request may include the
+optional diagnostic setting below:
+
+```json
+{
+  "debug": {
+    "min_job_duration_ms": 4000
+  }
+}
+```
+
+`min_job_duration_ms` must be an integer from 0 through 60000. It measures from
+Job creation, so time spent pending behind the concurrency semaphore counts
+toward the minimum. Real progress stages are exposed near 0% (`accepted`), 20%
+(`building_matrix`), 50% (`solving`), and 80% (`scheduling`); result or error
+persistence waits until 100% only when the actual execution finished sooner.
+Cancellation interrupts these waits immediately. The option is disabled when
+omitted, is retained in `request.json`, applies consistently to successful and
+failed terminal states and the legacy `/optimize` adapter, and never changes
+routing, solver, schedule, or result data.
+
 ```sh
 curl -i -X POST http://127.0.0.1:8080/optimize \
   -H 'Content-Type: application/json' \

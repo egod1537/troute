@@ -107,6 +107,25 @@ test("invalid schema blocks job creation", async ({ page }) => {
   await expect(page.getByRole("option")).toHaveCount(0);
 });
 
+test("debug minimum duration above the limit is rejected", async ({ page }) => {
+  await page.route("**/api/health", (route) =>
+    route.fulfill({ json: { status: "ok" } }),
+  );
+  await page.goto("/");
+  await page.getByRole("button", { name: "새 Job" }).click();
+  const dialog = page.getByRole("dialog", { name: "새 Job" });
+  const editor = dialog.getByLabel("요청 JSON");
+  const request = JSON.parse(await editor.inputValue());
+  request.debug.min_job_duration_ms = 60_001;
+  await editor.fill(JSON.stringify(request));
+  await dialog.getByRole("button", { name: "Job 생성" }).click();
+
+  await expect(dialog.getByRole("alert")).toContainText(
+    "debug.min_job_duration_ms는 0~60000",
+  );
+  await expect(page.getByRole("option")).toHaveCount(0);
+});
+
 test("offline health remains visible in the preserved header", async ({ page }) => {
   await page.route("**/api/health", (route) =>
     route.fulfill({ status: 503, json: { error: "upstream unavailable" } }),

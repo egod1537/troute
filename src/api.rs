@@ -10,6 +10,7 @@ use crate::events::{validate_job_id, JobIdError};
 
 const MAX_LOCATIONS: usize = 500;
 const MAX_STRING_CHARACTERS: usize = 512;
+pub const MAX_DEBUG_JOB_DURATION_MS: u64 = 60_000;
 
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
@@ -17,6 +18,15 @@ pub struct OptimizeRouteRequest {
     pub job_id: String,
     pub locations: Vec<LocationInput>,
     pub start_time: TimeOfDay,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub debug: Option<DebugOptions>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct DebugOptions {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub min_job_duration_ms: Option<u64>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
@@ -49,6 +59,17 @@ impl TryFrom<OptimizeRouteRequest> for OptimizationProblem {
 
     fn try_from(request: OptimizeRouteRequest) -> Result<Self, Self::Error> {
         validate_job_id(&request.job_id).map_err(RequestValidationError::InvalidJobId)?;
+        if let Some(actual) = request
+            .debug
+            .as_ref()
+            .and_then(|debug| debug.min_job_duration_ms)
+            .filter(|duration| *duration > MAX_DEBUG_JOB_DURATION_MS)
+        {
+            return Err(RequestValidationError::DebugJobDurationTooLong {
+                maximum: MAX_DEBUG_JOB_DURATION_MS,
+                actual,
+            });
+        }
         if request.locations.len() < 2 {
             return Err(RequestValidationError::TooFewLocations {
                 minimum: 2,
@@ -133,6 +154,8 @@ impl OptimizeRouteResponse {
 pub enum RequestValidationError {
     #[error(transparent)]
     InvalidJobId(JobIdError),
+    #[error("debug.min_job_duration_ms must not exceed {maximum} milliseconds (actual {actual})")]
+    DebugJobDurationTooLong { maximum: u64, actual: u64 },
     #[error(
         "locations must contain at least start and end locations (minimum {minimum}, actual {actual})"
     )]
@@ -209,6 +232,32 @@ mod tests {
         assert!(matches!(
             error,
             RequestValidationError::DuplicateLocationId(id) if id == "A"
+        ));
+    }
+
+    #[test]
+    fn debug_duration_is_optional_bounded_and_round_trips() {
+        let mut request = request_with_locations(&["A", "B"]);
+        request.debug = Some(DebugOptions {
+            min_job_duration_ms: Some(MAX_DEBUG_JOB_DURATION_MS),
+        });
+        let serialized = serde_json::to_value(&request).unwrap();
+        assert_eq!(
+            serialized["debug"]["min_job_duration_ms"],
+            MAX_DEBUG_JOB_DURATION_MS
+        );
+        OptimizationProblem::try_from(request).unwrap();
+
+        let mut excessive = request_with_locations(&["A", "B"]);
+        excessive.debug = Some(DebugOptions {
+            min_job_duration_ms: Some(MAX_DEBUG_JOB_DURATION_MS + 1),
+        });
+        assert!(matches!(
+            OptimizationProblem::try_from(excessive),
+            Err(RequestValidationError::DebugJobDurationTooLong {
+                maximum: MAX_DEBUG_JOB_DURATION_MS,
+                actual
+            }) if actual == MAX_DEBUG_JOB_DURATION_MS + 1
         ));
     }
 }

@@ -30,5 +30,8 @@ export function createSample(): RouteInput {
       },
     ],
     start_time: "09:00",
+    debug: {
+      min_job_duration_ms: 4_000,
+    },
   };
 }

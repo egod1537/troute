@@ -10,7 +10,7 @@ use std::{
     path::PathBuf,
     sync::{
         atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering},
-        Arc,
+        Arc, Mutex,
     },
     time::Duration,
 };
@@ -46,6 +46,28 @@ struct GatedSolver {
 struct GatedFailureSolver {
     started: Arc<AtomicBool>,
     release: Arc<AtomicBool>,
+}
+
+#[derive(Clone)]
+struct TimedSolver {
+    duration: Duration,
+    finished_at: Arc<Mutex<Option<std::time::Instant>>>,
+}
+
+impl RouteSolver for TimedSolver {
+    fn solve(&self, input: SolverInput<'_>) -> Result<SolverSolution, SolverError> {
+        let started = std::time::Instant::now();
+        while started.elapsed() < self.duration {
+            if input.cancellation.is_cancelled() {
+                return Err(SolverError::Cancelled);
+            }
+            std::thread::sleep(Duration::from_millis(1));
+        }
+        *self.finished_at.lock().unwrap() = Some(std::time::Instant::now());
+        Ok(SolverSolution {
+            visit_order: (0..input.problem.locations().len()).collect(),
+        })
+    }
 }
 
 impl RouteSolver for GatedFailureSolver {
@@ -189,6 +211,12 @@ fn request_with_job_id(job_id: &str) -> Value {
     request
 }
 
+fn request_with_debug_duration(job_id: &str, duration_ms: u64) -> Value {
+    let mut request = request_with_job_id(job_id);
+    request["debug"] = json!({ "min_job_duration_ms": duration_ms });
+    request
+}
+
 fn gated_solver() -> GatedSolver {
     GatedSolver {
         started: Arc::new(AtomicUsize::new(0)),
@@ -209,7 +237,7 @@ async fn wait_for_solver_starts(started: &AtomicUsize, expected: usize) {
 }
 
 async fn wait_for_job_status(store: &dyn JobStore, job_id: &str, expected: JobStatus) {
-    tokio::time::timeout(Duration::from_secs(2), async {
+    tokio::time::timeout(Duration::from_secs(5), async {
         loop {
             if store
                 .get_job(job_id)
@@ -388,6 +416,272 @@ async fn async_submit_returns_202_before_solver_and_persists_state_transitions()
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn debug_minimum_duration_spaces_real_stages_persists_request_and_preserves_result() {
+    let temporary = TestDirectory::new();
+    let store = Arc::new(FileJobStore::new(&temporary.0).unwrap());
+    let app = http::router_with_storage_and_limit(
+        RouteOptimizationService::new(DevelopmentRoutingProvider, DevelopmentRouteSolver),
+        None,
+        Some(store.clone()),
+        None,
+    );
+
+    let started = std::time::Instant::now();
+    let submitted = send_to(
+        app.clone(),
+        Method::POST,
+        "/integration/jobs",
+        Some("application/json"),
+        request_with_debug_duration("debug-paced", 1_000).to_string(),
+    )
+    .await;
+    assert_eq!(submitted.status, StatusCode::ACCEPTED);
+
+    let (_, mut body) = open_event_stream(app.clone(), "debug-paced").await;
+    let mut buffered = String::new();
+    let mut stages = Vec::new();
+    loop {
+        let message = next_sse_message(&mut body, &mut buffered)
+            .await
+            .expect("paced job must reach a terminal event");
+        let event = sse_field(&message, "event");
+        if matches!(event, Some("snapshot" | "progress")) {
+            if let Some(stage) = sse_data(&message)["stage"].as_str() {
+                if stages.last().map(String::as_str) != Some(stage) {
+                    stages.push(stage.to_owned());
+                }
+            }
+        }
+        if event == Some("completed") {
+            break;
+        }
+    }
+    assert!(started.elapsed() >= Duration::from_millis(1_000));
+    let expected = ["accepted", "building_matrix", "solving", "scheduling"];
+    let first = expected
+        .iter()
+        .position(|stage| Some(*stage) == stages.first().map(String::as_str))
+        .expect("snapshot must expose a real progress stage");
+    assert_eq!(stages, expected[first..]);
+    assert_eq!(stages.last().map(String::as_str), Some("scheduling"));
+
+    let paced = store.get_job("debug-paced").unwrap().unwrap();
+    assert_eq!(
+        paced.request.debug.unwrap().min_job_duration_ms,
+        Some(1_000)
+    );
+    let persisted_request: Value = serde_json::from_str(
+        &fs::read_to_string(temporary.0.join("jobs/debug-paced/request.json")).unwrap(),
+    )
+    .unwrap();
+    assert_eq!(persisted_request["debug"]["min_job_duration_ms"], 1_000);
+
+    let baseline_started = std::time::Instant::now();
+    assert_eq!(
+        send_to(
+            app,
+            Method::POST,
+            "/integration/jobs",
+            Some("application/json"),
+            request_with_job_id("debug-baseline").to_string(),
+        )
+        .await
+        .status,
+        StatusCode::ACCEPTED
+    );
+    wait_for_job_status(store.as_ref(), "debug-baseline", JobStatus::Completed).await;
+    assert!(baseline_started.elapsed() < Duration::from_millis(750));
+    let baseline = store.get_job("debug-baseline").unwrap().unwrap();
+    assert_eq!(paced.result, baseline.result);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn debug_minimum_adds_no_terminal_delay_to_an_already_slow_solver() {
+    let temporary = TestDirectory::new();
+    let store = Arc::new(FileJobStore::new(&temporary.0).unwrap());
+    let finished_at = Arc::new(Mutex::new(None));
+    let app = http::router_with_storage_and_limit(
+        RouteOptimizationService::new(
+            DevelopmentRoutingProvider,
+            TimedSolver {
+                duration: Duration::from_millis(1_500),
+                finished_at: finished_at.clone(),
+            },
+        ),
+        None,
+        Some(store.clone()),
+        None,
+    );
+    let started = std::time::Instant::now();
+    assert_eq!(
+        send_to(
+            app,
+            Method::POST,
+            "/integration/jobs",
+            Some("application/json"),
+            request_with_debug_duration("debug-slow-solver", 1_000).to_string(),
+        )
+        .await
+        .status,
+        StatusCode::ACCEPTED
+    );
+    wait_for_job_status(store.as_ref(), "debug-slow-solver", JobStatus::Completed).await;
+    let observed_terminal = std::time::Instant::now();
+    let solver_finished = finished_at.lock().unwrap().unwrap();
+    assert!(started.elapsed() >= Duration::from_millis(1_500));
+    assert!(observed_terminal.duration_since(solver_finished) < Duration::from_millis(250));
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn cancelling_during_debug_pacing_is_immediate() {
+    let temporary = TestDirectory::new();
+    let store = Arc::new(FileJobStore::new(&temporary.0).unwrap());
+    let app = http::router_with_storage_and_limit(
+        RouteOptimizationService::new(DevelopmentRoutingProvider, DevelopmentRouteSolver),
+        None,
+        Some(store.clone()),
+        None,
+    );
+    assert_eq!(
+        send_to(
+            app.clone(),
+            Method::POST,
+            "/integration/jobs",
+            Some("application/json"),
+            request_with_debug_duration("debug-cancel", 5_000).to_string(),
+        )
+        .await
+        .status,
+        StatusCode::ACCEPTED
+    );
+    wait_for_job_status(store.as_ref(), "debug-cancel", JobStatus::Running).await;
+    sleep(Duration::from_millis(50)).await;
+
+    let cancel_started = std::time::Instant::now();
+    let cancelled = send_to(
+        app,
+        Method::POST,
+        "/integration/jobs/debug-cancel/cancel",
+        None,
+        String::new(),
+    )
+    .await;
+    assert_eq!(cancelled.status, StatusCode::OK);
+    assert!(cancel_started.elapsed() < Duration::from_millis(300));
+    let job = store.get_job("debug-cancel").unwrap().unwrap();
+    assert_eq!(job.state.status, JobStatus::Cancelled);
+    assert!(job.result.is_none());
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn pending_queue_time_counts_toward_debug_minimum() {
+    let temporary = TestDirectory::new();
+    let store = Arc::new(FileJobStore::new(&temporary.0).unwrap());
+    let solver = gated_solver();
+    let app = http::router_with_storage_and_limit(
+        RouteOptimizationService::new(DevelopmentRoutingProvider, solver.clone()),
+        None,
+        Some(store.clone()),
+        Some(1),
+    );
+    assert_eq!(
+        send_to(
+            app.clone(),
+            Method::POST,
+            "/integration/jobs",
+            Some("application/json"),
+            request_with_job_id("queue-blocker").to_string(),
+        )
+        .await
+        .status,
+        StatusCode::ACCEPTED
+    );
+    wait_for_solver_starts(&solver.started, 1).await;
+
+    let queued_at = std::time::Instant::now();
+    assert_eq!(
+        send_to(
+            app,
+            Method::POST,
+            "/integration/jobs",
+            Some("application/json"),
+            request_with_debug_duration("queue-paced", 200).to_string(),
+        )
+        .await
+        .status,
+        StatusCode::ACCEPTED
+    );
+    sleep(Duration::from_millis(300)).await;
+    assert_eq!(
+        store.get_job("queue-paced").unwrap().unwrap().state.status,
+        JobStatus::Pending
+    );
+
+    let released_at = std::time::Instant::now();
+    solver.release.store(true, Ordering::Release);
+    wait_for_job_status(store.as_ref(), "queue-paced", JobStatus::Completed).await;
+    assert!(queued_at.elapsed() >= Duration::from_millis(300));
+    assert!(released_at.elapsed() < Duration::from_millis(250));
+}
+
+#[tokio::test]
+async fn excessive_debug_duration_is_rejected_before_job_creation() {
+    let temporary = TestDirectory::new();
+    let store = Arc::new(FileJobStore::new(&temporary.0).unwrap());
+    let app = http::router_with_storage_and_limit(
+        RouteOptimizationService::new(DevelopmentRoutingProvider, DevelopmentRouteSolver),
+        None,
+        Some(store.clone()),
+        None,
+    );
+    let response = send_to(
+        app,
+        Method::POST,
+        "/integration/jobs",
+        Some("application/json"),
+        request_with_debug_duration("debug-too-long", 60_001).to_string(),
+    )
+    .await;
+    assert_error(response, StatusCode::BAD_REQUEST, "INVALID_REQUEST");
+    assert!(store.get_job("debug-too-long").unwrap().is_none());
+}
+
+#[tokio::test]
+async fn legacy_optimize_reuses_debug_pacing_for_success_and_failure() {
+    let temporary = TestDirectory::new();
+    let app = app_with_file_storage(&temporary.0);
+    let started = std::time::Instant::now();
+    let response = send_to(
+        app.clone(),
+        Method::POST,
+        "/optimize",
+        Some("application/json"),
+        request_with_debug_duration("debug-legacy-success", 300).to_string(),
+    )
+    .await;
+    assert_eq!(response.status, StatusCode::OK);
+    assert!(started.elapsed() >= Duration::from_millis(300));
+
+    let mut failed_request = request_with_debug_duration("debug-legacy-failure", 300);
+    failed_request["locations"][1]["close_time"] = json!("09:10");
+    let failed_started = std::time::Instant::now();
+    let failed = send_to(
+        app,
+        Method::POST,
+        "/optimize",
+        Some("application/json"),
+        failed_request.to_string(),
+    )
+    .await;
+    assert_error(
+        failed,
+        StatusCode::UNPROCESSABLE_ENTITY,
+        "NO_FEASIBLE_ROUTE",
+    );
+    assert!(failed_started.elapsed() >= Duration::from_millis(300));
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn sse_reconnects_with_snapshot_orders_progress_and_closes_after_completion() {
     let temporary = TestDirectory::new();
     let store = Arc::new(FileJobStore::new(&temporary.0).unwrap());
@@ -521,8 +815,12 @@ async fn sse_sends_heartbeat_and_cancelled_terminal_event() {
         ),
         Some("snapshot")
     );
-    let heartbeat = next_sse_message(&mut body, &mut buffered).await.unwrap();
-    assert!(heartbeat.lines().any(|line| line == ": heartbeat"));
+    loop {
+        let message = next_sse_message(&mut body, &mut buffered).await.unwrap();
+        if message.lines().any(|line| line == ": heartbeat") {
+            break;
+        }
+    }
 
     let cancelled = send_to(
         app,

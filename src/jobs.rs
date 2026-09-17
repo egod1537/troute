@@ -8,12 +8,13 @@ use std::{
 
 use serde::Serialize;
 use tokio::sync::broadcast;
-use tokio::sync::{oneshot, Semaphore};
+use tokio::sync::{mpsc, oneshot, Semaphore};
 
 use crate::{
     api::{OptimizeRouteRequest, OptimizeRouteResponse},
     cancellation::CancellationToken,
     events::{OptimizationEventReporter, ProgressStage},
+    job_pacing::DebugJobPacer,
     routing::RoutingProvider,
     schedule::ScheduleError,
     service::{OptimizationServiceError, RouteOptimizationService},
@@ -280,13 +281,20 @@ impl JobRunner {
         // task can observe or execute the job.
         let state = self.store.create_job(&request)?;
         let token = CancellationToken::new();
+        let pacer = DebugJobPacer::new(request.debug.as_ref());
+        if let Some(minimum_duration_ms) = pacer.minimum_duration_ms() {
+            eprintln!(
+                "debug job pacing enabled; job_id={}; min_job_duration_ms={minimum_duration_ms}",
+                request.job_id
+            );
+        }
         self.cancellations
             .insert(&request.job_id, JobActivity::new(token.clone()));
 
         let (completion_tx, completion) = oneshot::channel();
         let runner = self.clone();
         tokio::spawn(async move {
-            let outcome = runner.run(request, token).await;
+            let outcome = runner.run(request, token, pacer).await;
             let _ = completion_tx.send(outcome.map_err(|error| error.to_string()));
         });
 
@@ -297,9 +305,10 @@ impl JobRunner {
         &self,
         request: OptimizeRouteRequest,
         cancellation: CancellationToken,
+        pacer: DebugJobPacer,
     ) -> Result<(), JobStoreError> {
         let job_id = request.job_id.clone();
-        let outcome = self.run_inner(request, cancellation).await;
+        let outcome = self.run_inner(request, cancellation, pacer).await;
         self.cancellations.remove(&job_id);
         if let Err(error) = &outcome {
             eprintln!("job execution persistence failed; job_id={job_id}; error={error}");
@@ -311,14 +320,18 @@ impl JobRunner {
         &self,
         request: OptimizeRouteRequest,
         cancellation: CancellationToken,
+        pacer: DebugJobPacer,
     ) -> Result<(), JobStoreError> {
         let _permit = match &self.permits {
-            Some(permits) => Some(
-                permits
-                    .acquire()
-                    .await
-                    .expect("job semaphore is not closed"),
-            ),
+            Some(permits) => {
+                tokio::select! {
+                    biased;
+                    _ = cancellation.cancelled() => return Ok(()),
+                    permit = permits.acquire() => {
+                        Some(permit.expect("job semaphore is not closed"))
+                    }
+                }
+            }
             None => None,
         };
         let job_id = request.job_id.clone();
@@ -336,18 +349,48 @@ impl JobRunner {
             Err(error) => return Err(error),
         }
 
-        let reporter = PersistedProgressReporter {
-            job_id: job_id.clone(),
-            store: self.store.clone(),
-            cancellation: cancellation.clone(),
-            activity: self.cancellations.get(&job_id),
-        };
+        let (progress_tx, mut progress_rx) = mpsc::unbounded_channel();
+        let reporter = ProgressForwarder { progress_tx };
         let executor = self.executor.clone();
         let worker_cancellation = cancellation.clone();
         let execution = tokio::task::spawn_blocking(move || {
             executor.execute(request, &reporter, &worker_cancellation)
-        })
-        .await;
+        });
+
+        // The optimizer continues on the blocking pool while this async task
+        // exposes its real stage boundaries at the configured target times.
+        while let Some(update) = progress_rx.recv().await {
+            if !pacer.wait_for_stage(update.stage, &cancellation).await {
+                break;
+            }
+            match self.store.update_progress(
+                &job_id,
+                update.stage,
+                update.progress,
+                update.message.as_deref(),
+            ) {
+                Ok(()) => self.publish_persisted(&job_id, JobEventKind::Progress),
+                Err(JobStoreError::InvalidTransition {
+                    status: JobStatus::Cancelled,
+                    ..
+                }) => {
+                    cancellation.cancel();
+                    break;
+                }
+                Err(error) => {
+                    eprintln!("job progress persistence failed; job_id={job_id}; error={error}")
+                }
+            }
+        }
+        drop(progress_rx);
+        let execution = execution.await;
+
+        let execution_was_cancelled =
+            matches!(&execution, Ok(Err(OptimizationServiceError::Cancelled)));
+        if execution_was_cancelled || !pacer.wait_until_minimum(&cancellation).await {
+            self.persist_cancelled(&job_id)?;
+            return Ok(());
+        }
 
         match execution {
             Ok(Ok(result)) => {
@@ -356,17 +399,7 @@ impl JobRunner {
                 }
             }
             Ok(Err(OptimizationServiceError::Cancelled)) => {
-                // Usually the cancel endpoint has already persisted this
-                // transition. Also cover executors that report cancellation
-                // directly so no job is left running indefinitely.
-                match self
-                    .store
-                    .cancel_job(&job_id, "Job execution was cancelled")
-                {
-                    Ok(_) => self.publish_persisted(&job_id, JobEventKind::Cancelled),
-                    Err(JobStoreError::JobNotCancellable { .. }) => {}
-                    Err(error) => return Err(error),
-                }
+                self.persist_cancelled(&job_id)?;
             }
             Ok(Err(error)) => {
                 let stored = stored_error(&error);
@@ -388,6 +421,17 @@ impl JobRunner {
         Ok(())
     }
 
+    fn persist_cancelled(&self, job_id: &str) -> Result<(), JobStoreError> {
+        // Usually the cancel endpoint has already persisted this transition.
+        // Also cover executors that report cancellation directly.
+        match self.store.cancel_job(job_id, "Job execution was cancelled") {
+            Ok(_) => self.publish_persisted(job_id, JobEventKind::Cancelled),
+            Err(JobStoreError::JobNotCancellable { .. }) => {}
+            Err(error) => return Err(error),
+        }
+        Ok(())
+    }
+
     fn publish_persisted(&self, job_id: &str, kind: JobEventKind) {
         if let Some(activity) = self.cancellations.get(job_id) {
             activity.publish_persisted(self.store.as_ref(), job_id, kind);
@@ -395,42 +439,23 @@ impl JobRunner {
     }
 }
 
-struct PersistedProgressReporter {
-    job_id: String,
-    store: Arc<dyn JobStore>,
-    cancellation: CancellationToken,
-    activity: Option<JobActivity>,
+struct ProgressUpdate {
+    stage: ProgressStage,
+    progress: u8,
+    message: Option<String>,
 }
 
-impl OptimizationEventReporter for PersistedProgressReporter {
+struct ProgressForwarder {
+    progress_tx: mpsc::UnboundedSender<ProgressUpdate>,
+}
+
+impl OptimizationEventReporter for ProgressForwarder {
     fn progress(&self, stage: ProgressStage, progress: u8, message: Option<&str>) {
-        match self
-            .store
-            .update_progress(&self.job_id, stage, progress, message)
-        {
-            Ok(()) => {
-                if let Some(activity) = &self.activity {
-                    activity.publish_persisted(
-                        self.store.as_ref(),
-                        &self.job_id,
-                        JobEventKind::Progress,
-                    );
-                }
-            }
-            Err(
-                error @ JobStoreError::InvalidTransition {
-                    status: JobStatus::Cancelled,
-                    ..
-                },
-            ) => {
-                let _ = error;
-                self.cancellation.cancel();
-            }
-            Err(error) => eprintln!(
-                "job progress persistence failed; job_id={}; error={error}",
-                self.job_id
-            ),
-        }
+        let _ = self.progress_tx.send(ProgressUpdate {
+            stage,
+            progress,
+            message: message.map(str::to_owned),
+        });
     }
 
     // Terminal payloads are written by JobRunner after execute returns. This

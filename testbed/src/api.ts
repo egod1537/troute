@@ -14,6 +14,9 @@ export interface RouteInput {
     stay_minutes: number;
   }[];
   start_time: string;
+  debug?: {
+    min_job_duration_ms?: number;
+  };
 }
 
 export interface RouteResponse {
@@ -134,6 +137,17 @@ export function parseInput(text: string): RouteInput {
   ) {
     throw new Error(
       "요청에는 job_id(1~128자), start와 destination을 포함한 2개 이상의 locations, start_time(HH:MM)이 필요합니다.",
+    );
+  }
+  if (
+    input.debug !== undefined &&
+    (!object(input.debug) ||
+      (input.debug.min_job_duration_ms !== undefined &&
+        (!unsigned(input.debug.min_job_duration_ms) ||
+          input.debug.min_job_duration_ms > 60_000)))
+  ) {
+    throw new Error(
+      "debug.min_job_duration_ms는 0~60000 범위의 정수여야 합니다.",
     );
   }
   const locationIds = new Set<string>();
