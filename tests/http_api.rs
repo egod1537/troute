@@ -9,7 +9,7 @@ use std::{
     fs,
     path::PathBuf,
     sync::{
-        atomic::{AtomicBool, AtomicU64, Ordering},
+        atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering},
         Arc,
     },
     time::Duration,
@@ -31,6 +31,61 @@ use troute::{
 #[derive(Clone)]
 struct SlowCancellationSolver {
     started: Arc<AtomicBool>,
+    finished: Arc<AtomicBool>,
+}
+
+#[derive(Clone)]
+struct GatedSolver {
+    started: Arc<AtomicUsize>,
+    release: Arc<AtomicBool>,
+    active: Arc<AtomicUsize>,
+    max_active: Arc<AtomicUsize>,
+}
+
+#[derive(Clone)]
+struct GatedFailureSolver {
+    started: Arc<AtomicBool>,
+    release: Arc<AtomicBool>,
+}
+
+impl RouteSolver for GatedFailureSolver {
+    fn solve(&self, input: SolverInput<'_>) -> Result<SolverSolution, SolverError> {
+        self.started.store(true, Ordering::Release);
+        while !self.release.load(Ordering::Acquire) {
+            if input.cancellation.is_cancelled() {
+                return Err(SolverError::Cancelled);
+            }
+            std::thread::sleep(Duration::from_millis(1));
+        }
+        Err(SolverError::NoFeasibleRoute)
+    }
+}
+
+impl RouteSolver for GatedSolver {
+    fn solve(&self, input: SolverInput<'_>) -> Result<SolverSolution, SolverError> {
+        self.started.fetch_add(1, Ordering::AcqRel);
+        let active = self.active.fetch_add(1, Ordering::AcqRel) + 1;
+        self.max_active.fetch_max(active, Ordering::AcqRel);
+        let started = std::time::Instant::now();
+        let outcome = loop {
+            if input.cancellation.is_cancelled() {
+                break Err(SolverError::Cancelled);
+            }
+            if self.release.load(Ordering::Acquire) {
+                break Ok(SolverSolution {
+                    visit_order: (0..input.problem.locations().len()).collect(),
+                });
+            }
+            if started.elapsed() > Duration::from_secs(5) {
+                break Err(SolverError::Failed(
+                    "test solver release timed out".to_owned(),
+                ));
+            }
+            std::thread::sleep(Duration::from_millis(1));
+        };
+        self.active.fetch_sub(1, Ordering::AcqRel);
+        outcome
+    }
 }
 
 impl RouteSolver for SlowCancellationSolver {
@@ -45,6 +100,7 @@ impl RouteSolver for SlowCancellationSolver {
             }
             std::thread::sleep(Duration::from_millis(1));
         }
+        self.finished.store(true, Ordering::Release);
         Err(SolverError::Cancelled)
     }
 }
@@ -127,6 +183,48 @@ fn valid_request() -> Value {
     })
 }
 
+fn request_with_job_id(job_id: &str) -> Value {
+    let mut request = valid_request();
+    request["job_id"] = json!(job_id);
+    request
+}
+
+fn gated_solver() -> GatedSolver {
+    GatedSolver {
+        started: Arc::new(AtomicUsize::new(0)),
+        release: Arc::new(AtomicBool::new(false)),
+        active: Arc::new(AtomicUsize::new(0)),
+        max_active: Arc::new(AtomicUsize::new(0)),
+    }
+}
+
+async fn wait_for_solver_starts(started: &AtomicUsize, expected: usize) {
+    tokio::time::timeout(Duration::from_secs(2), async {
+        while started.load(Ordering::Acquire) < expected {
+            sleep(Duration::from_millis(1)).await;
+        }
+    })
+    .await
+    .unwrap();
+}
+
+async fn wait_for_job_status(store: &dyn JobStore, job_id: &str, expected: JobStatus) {
+    tokio::time::timeout(Duration::from_secs(2), async {
+        loop {
+            if store
+                .get_job(job_id)
+                .unwrap()
+                .is_some_and(|job| job.state.status == expected)
+            {
+                break;
+            }
+            sleep(Duration::from_millis(1)).await;
+        }
+    })
+    .await
+    .unwrap();
+}
+
 async fn send(method: Method, path: &str, content_type: Option<&str>, body: String) -> Response {
     send_to(app(), method, path, content_type, body).await
 }
@@ -164,11 +262,469 @@ struct Response {
     body: Value,
 }
 
+async fn open_event_stream(app: Router, job_id: &str) -> (axum::http::HeaderMap, Body) {
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method(Method::GET)
+                .uri(format!("/integration/jobs/{job_id}/events"))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let headers = response.headers().clone();
+    (headers, response.into_body())
+}
+
+async fn next_sse_message(body: &mut Body, buffered: &mut String) -> Option<String> {
+    tokio::time::timeout(Duration::from_secs(2), async {
+        loop {
+            if let Some(end) = buffered.find("\n\n") {
+                return Some(buffered.drain(..end + 2).collect());
+            }
+            let frame = body.frame().await?;
+            let frame = frame.expect("SSE body frame must be readable");
+            if let Ok(data) = frame.into_data() {
+                buffered.push_str(
+                    std::str::from_utf8(&data).expect("SSE events must contain UTF-8 data"),
+                );
+            }
+        }
+    })
+    .await
+    .expect("SSE event timed out")
+}
+
+fn sse_field<'a>(message: &'a str, name: &str) -> Option<&'a str> {
+    message.lines().find_map(|line| {
+        line.strip_prefix(name)
+            .and_then(|value| value.strip_prefix(':'))
+            .map(str::trim)
+    })
+}
+
+fn sse_data(message: &str) -> Value {
+    serde_json::from_str(sse_field(message, "data").expect("SSE data field is missing")).unwrap()
+}
+
 #[tokio::test]
 async fn health_remains_available() {
     let response = send(Method::GET, "/health", None, String::new()).await;
     assert_eq!(response.status, StatusCode::OK);
     assert_eq!(response.body, json!({ "status": "ok" }));
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn async_submit_returns_202_before_solver_and_persists_state_transitions() {
+    let temporary = TestDirectory::new();
+    let store = Arc::new(FileJobStore::new(&temporary.0).unwrap());
+    let solver = gated_solver();
+    let app = http::router_with_storage_and_limit(
+        RouteOptimizationService::new(DevelopmentRoutingProvider, solver.clone()),
+        None,
+        Some(store.clone()),
+        None,
+    );
+
+    let submitted = tokio::time::timeout(
+        Duration::from_secs(1),
+        send_to(
+            app.clone(),
+            Method::POST,
+            "/integration/jobs",
+            Some("application/json"),
+            request_with_job_id("async-state-flow").to_string(),
+        ),
+    )
+    .await
+    .expect("submission must not wait for the gated solver");
+    assert_eq!(submitted.status, StatusCode::ACCEPTED);
+    assert_eq!(submitted.body["job_id"], "async-state-flow");
+    assert_eq!(submitted.body["status"], "pending");
+    assert!(submitted.body["created_at"].is_number());
+    assert_eq!(submitted.body.as_object().unwrap().len(), 3);
+
+    wait_for_solver_starts(&solver.started, 1).await;
+    let running = send_to(
+        app.clone(),
+        Method::GET,
+        "/integration/jobs/async-state-flow",
+        None,
+        String::new(),
+    )
+    .await;
+    assert_eq!(running.status, StatusCode::OK);
+    assert_eq!(running.body["status"], "running");
+    assert_eq!(running.body["stage"], "solving");
+    assert_eq!(running.body["progress"], 60);
+    assert!(running.body["result"].is_null());
+
+    solver.release.store(true, Ordering::Release);
+    wait_for_job_status(store.as_ref(), "async-state-flow", JobStatus::Completed).await;
+    let completed = send_to(
+        app.clone(),
+        Method::GET,
+        "/integration/jobs/async-state-flow",
+        None,
+        String::new(),
+    )
+    .await;
+    assert_eq!(completed.body["status"], "completed");
+    assert_eq!(completed.body["progress"], 100);
+    assert!(completed.body["result"].is_object());
+    assert!(completed.body["error"].is_null());
+
+    let duplicate = send_to(
+        app,
+        Method::POST,
+        "/integration/jobs",
+        Some("application/json"),
+        request_with_job_id("async-state-flow").to_string(),
+    )
+    .await;
+    assert_error(duplicate, StatusCode::CONFLICT, "DUPLICATE_JOB_ID");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn sse_reconnects_with_snapshot_orders_progress_and_closes_after_completion() {
+    let temporary = TestDirectory::new();
+    let store = Arc::new(FileJobStore::new(&temporary.0).unwrap());
+    let solver = gated_solver();
+    let app = http::router_with_storage_options(
+        RouteOptimizationService::new(DevelopmentRoutingProvider, solver.clone()),
+        None,
+        Some(store.clone()),
+        None,
+        Duration::from_secs(15),
+    );
+    let submitted = send_to(
+        app.clone(),
+        Method::POST,
+        "/integration/jobs",
+        Some("application/json"),
+        request_with_job_id("sse-completed").to_string(),
+    )
+    .await;
+    assert_eq!(submitted.status, StatusCode::ACCEPTED);
+    wait_for_solver_starts(&solver.started, 1).await;
+
+    let (_, mut disconnected_body) = open_event_stream(app.clone(), "sse-completed").await;
+    let mut disconnected_buffer = String::new();
+    let first_snapshot = next_sse_message(&mut disconnected_body, &mut disconnected_buffer)
+        .await
+        .unwrap();
+    assert_eq!(sse_field(&first_snapshot, "event"), Some("snapshot"));
+    assert_eq!(sse_data(&first_snapshot)["status"], "running");
+    drop(disconnected_body);
+
+    let (headers, mut body) = open_event_stream(app.clone(), "sse-completed").await;
+    assert_eq!(headers[header::CONTENT_TYPE], "text/event-stream");
+    assert_eq!(headers[header::CACHE_CONTROL], "no-cache");
+    assert_eq!(headers[header::CONNECTION], "keep-alive");
+    assert_eq!(headers["x-accel-buffering"], "no");
+    let mut buffered = String::new();
+    let snapshot = next_sse_message(&mut body, &mut buffered).await.unwrap();
+    assert_eq!(sse_field(&snapshot, "event"), Some("snapshot"));
+    let snapshot_id: u64 = sse_field(&snapshot, "id").unwrap().parse().unwrap();
+    let snapshot_data = sse_data(&snapshot);
+    assert_eq!(snapshot_data["job_id"], "sse-completed");
+    assert_eq!(snapshot_data["status"], "running");
+    assert_eq!(snapshot_data["stage"], "solving");
+    assert_eq!(snapshot_data["request"]["job_id"], "sse-completed");
+
+    solver.release.store(true, Ordering::Release);
+    let mut last_id = snapshot_id;
+    let mut saw_progress = false;
+    loop {
+        let message = next_sse_message(&mut body, &mut buffered)
+            .await
+            .expect("terminal SSE event must be sent");
+        let Some(event) = sse_field(&message, "event") else {
+            continue;
+        };
+        let id: u64 = sse_field(&message, "id").unwrap().parse().unwrap();
+        assert!(id > last_id);
+        last_id = id;
+        match event {
+            "progress" => {
+                saw_progress = true;
+                assert!(sse_data(&message)["progress"].as_u64().unwrap() >= 85);
+            }
+            "completed" => {
+                let data = sse_data(&message);
+                assert_eq!(data["status"], "completed");
+                assert!(data["result"].is_object());
+                break;
+            }
+            unexpected => panic!("unexpected SSE event: {unexpected}"),
+        }
+    }
+    assert!(saw_progress);
+    assert!(next_sse_message(&mut body, &mut buffered).await.is_none());
+
+    let (_, mut late_body) = open_event_stream(app, "sse-completed").await;
+    let mut late_buffer = String::new();
+    let late_snapshot = next_sse_message(&mut late_body, &mut late_buffer)
+        .await
+        .unwrap();
+    assert_eq!(sse_field(&late_snapshot, "event"), Some("snapshot"));
+    assert_eq!(sse_data(&late_snapshot)["status"], "completed");
+    assert!(next_sse_message(&mut late_body, &mut late_buffer)
+        .await
+        .is_none());
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn sse_sends_heartbeat_and_cancelled_terminal_event() {
+    let temporary = TestDirectory::new();
+    let store = Arc::new(FileJobStore::new(&temporary.0).unwrap());
+    let started = Arc::new(AtomicBool::new(false));
+    let finished = Arc::new(AtomicBool::new(false));
+    let app = http::router_with_storage_options(
+        RouteOptimizationService::new(
+            DevelopmentRoutingProvider,
+            SlowCancellationSolver {
+                started: started.clone(),
+                finished: finished.clone(),
+            },
+        ),
+        None,
+        Some(store.clone()),
+        None,
+        Duration::from_millis(10),
+    );
+    let submitted = send_to(
+        app.clone(),
+        Method::POST,
+        "/integration/jobs",
+        Some("application/json"),
+        request_with_job_id("sse-cancelled").to_string(),
+    )
+    .await;
+    assert_eq!(submitted.status, StatusCode::ACCEPTED);
+    tokio::time::timeout(Duration::from_secs(2), async {
+        while !started.load(Ordering::Acquire) {
+            sleep(Duration::from_millis(1)).await;
+        }
+    })
+    .await
+    .unwrap();
+
+    let (_, mut body) = open_event_stream(app.clone(), "sse-cancelled").await;
+    let mut buffered = String::new();
+    assert_eq!(
+        sse_field(
+            &next_sse_message(&mut body, &mut buffered).await.unwrap(),
+            "event"
+        ),
+        Some("snapshot")
+    );
+    let heartbeat = next_sse_message(&mut body, &mut buffered).await.unwrap();
+    assert!(heartbeat.lines().any(|line| line == ": heartbeat"));
+
+    let cancelled = send_to(
+        app,
+        Method::POST,
+        "/integration/jobs/sse-cancelled/cancel",
+        None,
+        String::new(),
+    )
+    .await;
+    assert_eq!(cancelled.status, StatusCode::OK);
+    loop {
+        let message = next_sse_message(&mut body, &mut buffered)
+            .await
+            .expect("cancelled event must be sent");
+        if sse_field(&message, "event") == Some("cancelled") {
+            assert_eq!(sse_data(&message)["status"], "cancelled");
+            break;
+        }
+    }
+    assert!(next_sse_message(&mut body, &mut buffered).await.is_none());
+    tokio::time::timeout(Duration::from_secs(2), async {
+        while !finished.load(Ordering::Acquire) {
+            sleep(Duration::from_millis(1)).await;
+        }
+    })
+    .await
+    .unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn sse_failed_event_contains_persisted_error_and_closes() {
+    let temporary = TestDirectory::new();
+    let store = Arc::new(FileJobStore::new(&temporary.0).unwrap());
+    let started = Arc::new(AtomicBool::new(false));
+    let release = Arc::new(AtomicBool::new(false));
+    let app = http::router_with_storage_and_limit(
+        RouteOptimizationService::new(
+            DevelopmentRoutingProvider,
+            GatedFailureSolver {
+                started: started.clone(),
+                release: release.clone(),
+            },
+        ),
+        None,
+        Some(store),
+        None,
+    );
+    assert_eq!(
+        send_to(
+            app.clone(),
+            Method::POST,
+            "/integration/jobs",
+            Some("application/json"),
+            request_with_job_id("sse-failed").to_string(),
+        )
+        .await
+        .status,
+        StatusCode::ACCEPTED
+    );
+    tokio::time::timeout(Duration::from_secs(2), async {
+        while !started.load(Ordering::Acquire) {
+            sleep(Duration::from_millis(1)).await;
+        }
+    })
+    .await
+    .unwrap();
+
+    let (_, mut body) = open_event_stream(app, "sse-failed").await;
+    let mut buffered = String::new();
+    assert_eq!(
+        sse_field(
+            &next_sse_message(&mut body, &mut buffered).await.unwrap(),
+            "event"
+        ),
+        Some("snapshot")
+    );
+    release.store(true, Ordering::Release);
+    loop {
+        let message = next_sse_message(&mut body, &mut buffered)
+            .await
+            .expect("failed event must be sent");
+        if sse_field(&message, "event") == Some("failed") {
+            let data = sse_data(&message);
+            assert_eq!(data["status"], "failed");
+            assert_eq!(data["error"]["code"], "NO_FEASIBLE_ROUTE");
+            break;
+        }
+    }
+    assert!(next_sse_message(&mut body, &mut buffered).await.is_none());
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn async_jobs_run_concurrently_and_respect_an_explicit_limit() {
+    for (limit, expected_started_before_release, expected_max) in
+        [(None, 2usize, 2usize), (Some(1usize), 1usize, 1usize)]
+    {
+        let temporary = TestDirectory::new();
+        let store = Arc::new(FileJobStore::new(&temporary.0).unwrap());
+        let solver = gated_solver();
+        let app = http::router_with_storage_and_limit(
+            RouteOptimizationService::new(DevelopmentRoutingProvider, solver.clone()),
+            None,
+            Some(store.clone()),
+            limit,
+        );
+
+        for job_id in ["concurrent-a", "concurrent-b"] {
+            let response = send_to(
+                app.clone(),
+                Method::POST,
+                "/integration/jobs",
+                Some("application/json"),
+                request_with_job_id(job_id).to_string(),
+            )
+            .await;
+            assert_eq!(response.status, StatusCode::ACCEPTED);
+        }
+        wait_for_solver_starts(&solver.started, expected_started_before_release).await;
+        if limit.is_some() {
+            sleep(Duration::from_millis(25)).await;
+            assert_eq!(solver.started.load(Ordering::Acquire), 1);
+            assert_eq!(
+                store.get_job("concurrent-b").unwrap().unwrap().state.status,
+                JobStatus::Pending
+            );
+        }
+
+        solver.release.store(true, Ordering::Release);
+        wait_for_job_status(store.as_ref(), "concurrent-a", JobStatus::Completed).await;
+        wait_for_job_status(store.as_ref(), "concurrent-b", JobStatus::Completed).await;
+        assert_eq!(solver.max_active.load(Ordering::Acquire), expected_max);
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn async_submit_persists_failure_and_can_cancel_a_running_job() {
+    let temporary = TestDirectory::new();
+    let store = Arc::new(FileJobStore::new(&temporary.0).unwrap());
+    let app = http::router_with_storage_and_limit(
+        RouteOptimizationService::new(DevelopmentRoutingProvider, DevelopmentRouteSolver),
+        None,
+        Some(store.clone()),
+        None,
+    );
+    let mut failed_request = request_with_job_id("async-failure");
+    failed_request["locations"][1]["close_time"] = json!("09:10");
+    let submitted = send_to(
+        app,
+        Method::POST,
+        "/integration/jobs",
+        Some("application/json"),
+        failed_request.to_string(),
+    )
+    .await;
+    assert_eq!(submitted.status, StatusCode::ACCEPTED);
+    wait_for_job_status(store.as_ref(), "async-failure", JobStatus::Failed).await;
+    let failed = store.get_job("async-failure").unwrap().unwrap();
+    assert_eq!(failed.error.unwrap().code, "NO_FEASIBLE_ROUTE");
+    assert!(failed.result.is_none());
+
+    let cancel_directory = TestDirectory::new();
+    let cancel_store = Arc::new(FileJobStore::new(&cancel_directory.0).unwrap());
+    let started = Arc::new(AtomicBool::new(false));
+    let cancel_app = http::router_with_storage_and_limit(
+        RouteOptimizationService::new(
+            DevelopmentRoutingProvider,
+            SlowCancellationSolver {
+                started: started.clone(),
+                finished: Arc::new(AtomicBool::new(false)),
+            },
+        ),
+        None,
+        Some(cancel_store.clone()),
+        None,
+    );
+    let submitted = send_to(
+        cancel_app.clone(),
+        Method::POST,
+        "/integration/jobs",
+        Some("application/json"),
+        request_with_job_id("async-cancel").to_string(),
+    )
+    .await;
+    assert_eq!(submitted.status, StatusCode::ACCEPTED);
+    tokio::time::timeout(Duration::from_secs(2), async {
+        while !started.load(Ordering::Acquire) {
+            sleep(Duration::from_millis(1)).await;
+        }
+    })
+    .await
+    .unwrap();
+    let cancelled = send_to(
+        cancel_app,
+        Method::POST,
+        "/integration/jobs/async-cancel/cancel",
+        None,
+        String::new(),
+    )
+    .await;
+    assert_eq!(cancelled.status, StatusCode::OK);
+    assert_eq!(cancelled.body["status"], "cancelled");
+    wait_for_job_status(cancel_store.as_ref(), "async-cancel", JobStatus::Cancelled).await;
 }
 
 #[tokio::test]
@@ -450,6 +1006,7 @@ async fn running_cancel_stops_pipeline_and_persists_cancelled_state() {
             DevelopmentRoutingProvider,
             SlowCancellationSolver {
                 started: started.clone(),
+                finished: Arc::new(AtomicBool::new(false)),
             },
         ),
         Some(observation),

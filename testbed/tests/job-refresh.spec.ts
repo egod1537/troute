@@ -238,10 +238,15 @@ test("refresh indicator blocks duplicate requests and preserves rows on failure"
   ).toBeEnabled();
 });
 
-test("selected active Job detail refreshes independently every second", async ({
+test("selected active Job receives progress through SSE without list polling", async ({
   page,
 }) => {
   let listCalls = 0;
+  let eventCalls = 0;
+  let releaseEvent!: () => void;
+  const eventGate = new Promise<void>((resolve) => {
+    releaseEvent = resolve;
+  });
   let job: ServerJob = {
     id: "job-active",
     status: "running",
@@ -252,6 +257,18 @@ test("selected active Job detail refreshes independently every second", async ({
   await routeServerJobs(page, () => [job], () => {
     listCalls += 1;
   });
+  await page.route(
+    "**/api/integration/jobs/job-active/events",
+    async (route) => {
+      eventCalls += 1;
+      await eventGate;
+      await route.fulfill({
+        contentType: "text/event-stream",
+        headers: { "Cache-Control": "no-cache" },
+        body: `event: progress\nid: 2\ndata: ${JSON.stringify(recordFor(job))}\n\n`,
+      });
+    },
+  );
 
   await page.goto("/");
   const row = page.getByRole("option", { name: /job-active/ });
@@ -261,9 +278,11 @@ test("selected active Job detail refreshes independently every second", async ({
     updatedAt: 1_789_521_002_000,
     progress: 40,
   };
+  releaseEvent();
 
   await expect(row).toContainText("40%", { timeout: 1_700 });
   expect(listCalls).toBe(1);
+  expect(eventCalls).toBe(1);
 });
 
 test("hidden tabs skip polling and refresh immediately when visible", async ({

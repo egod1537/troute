@@ -51,10 +51,11 @@ troute
 ```
 
 The component interfaces and v0 data flow are defined. The HTTP server exposes
-`GET /health`, `POST /optimize`, and polling APIs under `/integration/jobs`.
-The optimize endpoint executes the existing provider -> solver -> schedule
-service pipeline and persists progress, result, error, cancellation, and
-observation data locally. Its currently wired provider and solver are
+`GET /health`, asynchronous `POST /integration/jobs`, the legacy synchronous
+`POST /optimize`, and polling APIs under `/integration/jobs`. Background jobs
+execute the provider -> solver -> schedule service pipeline and persist
+progress, result, error, cancellation, and observation data locally. The
+currently wired provider and solver are
 deterministic development placeholders; real travel-time lookup, actual
 optimization, Google Maps integration, and caching are not implemented.
 Trasolve calls troute in one direction only. troute neither requires a Trasolve
@@ -78,6 +79,7 @@ same-origin API proxy.
 - [x] Schedule calculation for a supplied visit order
 - [x] Runnable HTTP server and Docker Compose environment
 - [x] `POST /optimize` HTTP integration contract
+- [x] Asynchronous Job submission, polling, and cancellation
 - [x] Developer testbed with health checks, input editor, and request timing
 - [ ] Distance matrix generation
 - [ ] Simple greedy route solver
@@ -121,7 +123,9 @@ curl -i http://localhost:18080/health
 `TROUTE_PORT` defaults to `8080` and accepts integers from `1` to `65535`.
 Invalid values fail startup with an error on stderr. Startup, bind address,
 and shutdown messages go to stdout. The binary does not load `.env` itself;
-set variables in the shell for `cargo run`.
+set variables in the shell for `cargo run`. Set the optional positive integer
+`TROUTE_MAX_CONCURRENT_JOBS` to limit simultaneously running background jobs;
+when it is unset, submitted jobs run without a semaphore limit.
 
 troute starts without any Trasolve-specific environment variable. Consumers
 configure troute's base URL on their side and poll the Job APIs for progress and
@@ -129,7 +133,29 @@ terminal results.
 
 ## HTTP API
 
-`POST /optimize` accepts `application/json`. Time values are strict 24-hour
+`POST /integration/jobs` is the primary asynchronous submission endpoint.
+It validates and persists the request, starts background execution, and returns
+immediately without waiting for the solver:
+
+```text
+HTTP/1.1 202 Accepted
+```
+
+```json
+{
+  "job_id": "route-local-example",
+  "status": "pending",
+  "created_at": 1789520000000
+}
+```
+
+Poll `GET /integration/jobs/{job_id}` for `pending -> running -> completed`,
+`failed`, or `cancelled`. `POST /optimize` remains as a synchronous legacy
+adapter: with persistent storage it submits through the same background Job
+runner and waits for the terminal record, so it does not duplicate solver
+logic.
+
+Both submission endpoints accept `application/json`. Time values are strict 24-hour
 `HH:MM` strings on both request and response; numeric minute values and forms
 such as `9:00`, `24:00`, or `09:60` are rejected. Requests must contain 2 to 500
 locations. The first location is the fixed start, the last location is the
@@ -241,20 +267,25 @@ The supported dependency direction is `Trasolve -> troute` only:
 
 ```text
 Trasolve
-  ├─ POST /optimize
+  ├─ POST /integration/jobs
+  ├─ POST /optimize (legacy synchronous adapter)
   ├─ GET /integration/jobs?limit=50
   ├─ GET /integration/jobs/{job_id}
+  ├─ GET /integration/jobs/{job_id}/events
   ├─ GET /integration/jobs/{job_id}/timeline
   └─ POST /integration/jobs/{job_id}/cancel
         ↓
       troute
 ```
 
-troute validates and persists the request, records local progress through
-`accepted`, `building_matrix`, `solving`, and `scheduling`, then stores either
-the result or error and its terminal state. It performs no HTTP request to
-Trasolve. A consumer can poll the Job detail endpoint to read status, progress,
-result, error, and cancellation state:
+troute validates and persists the request before spawning a Tokio task. The
+blocking optimization pipeline runs on Tokio's blocking pool, records progress
+through `accepted`, `building_matrix`, `solving`, and `scheduling`, then stores
+either the result or error before its terminal state. The Job Store is
+authoritative; the lifetime of the submitting HTTP request is independent of
+optimization. It performs no HTTP request to Trasolve. A consumer can poll the
+Job detail endpoint to read status, progress, result, error, and cancellation
+state:
 
 ```json
 {
@@ -271,6 +302,33 @@ result, error, and cancellation state:
   "error": null
 }
 ```
+
+### Job progress streaming
+
+An active Job can also be followed with Server-Sent Events:
+
+```sh
+curl -N http://127.0.0.1:8080/integration/jobs/JOB_ID/events
+```
+
+The stream sends one persisted `snapshot` immediately, followed by `progress`
+events and one `completed`, `failed`, or `cancelled` terminal event. Every Job
+event has a monotonically increasing `id`; the stream closes after terminal
+delivery. Idle connections receive a `: heartbeat` comment every 15 seconds.
+Responses use `text/event-stream`, `Cache-Control: no-cache`,
+`Connection: keep-alive`, and `X-Accel-Buffering: no`.
+
+The broadcast channel is only a low-latency notification path. State is always
+persisted before publication, and the Job Store remains authoritative. A new or
+reconnected client receives the latest snapshot; clients should use
+`GET /integration/jobs/{job_id}` if an SSE connection is interrupted. Slow
+subscribers never block workers and recover from broadcast lag using another
+persisted snapshot.
+
+The testbed uses SSE for the selected active Job while retaining polling for
+Job-list discovery. Its nginx proxy disables response buffering and uses a
+one-hour upstream read timeout; the edge Caddy route flushes event chunks
+immediately.
 
 This supports a local Trasolve calling local troute, local Trasolve calling the
 deployed troute, and deployed Trasolve calling deployed troute. Configure only
@@ -347,13 +405,15 @@ directory name; the original ID remains unchanged in stored JSON and APIs.
 An existing job directory is never overwritten. Reusing a `job_id` returns HTTP
 409 with `DUPLICATE_JOB_ID`. At startup, completed, failed, and cancelled jobs
 are retained; pending or running jobs are marked failed with
-`PROCESS_RESTARTED`. There is no automatic retention deletion in this version.
+`JOB_INTERRUPTED`. There is no automatic retention deletion in this version.
 
 Read recent jobs, one stored job, or its timeline with:
 
 ```text
 GET /integration/jobs?limit=50
+POST /integration/jobs
 GET /integration/jobs/{job_id}
+GET /integration/jobs/{job_id}/events
 POST /integration/jobs/{job_id}/cancel
 GET /integration/jobs/{job_id}/timeline
 ```

@@ -3,13 +3,18 @@
 https://troute.mangagaki.net {
 	import jsb_tls
 
-	@direct_api path /health /optimize
+	@direct_api path /health /optimize /integration/jobs*
 	handle @direct_api {
-		reverse_proxy host.docker.internal:18080
+		reverse_proxy host.docker.internal:18080 {
+			flush_interval -1
+		}
 	}
 
 	handle_path /api/* {
-		reverse_proxy host.docker.internal:18080
+		reverse_proxy host.docker.internal:18080 {
+			# Flush SSE event chunks immediately.
+			flush_interval -1
+		}
 	}
 
 	handle {

@@ -1,14 +1,15 @@
 use std::{
-    collections::HashMap,
-    sync::{Arc, Mutex},
-    time::Instant,
+    convert::Infallible,
+    sync::Arc,
+    time::{Duration, Instant},
 };
 
 use crate::{
     api::{OptimizeRouteRequest, OptimizeRouteResponse},
     cancellation::CancellationToken,
     domain::OptimizationProblem,
-    events::{OptimizationErrorCode, OptimizationEventReporter, ProgressStage},
+    events::NoopOptimizationEventReporter,
+    jobs::{JobEventData, JobEventKind, JobExecutor, JobRunner},
     observation::{
         allowlisted_headers, JobObservationRecorder, JobTimelineEntry, ObservationDirection,
         ObservationHeaders, ObservationPeer,
@@ -17,16 +18,16 @@ use crate::{
     schedule::ScheduleError,
     service::{OptimizationServiceError, RouteOptimizationService},
     solver::{RouteSolver, SolverError},
-    storage::{
-        JobIndexEntry, JobStatus, JobStore, JobStoreError, StoredJob, StoredJobError,
-        TerminalWriteOutcome,
-    },
+    storage::{JobIndexEntry, JobStatus, JobStore, JobStoreError, StoredJob},
 };
 use axum::{
     body::Body,
     extract::{rejection::JsonRejection, DefaultBodyLimit, Path, Query, State},
     http::{header, HeaderMap, HeaderValue, Request, StatusCode},
-    response::{IntoResponse, Response},
+    response::{
+        sse::{Event, KeepAlive, Sse},
+        IntoResponse, Response,
+    },
     routing::{get, post},
     Json, Router,
 };
@@ -34,143 +35,15 @@ use serde::{Deserialize, Serialize};
 use serde_json::json;
 
 const MAX_REQUEST_BODY_BYTES: usize = 1024 * 1024;
-
-trait Optimizer: Send + Sync {
-    fn optimize_with_cancellation(
-        &self,
-        request: OptimizeRouteRequest,
-        reporter: &dyn OptimizationEventReporter,
-        cancellation: &CancellationToken,
-    ) -> Result<OptimizeRouteResponse, OptimizationServiceError>;
-}
-
-impl<P, S> Optimizer for RouteOptimizationService<P, S>
-where
-    P: RoutingProvider + Send + Sync,
-    S: RouteSolver + Send + Sync,
-{
-    fn optimize_with_cancellation(
-        &self,
-        request: OptimizeRouteRequest,
-        reporter: &dyn OptimizationEventReporter,
-        cancellation: &CancellationToken,
-    ) -> Result<OptimizeRouteResponse, OptimizationServiceError> {
-        RouteOptimizationService::optimize_with_cancellation(self, request, reporter, cancellation)
-    }
-}
-
-struct PersistentOptimizationEventReporter<'a> {
-    job_id: &'a str,
-    store: Option<&'a Arc<dyn JobStore>>,
-    cancellation: &'a CancellationToken,
-}
-
-impl PersistentOptimizationEventReporter<'_> {
-    fn log_failure(&self, operation: &str, result: Result<(), JobStoreError>) {
-        if let Err(error) = result {
-            eprintln!(
-                "job persistence failed; job_id={}; operation={operation}; error={error}",
-                self.job_id
-            );
-        }
-    }
-}
-
-impl OptimizationEventReporter for PersistentOptimizationEventReporter<'_> {
-    fn progress(&self, stage: ProgressStage, progress: u8, message: Option<&str>) {
-        if let Some(store) = self.store {
-            if let Err(error) = store.update_progress(self.job_id, stage, progress, message) {
-                if matches!(
-                    error,
-                    JobStoreError::InvalidTransition {
-                        status: JobStatus::Cancelled,
-                        ..
-                    }
-                ) {
-                    self.cancellation.cancel();
-                    return;
-                }
-                self.log_failure("update_progress", Err(error));
-            }
-        }
-    }
-
-    fn error(&self, code: OptimizationErrorCode, message: &str, detail: &str) {
-        if let Some(store) = self.store {
-            let code = serde_json::to_value(code)
-                .ok()
-                .and_then(|value| value.as_str().map(str::to_owned))
-                .unwrap_or_else(|| "INTERNAL_ERROR".to_owned());
-            match store.save_error(
-                self.job_id,
-                &StoredJobError {
-                    code,
-                    message: message.to_owned(),
-                    detail: detail.to_owned(),
-                },
-            ) {
-                Ok(TerminalWriteOutcome::Applied) => {}
-                Ok(TerminalWriteOutcome::Cancelled) => {
-                    self.cancellation.cancel();
-                }
-                Err(error) => self.log_failure("save_error", Err(error)),
-            }
-        }
-    }
-
-    fn result(&self, response: &OptimizeRouteResponse) {
-        if let Some(store) = self.store {
-            match store.save_result(self.job_id, response) {
-                Ok(TerminalWriteOutcome::Applied) => {}
-                Ok(TerminalWriteOutcome::Cancelled) => {
-                    self.cancellation.cancel();
-                }
-                Err(error) => self.log_failure("save_result", Err(error)),
-            }
-        }
-    }
-}
-
-#[derive(Clone, Default)]
-struct JobCancellationRegistry {
-    jobs: Arc<Mutex<HashMap<String, CancellationToken>>>,
-}
-
-impl JobCancellationRegistry {
-    fn reserve(&self, job_id: &str, token: CancellationToken) -> bool {
-        let mut jobs = self
-            .jobs
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-        if jobs.contains_key(job_id) {
-            return false;
-        }
-        jobs.insert(job_id.to_owned(), token);
-        true
-    }
-
-    fn get(&self, job_id: &str) -> Option<CancellationToken> {
-        self.jobs
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .get(job_id)
-            .cloned()
-    }
-
-    fn remove(&self, job_id: &str) {
-        self.jobs
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .remove(job_id);
-    }
-}
+const DEFAULT_SSE_HEARTBEAT_INTERVAL: Duration = Duration::from_secs(15);
 
 #[derive(Clone)]
 struct AppState {
-    optimizer: Arc<dyn Optimizer>,
+    executor: Arc<dyn JobExecutor>,
+    runner: Option<JobRunner>,
     observation: Option<JobObservationRecorder>,
     job_store: Option<Arc<dyn JobStore>>,
-    cancellations: JobCancellationRegistry,
+    sse_heartbeat_interval: Duration,
 }
 
 #[derive(Debug, Serialize)]
@@ -192,6 +65,13 @@ struct JobListResponse {
 #[derive(Debug, Deserialize)]
 struct JobListQuery {
     limit: Option<usize>,
+}
+
+#[derive(Debug, Serialize)]
+struct SubmitJobResponse {
+    job_id: String,
+    status: JobStatus,
+    created_at: i64,
 }
 
 #[derive(Debug, Serialize)]
@@ -392,22 +272,82 @@ where
     P: RoutingProvider + Send + Sync + 'static,
     S: RouteSolver + Send + Sync + 'static,
 {
+    router_with_storage_options(
+        optimizer,
+        observation,
+        job_store,
+        max_concurrent_jobs_from_env(),
+        DEFAULT_SSE_HEARTBEAT_INTERVAL,
+    )
+}
+
+/// Builds the HTTP application with an explicit background-job concurrency limit.
+pub fn router_with_storage_and_limit<P, S>(
+    optimizer: RouteOptimizationService<P, S>,
+    observation: Option<JobObservationRecorder>,
+    job_store: Option<Arc<dyn JobStore>>,
+    max_concurrent_jobs: Option<usize>,
+) -> Router
+where
+    P: RoutingProvider + Send + Sync + 'static,
+    S: RouteSolver + Send + Sync + 'static,
+{
+    router_with_storage_options(
+        optimizer,
+        observation,
+        job_store,
+        max_concurrent_jobs,
+        DEFAULT_SSE_HEARTBEAT_INTERVAL,
+    )
+}
+
+/// Builds the HTTP application with explicit background-job and SSE settings.
+pub fn router_with_storage_options<P, S>(
+    optimizer: RouteOptimizationService<P, S>,
+    observation: Option<JobObservationRecorder>,
+    job_store: Option<Arc<dyn JobStore>>,
+    max_concurrent_jobs: Option<usize>,
+    sse_heartbeat_interval: Duration,
+) -> Router
+where
+    P: RoutingProvider + Send + Sync + 'static,
+    S: RouteSolver + Send + Sync + 'static,
+{
+    let executor: Arc<dyn JobExecutor> = Arc::new(optimizer);
+    let runner = job_store
+        .as_ref()
+        .map(|store| JobRunner::new(executor.clone(), store.clone(), max_concurrent_jobs));
     Router::new()
         .route("/health", get(health))
         .route("/optimize", post(optimize))
-        .route("/integration/jobs", get(list_jobs))
+        .route("/integration/jobs", get(list_jobs).post(submit_job))
         .route("/integration/jobs/{job_id}", get(get_job))
+        .route("/integration/jobs/{job_id}/events", get(job_events))
         .route("/integration/jobs/{job_id}/cancel", post(cancel_job))
         .route("/integration/jobs/{job_id}/timeline", get(job_timeline))
         .fallback(not_found)
         .method_not_allowed_fallback(method_not_allowed)
         .layer(DefaultBodyLimit::max(MAX_REQUEST_BODY_BYTES))
         .with_state(AppState {
-            optimizer: Arc::new(optimizer),
+            executor,
+            runner,
             observation,
             job_store,
-            cancellations: JobCancellationRegistry::default(),
+            sse_heartbeat_interval: sse_heartbeat_interval.max(Duration::from_millis(1)),
         })
+}
+
+fn max_concurrent_jobs_from_env() -> Option<usize> {
+    let value = std::env::var("TROUTE_MAX_CONCURRENT_JOBS").ok()?;
+    match value.parse::<usize>() {
+        Ok(limit) if limit > 0 => Some(limit),
+        _ => {
+            eprintln!(
+                "ignoring invalid TROUTE_MAX_CONCURRENT_JOBS={value:?}; expected a positive integer"
+            );
+            None
+        }
+    }
 }
 
 async fn health() -> Json<HealthResponse> {
@@ -425,62 +365,77 @@ async fn optimize(
         .map_err(ApiError::from_service)?;
     let job_id = request.job_id.clone();
     let started = Instant::now();
-    let cancellation = CancellationToken::new();
-    if !state.cancellations.reserve(&job_id, cancellation.clone()) {
-        return Err(ApiError::new(
-            StatusCode::CONFLICT,
-            "DUPLICATE_JOB_ID",
-            "A job with this job_id is already running.",
-            &job_id,
-        ));
-    }
-    if let Some(store) = &state.job_store {
-        if let Err(error) = store.create_job(&request) {
-            state.cancellations.remove(&job_id);
-            return Err(ApiError::from_storage(error));
-        }
-        if let Err(error) = store.mark_running(&job_id) {
-            if matches!(
-                error,
-                JobStoreError::InvalidTransition {
-                    status: JobStatus::Cancelled,
-                    ..
-                }
-            ) {
-                cancellation.cancel();
-            } else {
-                state.cancellations.remove(&job_id);
-                return Err(ApiError::from_storage(error));
-            }
-        }
-    }
     let pair_id = state
         .observation
         .as_ref()
         .map(|observation| observation.next_pair_id("opt"));
-    if let (Some(observation), Some(pair_id)) = (&state.observation, &pair_id) {
-        let mut entry = observation.entry(
-            pair_id,
-            ObservationDirection::Request,
-            ObservationPeer::Testbed,
-            ObservationPeer::Troute,
-        );
-        entry.method = Some("POST".to_owned());
-        entry.path = Some("/optimize".to_owned());
-        entry.headers = allowlisted_headers(&headers);
-        entry.body = serde_json::to_value(&request).ok();
-        observation.append(&job_id, entry);
-    }
-    let reporter = PersistentOptimizationEventReporter {
-        job_id: &job_id,
-        store: state.job_store.as_ref(),
-        cancellation: &cancellation,
-    };
-    let result = state
-        .optimizer
-        .optimize_with_cancellation(request, &reporter, &cancellation);
 
-    state.cancellations.remove(&job_id);
+    let result = if let Some(runner) = &state.runner {
+        let submission = runner
+            .submit_with_completion(request.clone())
+            .map_err(ApiError::from_storage)?;
+        record_optimize_request(
+            state.observation.as_ref(),
+            &job_id,
+            pair_id.as_deref(),
+            &headers,
+            &request,
+        );
+        submission
+            .completion
+            .await
+            .map_err(|_| {
+                ApiError::new(
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    "JOB_EXECUTION_FAILED",
+                    "Route optimization failed unexpectedly.",
+                    "background job ended without reporting completion",
+                )
+            })?
+            .map_err(|reason| {
+                ApiError::new(
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    "STORAGE_ERROR",
+                    "Job records could not be stored.",
+                    reason,
+                )
+            })?;
+        let job = runner
+            .store()
+            .get_job(&job_id)
+            .map_err(ApiError::from_storage)?
+            .ok_or_else(|| {
+                ApiError::new(
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    "STORAGE_ERROR",
+                    "Job records could not be stored.",
+                    format!("completed job disappeared: {job_id}"),
+                )
+            })?;
+        legacy_result_from_job(job)
+    } else {
+        record_optimize_request(
+            state.observation.as_ref(),
+            &job_id,
+            pair_id.as_deref(),
+            &headers,
+            &request,
+        );
+        let executor = state.executor.clone();
+        let cancellation = CancellationToken::new();
+        tokio::task::spawn_blocking(move || {
+            executor.execute(request, &NoopOptimizationEventReporter, &cancellation)
+        })
+        .await
+        .map_err(|error| {
+            ApiError::new(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "JOB_EXECUTION_FAILED",
+                "Route optimization failed unexpectedly.",
+                error.to_string(),
+            )
+        })?
+    };
 
     match result {
         Ok(response) => {
@@ -512,6 +467,118 @@ async fn optimize(
             );
             Err(error)
         }
+    }
+}
+
+fn record_optimize_request(
+    observation: Option<&JobObservationRecorder>,
+    job_id: &str,
+    pair_id: Option<&str>,
+    headers: &HeaderMap,
+    request: &OptimizeRouteRequest,
+) {
+    let (Some(observation), Some(pair_id)) = (observation, pair_id) else {
+        return;
+    };
+    let mut entry = observation.entry(
+        pair_id,
+        ObservationDirection::Request,
+        ObservationPeer::Testbed,
+        ObservationPeer::Troute,
+    );
+    entry.method = Some("POST".to_owned());
+    entry.path = Some("/optimize".to_owned());
+    entry.headers = allowlisted_headers(headers);
+    entry.body = serde_json::to_value(request).ok();
+    observation.append(job_id, entry);
+}
+
+async fn submit_job(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    request: Result<Json<OptimizeRouteRequest>, JsonRejection>,
+) -> Result<impl IntoResponse, ApiError> {
+    let Json(request) = request.map_err(ApiError::from_json_rejection)?;
+    OptimizationProblem::try_from(request.clone())
+        .map_err(OptimizationServiceError::InvalidRequest)
+        .map_err(ApiError::from_service)?;
+    let runner = state.runner.as_ref().ok_or_else(|| {
+        ApiError::new(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "JOB_STORE_UNAVAILABLE",
+            "Asynchronous job submission is unavailable.",
+            "the application was built without a job store",
+        )
+    })?;
+    let job_id = request.job_id.clone();
+    let started = Instant::now();
+    let pair_id = state
+        .observation
+        .as_ref()
+        .map(|observation| observation.next_pair_id("submit"));
+    let submitted_state = runner
+        .submit(request.clone())
+        .map_err(ApiError::from_storage)?;
+    if let (Some(observation), Some(pair_id)) = (&state.observation, &pair_id) {
+        let mut entry = observation.entry(
+            pair_id,
+            ObservationDirection::Request,
+            ObservationPeer::Testbed,
+            ObservationPeer::Troute,
+        );
+        entry.method = Some("POST".to_owned());
+        entry.path = Some("/integration/jobs".to_owned());
+        entry.headers = allowlisted_headers(&headers);
+        entry.body = serde_json::to_value(&request).ok();
+        observation.append(&job_id, entry);
+    }
+
+    let response = SubmitJobResponse {
+        job_id: submitted_state.job_id,
+        status: submitted_state.status,
+        created_at: submitted_state.created_at,
+    };
+    record_submit_response(
+        state.observation.as_ref(),
+        &job_id,
+        pair_id.as_deref(),
+        started,
+        &response,
+    );
+    Ok((StatusCode::ACCEPTED, Json(response)))
+}
+
+fn legacy_result_from_job(
+    job: StoredJob,
+) -> Result<OptimizeRouteResponse, OptimizationServiceError> {
+    match job.state.status {
+        JobStatus::Completed => job.result.ok_or_else(|| {
+            OptimizationServiceError::Solver(SolverError::Failed(
+                "completed job has no persisted result".to_owned(),
+            ))
+        }),
+        JobStatus::Cancelled => Err(OptimizationServiceError::Cancelled),
+        JobStatus::Failed => {
+            let error = job.error.ok_or_else(|| {
+                OptimizationServiceError::Solver(SolverError::Failed(
+                    "failed job has no persisted error".to_owned(),
+                ))
+            })?;
+            match error.code.as_str() {
+                "NO_FEASIBLE_ROUTE" => Err(OptimizationServiceError::Solver(
+                    SolverError::NoFeasibleRoute,
+                )),
+                "ROUTING_UNAVAILABLE" => Err(OptimizationServiceError::Routing(
+                    RoutingError::Provider(error.detail),
+                )),
+                _ => Err(OptimizationServiceError::Solver(SolverError::Failed(
+                    error.detail,
+                ))),
+            }
+        }
+        status => Err(OptimizationServiceError::Solver(SolverError::Failed(
+            format!("background job completion reported non-terminal status {status:?}"),
+        ))),
     }
 }
 
@@ -547,6 +614,130 @@ async fn get_job(
     })?;
     record_job_inspection(state.observation.as_ref(), &job_id, &headers, started, &job);
     Ok(Json(job))
+}
+
+async fn job_events(
+    State(state): State<AppState>,
+    Path(job_id): Path<String>,
+) -> Result<Response, ApiError> {
+    let store = state.job_store.as_ref().ok_or_else(|| {
+        ApiError::new(
+            StatusCode::NOT_FOUND,
+            "JOB_NOT_FOUND",
+            "The requested job does not exist.",
+            &job_id,
+        )
+    })?;
+
+    // Subscribe before reading the source-of-truth snapshot. An event racing
+    // with the read is then either represented by the snapshot or buffered for
+    // live delivery (and can harmlessly be observed in both forms).
+    let subscription = state
+        .runner
+        .as_ref()
+        .and_then(|runner| runner.subscribe(&job_id));
+    let initial = store
+        .get_job(&job_id)
+        .map_err(ApiError::from_storage)?
+        .ok_or_else(|| {
+            ApiError::new(
+                StatusCode::NOT_FOUND,
+                "JOB_NOT_FOUND",
+                "The requested job does not exist.",
+                &job_id,
+            )
+        })?;
+    let initial_terminal = !matches!(
+        initial.state.status,
+        JobStatus::Pending | JobStatus::Running
+    );
+    let persisted_sequence = u64::try_from(initial.state.updated_at).unwrap_or(0);
+    let initial_sequence = subscription
+        .as_ref()
+        .map_or(persisted_sequence, |subscription| subscription.cursor);
+    let snapshot = JobEventData::snapshot(initial);
+    let event_store = store.clone();
+    let event_job_id = job_id.clone();
+
+    let stream = async_stream::stream! {
+        yield Ok::<Event, Infallible>(sse_event("snapshot", initial_sequence, &snapshot));
+        if initial_terminal {
+            return;
+        }
+
+        let Some(mut subscription) = subscription else {
+            return;
+        };
+        let mut cursor = initial_sequence;
+        loop {
+            match subscription.receiver.recv().await {
+                Ok(event) => {
+                    if event.sequence <= cursor {
+                        continue;
+                    }
+                    cursor = event.sequence;
+                    let terminal = matches!(
+                        event.kind,
+                        JobEventKind::Completed | JobEventKind::Failed | JobEventKind::Cancelled
+                    );
+                    yield Ok(sse_event(event.kind.as_str(), event.sequence, &event.data));
+                    if terminal {
+                        break;
+                    }
+                }
+                Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => {
+                    match event_store.get_job(&event_job_id) {
+                        Ok(Some(job)) => {
+                            let terminal = !matches!(
+                                job.state.status,
+                                JobStatus::Pending | JobStatus::Running
+                            );
+                            cursor = subscription.current_sequence();
+                            let snapshot = JobEventData::snapshot(job);
+                            yield Ok(sse_event("snapshot", cursor, &snapshot));
+                            if terminal {
+                                break;
+                            }
+                        }
+                        Ok(None) => break,
+                        Err(error) => {
+                            eprintln!(
+                                "SSE lag recovery failed; job_id={event_job_id}; error={error}"
+                            );
+                            break;
+                        }
+                    }
+                }
+                Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
+            }
+        }
+    };
+
+    let mut response = Sse::new(stream)
+        .keep_alive(
+            KeepAlive::new()
+                .interval(state.sse_heartbeat_interval)
+                .text("heartbeat"),
+        )
+        .into_response();
+    response
+        .headers_mut()
+        .insert(header::CACHE_CONTROL, HeaderValue::from_static("no-cache"));
+    response
+        .headers_mut()
+        .insert(header::CONNECTION, HeaderValue::from_static("keep-alive"));
+    response.headers_mut().insert(
+        header::HeaderName::from_static("x-accel-buffering"),
+        HeaderValue::from_static("no"),
+    );
+    Ok(response)
+}
+
+fn sse_event(event: &'static str, sequence: u64, data: &JobEventData) -> Event {
+    Event::default()
+        .event(event)
+        .id(sequence.to_string())
+        .data(serde_json::to_string(data).expect("job event data must serialize"))
 }
 
 fn record_job_inspection(
@@ -625,11 +816,15 @@ async fn cancel_job(
     })?;
     // Hold a clone across the persisted transition so optimize cleanup cannot
     // remove the token in the result-vs-cancel race.
-    let active = state.cancellations.get(&job_id);
+    let active = state
+        .runner
+        .as_ref()
+        .and_then(|runner| runner.activity(&job_id));
 
     match store.cancel_job(&job_id, CANCEL_MESSAGE) {
         Ok(job) => {
             if let Some(active) = active {
+                active.publish_persisted(store.as_ref(), &job_id, JobEventKind::Cancelled);
                 active.cancel();
             }
             let response = CancelJobResponse {
@@ -740,6 +935,32 @@ fn record_optimize_response(
     observation.append(job_id, entry);
 }
 
+fn record_submit_response(
+    observation: Option<&JobObservationRecorder>,
+    job_id: &str,
+    pair_id: Option<&str>,
+    started: Instant,
+    body: &SubmitJobResponse,
+) {
+    let (Some(observation), Some(pair_id)) = (observation, pair_id) else {
+        return;
+    };
+    let mut entry = observation.entry(
+        pair_id,
+        ObservationDirection::Response,
+        ObservationPeer::Troute,
+        ObservationPeer::Testbed,
+    );
+    entry.status = Some(StatusCode::ACCEPTED.as_u16());
+    entry.latency_ms = Some(started.elapsed().as_secs_f64() * 1_000.0);
+    entry.headers = Some(ObservationHeaders::from([(
+        header::CONTENT_TYPE.as_str().to_owned(),
+        "application/json".to_owned(),
+    )]));
+    entry.body = serde_json::to_value(body).ok();
+    observation.append(job_id, entry);
+}
+
 async fn job_timeline(
     State(state): State<AppState>,
     Path(job_id): Path<String>,
@@ -784,7 +1005,11 @@ async fn method_not_allowed<B>(request: Request<B>) -> Response {
         response
             .headers_mut()
             .insert(header::ALLOW, HeaderValue::from_static("POST"));
-    } else if matches!(request.uri().path(), "/health" | "/integration/jobs")
+    } else if request.uri().path() == "/integration/jobs" {
+        response
+            .headers_mut()
+            .insert(header::ALLOW, HeaderValue::from_static("GET,HEAD,POST"));
+    } else if request.uri().path() == "/health"
         || request.uri().path().starts_with("/integration/jobs/")
     {
         response

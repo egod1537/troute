@@ -7,13 +7,18 @@ import {
   getStoredJob,
   getStoredTimeline,
   runRoute,
+  subscribeToStoredJob,
   type RouteInput,
 } from "./api";
 import { AppHeader, type HealthState } from "./components/AppHeader";
 import { JobDetail } from "./components/detail/JobDetail";
 import { JobSidebar } from "./components/jobs/JobSidebar";
 import { NewJobDialog } from "./components/jobs/NewJobDialog";
-import { mergeStoredJob, type TestbedJob } from "./jobs";
+import {
+  mergeStoredJob,
+  mergeStoredJobEvent,
+  type TestbedJob,
+} from "./jobs";
 import { type ThemeMode, useTheme } from "./theme";
 import { useJobListRefresh } from "./useJobListRefresh";
 
@@ -62,6 +67,7 @@ export function App({ initialThemeMode }: AppProps) {
     let disposed = false;
     let inFlight = false;
     let controller: AbortController | null = null;
+    let closeEvents: (() => void) | undefined;
     const refreshSelectedJob = async () => {
       if (inFlight) return;
       inFlight = true;
@@ -80,8 +86,8 @@ export function App({ initialThemeMode }: AppProps) {
           ),
         );
       } catch {
-        // A browser-created Job may not be persisted yet. List/detail polling
-        // retries without replacing the current UI state with an error screen.
+        // A browser-created Job may not be persisted yet. SSE reconnect and
+        // list discovery recover without replacing the UI with an error.
       } finally {
         inFlight = false;
       }
@@ -89,12 +95,34 @@ export function App({ initialThemeMode }: AppProps) {
     void refreshSelectedJob();
     const active =
       selectedJob?.status === "pending" || selectedJob?.status === "running";
-    const interval = active
-      ? window.setInterval(() => void refreshSelectedJob(), 1_000)
-      : undefined;
+    if (active) {
+      closeEvents = subscribeToStoredJob(
+        selectedJobId,
+        (event) => {
+          if (disposed) return;
+          setJobs((current) =>
+            current.map((job) =>
+              job.id === selectedJobId
+                ? mergeStoredJobEvent(event, job)
+                : job,
+            ),
+          );
+          if (
+            event.status === "completed" ||
+            event.status === "failed" ||
+            event.status === "cancelled"
+          ) {
+            void getStoredTimeline(selectedJobId)
+              .then((timeline) => updateJob(selectedJobId, { timeline }))
+              .catch(() => undefined);
+          }
+        },
+        () => void refreshSelectedJob(),
+      );
+    }
     return () => {
       disposed = true;
-      if (interval !== undefined) window.clearInterval(interval);
+      closeEvents?.();
       controller?.abort();
     };
   }, [selectedJobId, selectedJob?.status]);

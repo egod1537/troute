@@ -63,6 +63,12 @@ export interface StoredJobRecord extends StoredJobState {
   error?: StoredJobError | null;
 }
 
+export interface StoredJobEvent extends StoredJobState {
+  request?: RouteInput;
+  result?: RouteResponse | null;
+  error?: StoredJobError | null;
+}
+
 export interface StoredTimelineEntry {
   id: string;
   pair_id: string;
@@ -285,6 +291,42 @@ export function getStoredJob(
     `/integration/jobs/${encodeURIComponent(jobId)}`,
     signal,
   );
+}
+
+export function subscribeToStoredJob(
+  jobId: string,
+  onEvent: (event: StoredJobEvent) => void,
+  onDisconnect: () => void,
+): () => void {
+  const source = new EventSource(
+    `${API_BASE}/integration/jobs/${encodeURIComponent(jobId)}/events`,
+  );
+  const receive = (message: MessageEvent<string>) => {
+    try {
+      const event = JSON.parse(message.data) as StoredJobEvent;
+      onEvent(event);
+      if (
+        event.status === "completed" ||
+        event.status === "failed" ||
+        event.status === "cancelled"
+      ) {
+        source.close();
+      }
+    } catch {
+      // A malformed notification is ignored; GET remains the recovery path.
+    }
+  };
+  for (const event of [
+    "snapshot",
+    "progress",
+    "completed",
+    "failed",
+    "cancelled",
+  ]) {
+    source.addEventListener(event, receive as EventListener);
+  }
+  source.onerror = onDisconnect;
+  return () => source.close();
 }
 
 export async function getStoredTimeline(

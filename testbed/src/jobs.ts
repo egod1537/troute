@@ -2,6 +2,7 @@ import type {
   ApiResponse,
   RouteInput,
   RouteResponse,
+  StoredJobEvent,
   StoredJobRecord,
 } from "./api";
 
@@ -80,6 +81,19 @@ export function mergeStoredJob(
     route: record.result ?? existing?.route,
     serverUpdatedAt: record.updated_at,
   };
+}
+
+export function mergeStoredJobEvent(
+  event: StoredJobEvent,
+  existing: TestbedJob,
+): TestbedJob {
+  return mergeStoredJob(
+    {
+      ...event,
+      request: event.request ?? existing.request,
+    },
+    existing,
+  );
 }
 
 export function sortJobsNewestFirst(jobs: TestbedJob[]): TestbedJob[] {

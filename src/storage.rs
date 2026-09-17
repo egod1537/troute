@@ -451,7 +451,7 @@ impl JobStore for FileJobStore {
             let mut state: JobState = read_json(&state_path)?;
             if matches!(state.status, JobStatus::Pending | JobStatus::Running) {
                 let error = StoredJobError {
-                    code: "PROCESS_RESTARTED".to_owned(),
+                    code: "JOB_INTERRUPTED".to_owned(),
                     message: "Job was interrupted by troute restart".to_owned(),
                     detail: "troute restarted before the job reached a terminal state".to_owned(),
                 };
@@ -823,7 +823,7 @@ mod tests {
         assert_eq!(reopened.recover_interrupted().unwrap(), 1);
         let pending = reopened.get_job("pending").unwrap().unwrap();
         assert_eq!(pending.state.status, JobStatus::Failed);
-        assert_eq!(pending.error.unwrap().code, "PROCESS_RESTARTED");
+        assert_eq!(pending.error.unwrap().code, "JOB_INTERRUPTED");
         assert_eq!(
             reopened.get_job("completed").unwrap().unwrap().state.status,
             JobStatus::Completed
