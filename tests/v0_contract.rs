@@ -6,6 +6,36 @@ use troute::{
     OptimizeRouteRequest, RouteOptimizationService,
 };
 
+struct IndexedRoutingProvider;
+
+const INDEXED_TRAVEL_MINUTES: [[u32; 5]; 5] = [
+    [0, 1, 10, 20, 30],
+    [5, 0, 2, 40, 50],
+    [6, 60, 0, 3, 70],
+    [7, 80, 90, 0, 4],
+    [8, 9, 10, 11, 0],
+];
+
+impl RoutingProvider for IndexedRoutingProvider {
+    fn travel_time_matrix(&self, locations: &[Location]) -> Result<TravelTimeMatrix, RoutingError> {
+        let rows = INDEXED_TRAVEL_MINUTES[..locations.len()]
+            .iter()
+            .map(|row| row[..locations.len()].to_vec())
+            .collect();
+        TravelTimeMatrix::new(rows).map_err(|error| RoutingError::Provider(error.to_string()))
+    }
+}
+
+struct InputOrderSolver;
+
+impl RouteSolver for InputOrderSolver {
+    fn solve(&self, input: SolverInput<'_>) -> Result<SolverSolution, SolverError> {
+        Ok(SolverSolution {
+            visit_order: (0..input.problem.locations().len()).collect(),
+        })
+    }
+}
+
 struct FixedRoutingProvider;
 
 impl RoutingProvider for FixedRoutingProvider {
@@ -103,4 +133,123 @@ fn malformed_hhmm_time_is_rejected() {
     );
 
     assert!(result.is_err());
+}
+
+fn debug_request(debug: Option<serde_json::Value>) -> OptimizeRouteRequest {
+    let mut value = serde_json::json!({
+        "job_id": "route-debug-shuffle-test",
+        "locations": [
+            {"id":"A","place_id":"a","open_time":"00:00","close_time":"23:59","stay_minutes":0},
+            {"id":"B","place_id":"b","open_time":"00:00","close_time":"23:59","stay_minutes":2},
+            {"id":"C","place_id":"c","open_time":"00:00","close_time":"23:59","stay_minutes":3},
+            {"id":"D","place_id":"d","open_time":"00:00","close_time":"23:59","stay_minutes":4},
+            {"id":"E","place_id":"e","open_time":"00:00","close_time":"23:59","stay_minutes":0}
+        ],
+        "start_time": "09:00"
+    });
+    if let Some(debug) = debug {
+        value["debug"] = debug;
+    }
+    serde_json::from_value(value).unwrap()
+}
+
+fn optimize_debug(request: OptimizeRouteRequest) -> troute::OptimizeRouteResponse {
+    RouteOptimizationService::new(IndexedRoutingProvider, InputOrderSolver)
+        .optimize(request)
+        .unwrap()
+}
+
+#[test]
+fn omitted_or_false_debug_shuffle_preserves_the_solver_result() {
+    let baseline = optimize_debug(debug_request(None));
+    let explicitly_disabled = optimize_debug(debug_request(Some(serde_json::json!({
+        "shuffle_result_route": false,
+        "shuffle_seed": 1_234
+    }))));
+
+    assert_eq!(explicitly_disabled, baseline);
+    assert_eq!(
+        baseline
+            .route
+            .iter()
+            .map(|stop| stop.location_id.as_str())
+            .collect::<Vec<_>>(),
+        vec!["A", "B", "C", "D", "E"]
+    );
+}
+
+#[test]
+fn seeded_debug_shuffle_rebuilds_the_entire_schedule_from_shuffled_legs() {
+    let baseline = optimize_debug(debug_request(None));
+    let request = || {
+        debug_request(Some(serde_json::json!({
+            "shuffle_result_route": true,
+            "shuffle_seed": 1_234
+        })))
+    };
+    let shuffled = optimize_debug(request());
+    let repeated = optimize_debug(request());
+
+    assert_eq!(shuffled, repeated);
+    let ids = shuffled
+        .route
+        .iter()
+        .map(|stop| stop.location_id.as_str())
+        .collect::<Vec<_>>();
+    assert_eq!(ids.first(), Some(&"A"));
+    assert_eq!(ids.last(), Some(&"E"));
+    assert_ne!(shuffled.route, baseline.route);
+    let mut intermediate_ids = ids[1..ids.len() - 1].to_vec();
+    intermediate_ids.sort_unstable();
+    assert_eq!(intermediate_ids, vec!["B", "C", "D"]);
+
+    let index_and_stay = |id: &str| match id {
+        "A" => (0_usize, 0_u32),
+        "B" => (1, 2),
+        "C" => (2, 3),
+        "D" => (3, 4),
+        "E" => (4, 0),
+        unexpected => panic!("unexpected location id: {unexpected}"),
+    };
+    assert_eq!(shuffled.route[0].arrival_time.minutes(), 9 * 60);
+    assert_eq!(shuffled.route[0].departure_time.unwrap().minutes(), 9 * 60);
+
+    let mut expected_total = 0_u32;
+    let mut previous_departure = 9 * 60_u32;
+    for edge in shuffled.route.windows(2) {
+        let (from, _) = index_and_stay(&edge[0].location_id);
+        let (to, stay) = index_and_stay(&edge[1].location_id);
+        let travel = INDEXED_TRAVEL_MINUTES[from][to];
+        expected_total += travel;
+        let expected_arrival = previous_departure + travel;
+        let expected_departure = expected_arrival + stay;
+        assert_eq!(u32::from(edge[1].arrival_time.minutes()), expected_arrival);
+        assert_eq!(
+            u32::from(edge[1].departure_time.unwrap().minutes()),
+            expected_departure
+        );
+        previous_departure = expected_departure;
+    }
+    assert_eq!(shuffled.total_travel_minutes, expected_total);
+    assert_ne!(shuffled.total_travel_minutes, baseline.total_travel_minutes);
+}
+
+#[test]
+fn debug_shuffle_leaves_a_two_location_route_unchanged() {
+    let mut baseline_request = debug_request(None);
+    baseline_request.locations = vec![
+        baseline_request.locations[0].clone(),
+        baseline_request.locations[4].clone(),
+    ];
+    let mut shuffled_request = baseline_request.clone();
+    shuffled_request.debug = serde_json::from_value(serde_json::json!({
+        "shuffle_result_route": true,
+        "shuffle_seed": 1_234
+    }))
+    .unwrap();
+
+    assert_eq!(
+        optimize_debug(shuffled_request),
+        optimize_debug(baseline_request)
+    );
 }

@@ -217,6 +217,23 @@ fn request_with_debug_duration(job_id: &str, duration_ms: u64) -> Value {
     request
 }
 
+fn request_with_debug_shuffle(job_id: &str, duration_ms: u64) -> Value {
+    let mut request = request_with_job_id(job_id);
+    request["locations"] = json!([
+        {"id":"place-1","place_id":"GOOGLE_PLACE_ID_1","open_time":"00:00","close_time":"23:59","stay_minutes":0},
+        {"id":"place-2","place_id":"GOOGLE_PLACE_ID_2","open_time":"00:00","close_time":"23:59","stay_minutes":2},
+        {"id":"place-3","place_id":"GOOGLE_PLACE_ID_3","open_time":"00:00","close_time":"23:59","stay_minutes":3},
+        {"id":"place-4","place_id":"GOOGLE_PLACE_ID_4","open_time":"00:00","close_time":"23:59","stay_minutes":4},
+        {"id":"place-5","place_id":"GOOGLE_PLACE_ID_5","open_time":"00:00","close_time":"23:59","stay_minutes":0}
+    ]);
+    request["debug"] = json!({
+        "min_job_duration_ms": duration_ms,
+        "shuffle_result_route": true,
+        "shuffle_seed": 1_234
+    });
+    request
+}
+
 fn gated_solver() -> GatedSolver {
     GatedSolver {
         started: Arc::new(AtomicUsize::new(0)),
@@ -493,6 +510,76 @@ async fn debug_minimum_duration_spaces_real_stages_persists_request_and_preserve
     assert!(baseline_started.elapsed() < Duration::from_millis(750));
     let baseline = store.get_job("debug-baseline").unwrap().unwrap();
     assert_eq!(paced.result, baseline.result);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn debug_shuffle_combines_with_pacing_and_persists_one_result_for_sse_and_get() {
+    let temporary = TestDirectory::new();
+    let store = Arc::new(FileJobStore::new(&temporary.0).unwrap());
+    let app = http::router_with_storage_and_limit(
+        RouteOptimizationService::new(DevelopmentRoutingProvider, DevelopmentRouteSolver),
+        None,
+        Some(store.clone()),
+        None,
+    );
+    let request = request_with_debug_shuffle("debug-shuffled", 100);
+    let started = std::time::Instant::now();
+
+    let submitted = send_to(
+        app.clone(),
+        Method::POST,
+        "/integration/jobs",
+        Some("application/json"),
+        request.to_string(),
+    )
+    .await;
+    assert_eq!(submitted.status, StatusCode::ACCEPTED);
+
+    let (_, mut body) = open_event_stream(app.clone(), "debug-shuffled").await;
+    let mut buffered = String::new();
+    let completed_snapshot = loop {
+        let message = next_sse_message(&mut body, &mut buffered)
+            .await
+            .expect("debug shuffle job must emit a completed event");
+        if sse_field(&message, "event") == Some("completed") {
+            break sse_data(&message);
+        }
+    };
+    assert!(started.elapsed() >= Duration::from_millis(100));
+
+    let detail = send_to(
+        app,
+        Method::GET,
+        "/integration/jobs/debug-shuffled",
+        None,
+        String::new(),
+    )
+    .await;
+    assert_eq!(detail.status, StatusCode::OK);
+    assert_eq!(detail.body["status"], "completed");
+    assert_eq!(completed_snapshot["result"], detail.body["result"]);
+
+    let persisted_request: Value = serde_json::from_str(
+        &fs::read_to_string(temporary.0.join("jobs/debug-shuffled/request.json")).unwrap(),
+    )
+    .unwrap();
+    assert_eq!(persisted_request, request);
+    let persisted_result: Value = serde_json::from_str(
+        &fs::read_to_string(temporary.0.join("jobs/debug-shuffled/result.json")).unwrap(),
+    )
+    .unwrap();
+    assert_eq!(persisted_result, detail.body["result"]);
+
+    let route = detail.body["result"]["route"].as_array().unwrap();
+    assert_eq!(route.first().unwrap()["location_id"], "place-1");
+    assert_eq!(route.last().unwrap()["location_id"], "place-5");
+    assert_ne!(
+        route[1..4]
+            .iter()
+            .map(|stop| stop["location_id"].as_str().unwrap())
+            .collect::<Vec<_>>(),
+        vec!["place-2", "place-3", "place-4"]
+    );
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

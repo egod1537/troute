@@ -8,6 +8,7 @@ use crate::{
         NoopOptimizationEventReporter, OptimizationErrorCode, OptimizationEventReporter,
         ProgressStage,
     },
+    result_debug::shuffle_solution,
     routing::{RoutingError, RoutingProvider},
     schedule::{calculate_schedule, ScheduleError},
     solver::{RouteSolver, SolverError, SolverInput},
@@ -54,6 +55,12 @@ where
         cancellation: &CancellationToken,
     ) -> Result<OptimizeRouteResponse, OptimizationServiceError> {
         let result = (|| {
+            let shuffle_options = request.debug.as_ref().and_then(|debug| {
+                debug
+                    .shuffle_result_route
+                    .unwrap_or(false)
+                    .then_some(debug.shuffle_seed)
+            });
             let problem = OptimizationProblem::try_from(request)?;
             reporter.progress(
                 ProgressStage::Accepted,
@@ -89,7 +96,15 @@ where
                 Some("Building itinerary schedule."),
             );
             check_cancelled(cancellation)?;
-            let plan = calculate_schedule(&problem, &matrix, &solution)?;
+            let normal_plan = calculate_schedule(&problem, &matrix, &solution)?;
+            check_cancelled(cancellation)?;
+            let plan = match shuffle_options {
+                Some(seed) => {
+                    let shuffled_solution = shuffle_solution(&solution, seed);
+                    calculate_schedule(&problem, &matrix, &shuffled_solution)?
+                }
+                None => normal_plan,
+            };
             check_cancelled(cancellation)?;
             let response = OptimizeRouteResponse::from_plan(plan, &problem);
             check_cancelled(cancellation)?;

@@ -8,6 +8,7 @@ description = "Routing and route optimization engine"
 [dependencies]
 async-stream = "0.3"
 axum = { version = "0.8", default-features = false, features = ["http1", "json", "query", "tokio"] }
+rand = "0.8"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 thiserror = "1"

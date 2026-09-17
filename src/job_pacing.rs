@@ -82,6 +82,8 @@ mod tests {
     async fn cancellation_interrupts_a_debug_wait() {
         let pacer = DebugJobPacer::new(Some(&DebugOptions {
             min_job_duration_ms: Some(60_000),
+            shuffle_result_route: None,
+            shuffle_seed: None,
         }));
         let cancellation = CancellationToken::new();
         let trigger = cancellation.clone();

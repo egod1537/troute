@@ -172,7 +172,9 @@ optional diagnostic setting below:
 ```json
 {
   "debug": {
-    "min_job_duration_ms": 4000
+    "min_job_duration_ms": 4000,
+    "shuffle_result_route": true,
+    "shuffle_seed": 1234
   }
 }
 ```
@@ -184,8 +186,16 @@ toward the minimum. Real progress stages are exposed near 0% (`accepted`), 20%
 persistence waits until 100% only when the actual execution finished sooner.
 Cancellation interrupts these waits immediately. The option is disabled when
 omitted, is retained in `request.json`, applies consistently to successful and
-failed terminal states and the legacy `/optimize` adapter, and never changes
-routing, solver, schedule, or result data.
+failed terminal states and the legacy `/optimize` adapter.
+
+`shuffle_result_route` defaults to `false`. When enabled, troute leaves the
+routing provider and solver untouched, then shuffles only the intermediate
+locations in the solver's completed order. The fixed start and destination are
+preserved, and the route schedule and total travel time are rebuilt from the
+existing travel-time matrix before the result is persisted and returned. Routes
+with fewer than two intermediate locations remain unchanged. `shuffle_seed` is
+an optional `u64`; equal seeds produce equal debug orders, while omitting it uses
+a runtime-random seed. The shuffle and minimum-duration options are independent.
 
 ```sh
 curl -i -X POST http://127.0.0.1:8080/optimize \
