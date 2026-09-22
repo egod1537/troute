@@ -160,7 +160,7 @@ pub struct OptimizationProblem {
 
 impl OptimizationProblem {
     pub(crate) fn new(locations: Vec<Location>, start_time: TimeOfDay) -> Self {
-        debug_assert!(locations.len() >= 2);
+        debug_assert!(!locations.is_empty());
         Self {
             locations,
             start_time,
@@ -184,7 +184,11 @@ impl OptimizationProblem {
     }
 
     pub fn intermediate_locations(&self) -> &[Location] {
-        &self.locations[1..self.locations.len() - 1]
+        if self.locations.len() <= 2 {
+            &[]
+        } else {
+            &self.locations[1..self.locations.len() - 1]
+        }
     }
 
     pub fn start_location_index(&self) -> usize {

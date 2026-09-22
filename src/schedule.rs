@@ -16,9 +16,19 @@ pub fn calculate_schedule(
     matrix: &TravelTimeMatrix,
     solution: &SolverSolution,
 ) -> Result<RoutePlan, ScheduleError> {
+    calculate_schedule_from(problem, matrix, solution, problem.start_time())
+}
+
+/// Expands an order using a solver-selected departure time.
+pub fn calculate_schedule_from(
+    problem: &OptimizationProblem,
+    matrix: &TravelTimeMatrix,
+    solution: &SolverSolution,
+    start_time: crate::domain::TimeOfDay,
+) -> Result<RoutePlan, ScheduleError> {
     validate_solution(problem, matrix, solution)?;
 
-    let mut current_time = problem.start_time();
+    let mut current_time = start_time;
     let mut total_travel_minutes = 0_u32;
     let mut stops = Vec::with_capacity(solution.visit_order.len());
     stops.push(ScheduledStop {
@@ -84,6 +94,12 @@ fn validate_solution(
         || solution.visit_order.last() != Some(&problem.end_location_index())
     {
         return Err(ScheduleError::InvalidVisitOrder);
+    }
+
+    if location_count == 1 {
+        return (solution.visit_order == [0])
+            .then_some(())
+            .ok_or(ScheduleError::InvalidVisitOrder);
     }
 
     let mut seen = vec![false; location_count];

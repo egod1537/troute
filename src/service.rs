@@ -9,8 +9,8 @@ use crate::{
         ProgressStage,
     },
     result_debug::shuffle_solution,
-    routing::{RoutingError, RoutingProvider},
-    schedule::{calculate_schedule, ScheduleError},
+    routing::{RoutingContext, RoutingError, RoutingProvider},
+    schedule::{calculate_schedule_from, ScheduleError},
     solver::{RouteSolver, SolverError, SolverInput},
 };
 
@@ -74,18 +74,35 @@ where
                 Some("Building travel-time matrix."),
             );
             check_cancelled(cancellation)?;
+            let routing_context = RoutingContext {
+                departure_time: Some(chrono::Utc::now()),
+                ..RoutingContext::default()
+            };
             let matrix = self
                 .routing_provider
-                .travel_time_matrix(problem.locations())?;
+                .travel_time_matrix(problem.locations(), &routing_context)?;
             check_cancelled(cancellation)?;
             reporter.progress(ProgressStage::Solving, 60, Some("Optimizing visit order."));
             check_cancelled(cancellation)?;
-            let solution = match self.solver.solve(SolverInput {
+            let solver_result = match self.solver.solve_with_diagnostics(SolverInput {
                 matrix: &matrix,
                 problem: &problem,
                 cancellation,
             }) {
-                Ok(solution) => solution,
+                Ok(result) => result,
+                Err(SolverError::Cancelled) => return Err(OptimizationServiceError::Cancelled),
+                Err(error) => return Err(error.into()),
+            };
+            let solution = solver_result.solution;
+            let selected_start_time = match self.solver.selected_start_time(
+                SolverInput {
+                    matrix: &matrix,
+                    problem: &problem,
+                    cancellation,
+                },
+                &solution,
+            ) {
+                Ok(start_time) => start_time,
                 Err(SolverError::Cancelled) => return Err(OptimizationServiceError::Cancelled),
                 Err(error) => return Err(error.into()),
             };
@@ -96,17 +113,27 @@ where
                 Some("Building itinerary schedule."),
             );
             check_cancelled(cancellation)?;
-            let normal_plan = calculate_schedule(&problem, &matrix, &solution)?;
+            let normal_plan =
+                calculate_schedule_from(&problem, &matrix, &solution, selected_start_time)?;
             check_cancelled(cancellation)?;
             let plan = match shuffle_options {
                 Some(seed) => {
                     let shuffled_solution = shuffle_solution(&solution, seed);
-                    calculate_schedule(&problem, &matrix, &shuffled_solution)?
+                    calculate_schedule_from(
+                        &problem,
+                        &matrix,
+                        &shuffled_solution,
+                        selected_start_time,
+                    )?
                 }
                 None => normal_plan,
             };
             check_cancelled(cancellation)?;
-            let response = OptimizeRouteResponse::from_plan(plan, &problem);
+            let response = OptimizeRouteResponse::from_plan(
+                plan,
+                &problem,
+                solver_result.diagnostics.as_ref(),
+            );
             check_cancelled(cancellation)?;
             reporter.result(&response);
             check_cancelled(cancellation)?;
@@ -196,7 +223,10 @@ mod tests {
         domain::Location,
         events::{OptimizationErrorCode, ProgressStage},
         matrix::TravelTimeMatrix,
-        solver::SolverSolution,
+        solver::{
+            ExactBitDpSolver, SimulatedAnnealingConfig, SolverOrchestrator,
+            SolverOrchestratorConfig, SolverSolution,
+        },
     };
 
     #[derive(Debug, Clone, PartialEq, Eq)]
@@ -243,6 +273,7 @@ mod tests {
         fn travel_time_matrix(
             &self,
             _locations: &[Location],
+            _context: &RoutingContext,
         ) -> Result<TravelTimeMatrix, RoutingError> {
             Err(RoutingError::Provider("provider is offline".to_owned()))
         }
@@ -262,6 +293,7 @@ mod tests {
         fn travel_time_matrix(
             &self,
             _locations: &[Location],
+            _context: &RoutingContext,
         ) -> Result<TravelTimeMatrix, RoutingError> {
             TravelTimeMatrix::new(vec![vec![0]])
                 .map_err(|error| RoutingError::Provider(error.to_string()))
@@ -296,6 +328,45 @@ mod tests {
                 RecordedEvent::Result(response),
             ]
         );
+    }
+
+    #[test]
+    fn exact_solver_start_selection_reaches_the_schedule() {
+        let service =
+            RouteOptimizationService::new(DevelopmentRoutingProvider, ExactBitDpSolver::default());
+        let response = service.optimize(valid_request()).unwrap();
+
+        assert_eq!(
+            response.route[0].departure_time.unwrap().to_string(),
+            "23:30"
+        );
+        assert_eq!(response.route[1].arrival_time.to_string(), "23:45");
+    }
+
+    #[test]
+    fn orchestrator_diagnostics_reach_the_api_response() {
+        let solver = SolverOrchestrator::new(SolverOrchestratorConfig {
+            sa_config: SimulatedAnnealingConfig {
+                iteration_limit: Some(1),
+                ..SimulatedAnnealingConfig::default()
+            },
+            ..SolverOrchestratorConfig::default()
+        })
+        .unwrap();
+        let service = RouteOptimizationService::new(DevelopmentRoutingProvider, solver);
+        let response = service.optimize(valid_request()).unwrap();
+        let candidates = response.solver_candidates.unwrap();
+
+        assert!(candidates
+            .iter()
+            .any(|candidate| candidate.strategy == "exact_bit_dp"));
+        assert_eq!(
+            candidates.iter().filter(|candidate| candidate.best).count(),
+            1
+        );
+        assert!(candidates
+            .iter()
+            .any(|candidate| candidate.strategy.starts_with("sa_greedy_seed_")));
     }
 
     #[test]

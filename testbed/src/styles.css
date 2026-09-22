@@ -212,6 +212,7 @@ body,
 
 .job-summary,
 .route-summary,
+.solver-comparison,
 .raw-response {
   display: flex;
   flex-direction: column;

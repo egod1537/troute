@@ -2,13 +2,14 @@
 name = "troute"
 version = "0.1.0"
 edition = "2021"
-rust-version = "1.80"
+rust-version = "1.87"
 description = "Routing and route optimization engine"
 
 [dependencies]
 async-stream = "0.3"
 axum = { version = "0.8", default-features = false, features = ["http1", "json", "query", "tokio"] }
 rand = "0.8"
+integer-blossom = "=1.2.1"
 chrono = { version = "0.4", default-features = false, features = ["clock"] }
 reqwest = { version = "0.12", default-features = false, features = ["blocking", "json", "rustls-tls"] }
 serde = { version = "1", features = ["derive"] }
@@ -19,3 +20,7 @@ tokio = { version = "1", features = ["macros", "net", "rt-multi-thread", "signal
 [dev-dependencies]
 http-body-util = "0.1"
 tower = { version = "0.5", features = ["util"] }
+
+[[bench]]
+name = "clustered_solver"
+harness = false

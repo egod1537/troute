@@ -8,7 +8,7 @@
 use crate::{
     domain::Location,
     matrix::TravelTimeMatrix,
-    routing::{RoutingError, RoutingProvider},
+    routing::{RoutingContext, RoutingError, RoutingProvider},
     solver::{RouteSolver, SolverError, SolverInput, SolverSolution},
 };
 
@@ -20,7 +20,11 @@ pub const DEVELOPMENT_TRAVEL_MINUTES: u32 = 15;
 pub struct DevelopmentRoutingProvider;
 
 impl RoutingProvider for DevelopmentRoutingProvider {
-    fn travel_time_matrix(&self, locations: &[Location]) -> Result<TravelTimeMatrix, RoutingError> {
+    fn travel_time_matrix(
+        &self,
+        locations: &[Location],
+        _context: &RoutingContext,
+    ) -> Result<TravelTimeMatrix, RoutingError> {
         let rows = (0..locations.len())
             .map(|from| {
                 (0..locations.len())
@@ -93,7 +97,7 @@ mod tests {
     fn routing_provider_builds_the_documented_fixed_matrix() {
         let problem = problem();
         let matrix = DevelopmentRoutingProvider
-            .travel_time_matrix(problem.locations())
+            .travel_time_matrix(problem.locations(), &RoutingContext::default())
             .unwrap();
 
         assert_eq!(matrix.travel_minutes(0, 0), Some(0));
@@ -111,7 +115,7 @@ mod tests {
     fn solver_preserves_the_fixed_start_and_end_locations() {
         let problem = problem();
         let matrix = DevelopmentRoutingProvider
-            .travel_time_matrix(problem.locations())
+            .travel_time_matrix(problem.locations(), &RoutingContext::default())
             .unwrap();
         let solution = DevelopmentRouteSolver
             .solve(SolverInput {

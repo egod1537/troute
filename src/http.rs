@@ -170,6 +170,12 @@ impl ApiError {
                     "Travel-time routing is temporarily unavailable.",
                     reason,
                 ),
+                other => Self::new(
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    "ROUTING_MATRIX_ERROR",
+                    "Travel-time routing returned an invalid matrix.",
+                    other.to_string(),
+                ),
             },
             OptimizationServiceError::Solver(SolverError::NoFeasibleRoute) => Self::new(
                 StatusCode::UNPROCESSABLE_ENTITY,
@@ -1034,7 +1040,7 @@ mod tests {
     use crate::{
         domain::Location,
         matrix::TravelTimeMatrix,
-        routing::{RoutingError, RoutingProvider},
+        routing::{RoutingContext, RoutingError, RoutingProvider},
         solver::{RouteSolver, SolverError, SolverInput, SolverSolution},
     };
     use axum::{body::Body, http::Request};
@@ -1047,6 +1053,7 @@ mod tests {
         fn travel_time_matrix(
             &self,
             _locations: &[Location],
+            _context: &RoutingContext,
         ) -> Result<TravelTimeMatrix, RoutingError> {
             Err(RoutingError::Provider("provider is offline".to_owned()))
         }
@@ -1066,6 +1073,7 @@ mod tests {
         fn travel_time_matrix(
             &self,
             _locations: &[Location],
+            _context: &RoutingContext,
         ) -> Result<TravelTimeMatrix, RoutingError> {
             TravelTimeMatrix::new(vec![vec![0]])
                 .map_err(|error| RoutingError::Provider(error.to_string()))

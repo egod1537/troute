@@ -1,8 +1,9 @@
 //! Core types and interfaces for the troute v0 routing pipeline.
 //!
-//! The binary exposes the v0 pipeline over HTTP. The currently wired routing
-//! provider and solver are deterministic development implementations, kept
-//! separate so production implementations can replace them later.
+//! The binary exposes the v0 pipeline over HTTP. Routing providers build a
+//! directed matrix before exact or heuristic optimization runs. Initial-route
+//! generators, including MST Double-Tree and Christofides, consume that matrix
+//! without doing travel-time acquisition.
 
 pub mod api;
 pub mod cancellation;
@@ -22,7 +23,10 @@ pub mod solver;
 pub mod storage;
 pub mod tcache;
 
-pub use api::{DebugOptions, OptimizeRouteRequest, OptimizeRouteResponse};
+pub use api::{
+    DebugOptions, ObjectiveScoreOutput, OptimizeRouteRequest, OptimizeRouteResponse,
+    SolverCandidateMetadataOutput, SolverCandidateOutput,
+};
 pub use cancellation::CancellationToken;
 pub use events::{OptimizationErrorCode, OptimizationEventReporter, ProgressStage};
 pub use jobs::{JobExecutor, JobRunner};

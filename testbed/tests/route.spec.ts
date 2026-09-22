@@ -17,6 +17,38 @@ const routeResult = {
     { order: 2, location_id: "C", arrival_time: "12:15" },
   ],
   total_travel_minutes: 70,
+  solver_candidates: [
+    {
+      strategy: "exact_bit_dp",
+      best: true,
+      route: ["A", "B", "C"],
+      feasible: true,
+      objective_score: {
+        latest_start: "09:00",
+        finish_time: "12:15",
+        travel_minutes: 70,
+        wait_minutes: 0,
+      },
+      elapsed_ms: 7,
+      metadata: {
+        state_count: 18,
+        frontier_state_count: 8,
+        timed_out: false,
+      },
+    },
+    {
+      strategy: "sa_mst_seed_42",
+      best: false,
+      route: [],
+      feasible: false,
+      elapsed_ms: 30,
+      metadata: {
+        seed: 42,
+        timed_out: true,
+        error: "strategy timed out",
+      },
+    },
+  ],
 };
 
 test.beforeEach(async ({ page }) => {
@@ -111,9 +143,17 @@ test("job is inserted and selected before the request completes, then succeeds",
   await expect(row).toHaveAttribute("data-status", "completed");
   await expect(row).toContainText("완료");
   await expect(page.getByLabel("방문 순서")).toHaveText("A → B → C");
-  await expect(page.getByRole("table")).toContainText("09:25");
+  await expect(page.getByRole("table").first()).toContainText("09:25");
+  await expect(
+    page.getByRole("heading", { name: "Solver 전략 비교" }),
+  ).toBeVisible();
+  const strategyTable = page.getByRole("table").nth(1);
+  await expect(strategyTable).toContainText("exact_bit_dp");
+  await expect(strategyTable).toContainText("Best");
+  await expect(strategyTable).toContainText("sa_mst_seed_42");
+  await expect(strategyTable).toContainText("strategy timed out");
   await expect(page.getByText("총 이동 시간", { exact: true })).toBeVisible();
-  await expect(page.getByText("70분", { exact: true })).toBeVisible();
+  await expect(page.locator(".route-overview strong")).toHaveText("70분");
   await expect(page.getByText("HTTP 200", { exact: true })).toBeVisible();
   await expect(page.getByText(/\d+\.\d ms/)).toBeVisible();
   await expect(page.getByLabel("Raw API 응답")).toContainText(

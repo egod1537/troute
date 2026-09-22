@@ -1,7 +1,7 @@
 use troute::{
     domain::Location,
     matrix::TravelTimeMatrix,
-    routing::{RoutingError, RoutingProvider},
+    routing::{RoutingContext, RoutingError, RoutingProvider},
     solver::{RouteSolver, SolverError, SolverInput, SolverSolution},
     OptimizeRouteRequest, RouteOptimizationService,
 };
@@ -17,7 +17,11 @@ const INDEXED_TRAVEL_MINUTES: [[u32; 5]; 5] = [
 ];
 
 impl RoutingProvider for IndexedRoutingProvider {
-    fn travel_time_matrix(&self, locations: &[Location]) -> Result<TravelTimeMatrix, RoutingError> {
+    fn travel_time_matrix(
+        &self,
+        locations: &[Location],
+        _context: &RoutingContext,
+    ) -> Result<TravelTimeMatrix, RoutingError> {
         let rows = INDEXED_TRAVEL_MINUTES[..locations.len()]
             .iter()
             .map(|row| row[..locations.len()].to_vec())
@@ -42,6 +46,7 @@ impl RoutingProvider for FixedRoutingProvider {
     fn travel_time_matrix(
         &self,
         _locations: &[Location],
+        _context: &RoutingContext,
     ) -> Result<TravelTimeMatrix, RoutingError> {
         TravelTimeMatrix::new(vec![
             vec![0, 30, 25, 40],

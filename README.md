@@ -145,14 +145,22 @@ required; invalid configuration fails application startup.
 | `TCACHE_BASE_URL` | none | tcache server base URL; required for `tcache` |
 | `TCACHE_MATRIX_POLL_INTERVAL_MS` | `250` | positive status polling interval |
 | `TCACHE_MATRIX_TIMEOUT_MS` | `30000` | positive total matrix request timeout |
+| `TROUTE_EXACT_LIMIT` | `15` | maximum location count at which the orchestrator also runs exact bit-DP; 1–15 |
+| `TROUTE_MAX_EXACT_CLUSTER_SIZE` | `10` | requested intermediate locations per exact cluster; 1–15 (internally capped at 13 to reserve entry/exit anchors) |
+| `SOLVER_MAX_CONCURRENCY` | `4` | maximum independently running solver strategies; 1–256 |
+| `SOLVER_STRATEGY_TIMEOUT_MS` | `30000` | positive cooperative timeout for each strategy |
+| `SOLVER_SA_SEEDS` | `42` | comma-separated deterministic seeds; every seed runs Greedy/MST/Christofides/Clustered SA starts |
+| `MATCHING_STRATEGY` | `auto` | Christofides benchmark/debug override: `auto`, `bitdp`, or `blossom` |
+| `MATCHING_BIT_DP_THRESHOLD` | `20` | auto-policy odd-vertex threshold, from 0 through 20 |
 
 The adapter creates `POST /api/route/matrix/jobs`, polls the returned Job,
 fetches `durationSeconds`, validates the location order and matrix shape, and
 converts seconds to whole minutes by rounding up. It attempts the tcache cancel
 endpoint when its total timeout expires. The current troute v0 domain contains
-only a wall-clock `start_time`, not a calendar date or timezone, while the
-existing `RoutingProvider` boundary accepts locations only. Consequently the
-adapter sends the current UTC instant as matrix `departureTime`; adding a
+only a wall-clock `start_time`, not a calendar date or timezone. The
+`RoutingProvider` boundary accepts a `RoutingContext` containing departure
+instant, travel mode, timezone, and extensible routing options. The service
+currently supplies the current UTC instant as matrix `departureTime`; adding a
 dated optimization request can refine this later without exposing tcache HTTP
 details to the solver.
 
@@ -269,7 +277,10 @@ curl -i -X POST http://127.0.0.1:8080/optimize \
   }'
 ```
 
-The current deterministic development implementation returns:
+With the deterministic development matrix, the selected route portion of a
+successful response looks like the following. The default orchestrator also
+adds the `solver_candidates` comparison described below (omitted here for
+brevity):
 
 ```json
 {
@@ -277,20 +288,20 @@ The current deterministic development implementation returns:
     {
       "location_id": "place-1",
       "order": 0,
-      "arrival_time": "09:00",
-      "departure_time": "09:00"
+      "arrival_time": "16:50",
+      "departure_time": "16:50"
     },
     {
       "location_id": "place-2",
       "order": 1,
-      "arrival_time": "09:15",
-      "departure_time": "10:45"
+      "arrival_time": "17:05",
+      "departure_time": "17:50"
     },
     {
       "location_id": "place-3",
       "order": 2,
-      "arrival_time": "11:00",
-      "departure_time": "11:00"
+      "arrival_time": "18:05",
+      "departure_time": "18:05"
     }
   ],
   "total_travel_minutes": 30
@@ -320,17 +331,150 @@ with `NO_FEASIBLE_ROUTE`. A routing-provider outage returns 503. Unexpected
 solver or schedule failures return 500. No permissive browser CORS is enabled;
 the supported integration is server-to-server.
 
-### Current provider and solver status
+### Solver and routing architecture
 
-`DevelopmentRoutingProvider` supplies zero minutes on the matrix diagonal and
-a fixed 15 minutes between every pair of different locations.
-`DevelopmentRouteSolver` preserves the input order, including the fixed first
-and last locations. This behavior is deterministic and exercises the real
-`RouteOptimizationService` and schedule, but it is **not route optimization and
-does not use Google travel data**. The implementations are isolated in
-`src/development.rs` so they can be replaced without changing the HTTP handler
-or wire contract. Schedule infeasibility is returned as an error; the
-placeholders do not alter request semantics or invent a successful route.
+The default server uses `SolverOrchestrator`. It independently runs clustered,
+MST Double-Tree, Christofides, and four SA starts (Greedy, MST, Christofides,
+and clustered) for every request. It also runs `ExactBitDpSolver` when the
+location count is at most `TROUTE_EXACT_LIMIT`. Additional values in
+`SOLVER_SA_SEEDS` multiply the four deterministic SA starts. A bounded worker
+queue enforces `SOLVER_MAX_CONCURRENCY`; per-strategy cooperative cancellation
+enforces `SOLVER_STRATEGY_TIMEOUT_MS`. A failure, panic, unsupported input,
+timeout, or infeasible route becomes that strategy's candidate error and does
+not stop the other strategies.
+
+Every route is converted to the same `SolverCandidate` and evaluated by the
+shared `ObjectiveEvaluator`. `CandidateSelector` ranks feasible routes first,
+then latest start, earliest finish, least directed travel, and least waiting,
+in that order. Registration order is the deterministic final tie-break. If no
+feasible candidate remains, the orchestrator returns `NoFeasibleRoute`.
+Successful API responses include `solver_candidates` with the selected `Best`
+candidate, every individual strategy result, elapsed time, objective fields,
+state/iteration counts, seed, timeout flag, and error. The Testbed renders the
+same comparison table rather than hiding losing or failed strategies.
+
+The exact solver supports at most 15 locations, keeps the first and last
+request locations as fixed endpoints, and reorders every intermediate
+location with bitmask DP. Time is represented in 10-minute slots. Each
+`(visited_mask, last_location)` cell contains a Pareto frontier over time and
+cost; objective scoring and frontier dominance are replaceable policies.
+
+`ClusteredSolver` divides intermediate locations with the replaceable
+`ClusterStrategy`, orders clusters with `ClusterOrderStrategy`, and solves each
+bounded subproblem by reusing `ExactBitDpSolver`. Its exit proxy includes the
+directed cost toward the next cluster when choosing an internal route. The
+merged route is validated end-to-end, then `BoundarySwapLocalImprovement`
+tries cross-cluster boundary swaps and accepts only improvements according to
+the same objective evaluator. The default travel-time clustering and greedy
+cluster ordering can be replaced without changing solver orchestration.
+
+`SimulatedAnnealingSolver` is the alternative large-N heuristic. Its default
+initial-route strategy tries `ClusteredSolver`, MST Double-Tree, directed
+greedy ordering, then a random permutation. Each iteration randomly applies
+swap, relocate, or 2-opt. Feasible routes use the shared objective evaluator;
+infeasible routes remain searchable through configurable lateness,
+day-overflow, and required-location penalties. SA separately retains the best
+feasible route and verifies it with the normal evaluator before returning.
+Temperature, geometric cooling, minimum temperature, iteration/time limits,
+optional random seed, and penalty weights are all represented by
+`SimulatedAnnealingConfig`; no seed is forced by default.
+
+`MstDoubleTreeInitialRoute` is a deterministic, fast baseline and reusable
+`InitialRouteGenerator`. It symmetrizes the directed matrix with the
+replaceable `SymmetricDistanceStrategy` (average by default, with min and max
+strategies also available), builds a deterministic Prim MST, walks every tree
+edge twice, and shortcuts repeated vertices. The final destination is moved to
+the fixed endpoint position required by troute. `GreedyInitialRoute` and
+`ClusteredInitialRoute` implement the same generator interface, and
+`MstClusterOrderStrategy` makes the same approach available as a replaceable
+cluster-order policy.
+
+Symmetric MST weights are never used as the final route score. Generated routes
+are evaluated with the original directed `TravelTimeMatrix`, time windows, and
+stay durations. An infeasible generated route may seed SA's penalty search, but
+it is not a valid standalone result. The familiar Double-Tree 2-approximation
+guarantee applies only to ordinary symmetric metric TSP instances satisfying
+the triangle inequality. It is **not** claimed for troute's directed,
+fixed-endpoint, time-window, and stay-time problem.
+
+`ChristofidesInitialRoute` reuses the same symmetric-distance and MST boundary,
+then extracts the MST's odd-degree vertices and injects a
+`PerfectMatchingStrategy`. `BitDpPerfectMatching` computes exact MWPM with
+`dp[matched_mask]` up to 20 odd vertices. `BlossomPerfectMatching` adapts the
+exact, deterministic `integer-blossom` solver for larger sets. The default
+`AutoPerfectMatching` chooses bit-DP at or below the configurable threshold
+(20 by default) and Blossom above it. `MatchingStrategyConfig` can force either
+strategy; a forced strategy's failure is returned explicitly and never causes
+a silent greedy fallback.
+
+The Blossom dependency is pinned to `integer-blossom` 1.2.1. It exposes
+minimum-weight perfect matching for complete general graphs with integer
+weights, uses an O(V³) primal-dual Blossom implementation, has no transitive
+dependencies, and is MIT licensed. Its upstream tests compare against a
+brute-force oracle and metamorphic properties. The crate was initially released
+in July 2026 and follows semantic versioning, but remains a young dependency;
+pinning and the Bit-DP cross-check tests keep upgrades explicit. Its Rust 1.87
+MSRV raises troute's declared MSRV to 1.87.
+
+After matching, Christofides combines the matching with the MST, runs a
+deterministic Eulerian multigraph traversal, and shortcuts repeated vertices.
+Like the Double-Tree generator, the resulting route is evaluated only with the
+original directed matrix and shared schedule/objective evaluator; it can also
+be supplied directly as the SA initializer.
+
+Christofides' 1.5-approximation guarantee applies only to the ordinary
+symmetric metric TSP with triangle inequality. No 1.5 guarantee is claimed for
+troute's directed, fixed-endpoint, time-window, or stay-time model.
+
+Routing and optimization have a strict matrix boundary:
+
+```text
+OptimizeRouteRequest
+  -> OptimizationProblem
+  -> RoutingProvider + RoutingContext
+  -> TravelTimeMatrix
+  -> SolverOrchestrator
+       -> ExactBitDpSolver (small N)
+       -> ClusteredSolver -> ExactBitDpSolver per cluster
+       -> MST Double-Tree / Christofides candidates
+       -> SimulatedAnnealingSolver multi-start
+            -> Clustered / Christofides / MST Double-Tree / Greedy seeds
+       -> ObjectiveEvaluator -> CandidateSelector -> Best Route
+  -> Schedule
+  -> OptimizeRouteResponse
+```
+
+The solver only reads `OptimizationProblem` and `TravelTimeMatrix`; it does not
+call HTTP, tcache, caches, Google APIs, or place-ID lookup code.
+`DevelopmentRoutingProvider` returns a deterministic fixed matrix,
+`StaticMatrixRoutingProvider` returns a caller-supplied matrix, and
+`TcacheRoutingProvider` uses tcache's native matrix job API. Providers which
+only support directed pair lookups can implement `TravelTimeProvider` and use
+`PairwiseMatrixRoutingProvider` to build the complete matrix. This leaves both
+pair-query and native matrix-query strategies interchangeable without solver
+changes.
+
+`DevelopmentRouteSolver` remains available for tests and development flows
+which intentionally preserve input order, but it is no longer the default
+server solver.
+
+Compare exact and clustered quality and work counters on the same small
+problem with:
+
+```sh
+cargo bench --bench clustered_solver
+```
+
+The benchmark compares Bit-DP and Blossom MWPM cost and runtime on the same
+small odd set, also runs Blossom on a large odd set, and reports strategy-owned
+memory estimates (the Blossom figure is its flattened input buffer and excludes
+the crate's reused O(n²) thread-local pool). It then compares greedy, MST
+Double-Tree, bit-DP/Blossom/auto Christofides, clustered, exact, and simulated
+annealing. Initial score and feasibility, elapsed time, score after SA,
+objective gaps, cluster/state/frontier counts, and move counters are printed.
+It also prints every orchestrator candidate, the `Best` marker, seed, failure,
+and total wall-clock time for both small and large inputs.
+Set `MATCHING_STRATEGY` to force the configured Christofides benchmark row.
 
 ### One-way Job API integration
 

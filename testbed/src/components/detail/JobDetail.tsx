@@ -146,6 +146,90 @@ export function JobDetail({
           </section>
         )}
 
+        {job.route?.solver_candidates && (
+          <section
+            className="solver-comparison"
+            aria-labelledby="solver-comparison-title"
+          >
+            <h2 id="solver-comparison-title" className={Classes.HEADING}>
+              Solver 전략 비교
+            </h2>
+            <div className="table-scroll">
+              <table
+                className={`${Classes.HTML_TABLE} ${Classes.HTML_TABLE_BORDERED} ${Classes.HTML_TABLE_STRIPED}`}
+              >
+                <thead>
+                  <tr>
+                    <th>Strategy</th>
+                    <th>Feasible</th>
+                    <th>Latest Start</th>
+                    <th>Finish</th>
+                    <th>Travel</th>
+                    <th>Wait</th>
+                    <th>Elapsed</th>
+                    <th>Metadata</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {job.route.solver_candidates.map((candidate) => {
+                    const metadata = [
+                      candidate.metadata.state_count !== undefined &&
+                        `states ${candidate.metadata.state_count}`,
+                      candidate.metadata.frontier_state_count !== undefined &&
+                        `frontier ${candidate.metadata.frontier_state_count}`,
+                      candidate.metadata.cluster_count !== undefined &&
+                        `clusters ${candidate.metadata.cluster_count}`,
+                      candidate.metadata.iteration_count !== undefined &&
+                        `iterations ${candidate.metadata.iteration_count}`,
+                      candidate.metadata.accepted_moves !== undefined &&
+                        `accepted ${candidate.metadata.accepted_moves}`,
+                      candidate.metadata.improved_moves !== undefined &&
+                        `improved ${candidate.metadata.improved_moves}`,
+                      candidate.metadata.seed !== undefined &&
+                        `seed ${candidate.metadata.seed}`,
+                      candidate.metadata.timed_out && "timeout",
+                      candidate.metadata.error,
+                    ].filter(Boolean);
+                    return (
+                      <tr key={candidate.strategy}>
+                        <td>
+                          <span>{candidate.strategy}</span>{" "}
+                          {candidate.best && (
+                            <Tag intent={Intent.PRIMARY} minimal>
+                              Best
+                            </Tag>
+                          )}
+                        </td>
+                        <td>{candidate.feasible ? "Yes" : "No"}</td>
+                        <td>
+                          {candidate.objective_score?.latest_start ?? "—"}
+                        </td>
+                        <td>
+                          {candidate.objective_score?.finish_time ?? "—"}
+                        </td>
+                        <td>
+                          {candidate.objective_score
+                            ? `${candidate.objective_score.travel_minutes}분`
+                            : "—"}
+                        </td>
+                        <td>
+                          {candidate.objective_score
+                            ? `${candidate.objective_score.wait_minutes}분`
+                            : "—"}
+                        </td>
+                        <td>{candidate.elapsed_ms} ms</td>
+                        <td title={candidate.route.join(" → ") || undefined}>
+                          {metadata.join(", ") || "—"}
+                        </td>
+                      </tr>
+                    );
+                  })}
+                </tbody>
+              </table>
+            </div>
+          </section>
+        )}
+
         <section className="raw-response" aria-labelledby="raw-title">
           <div className="raw-heading">
             <h2 id="raw-title" className={Classes.HEADING}>

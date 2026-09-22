@@ -7,6 +7,9 @@ use crate::domain::{
     DomainError, Location, OptimizationProblem, RoutePlan, RoutingReference, TimeOfDay, TimeWindow,
 };
 use crate::events::{validate_job_id, JobIdError};
+use crate::solver::{
+    SolverCandidate, SolverCandidateMetadata, SolverDiagnostics, TIME_SLOT_MINUTES,
+};
 
 const MAX_LOCATIONS: usize = 500;
 const MAX_STRING_CHARACTERS: usize = 512;
@@ -47,6 +50,49 @@ pub struct LocationInput {
 pub struct OptimizeRouteResponse {
     pub route: Vec<RouteStopOutput>,
     pub total_travel_minutes: u32,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub solver_candidates: Option<Vec<SolverCandidateOutput>>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
+pub struct SolverCandidateOutput {
+    pub strategy: String,
+    pub best: bool,
+    pub route: Vec<String>,
+    pub feasible: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub objective_score: Option<ObjectiveScoreOutput>,
+    pub elapsed_ms: u64,
+    pub metadata: SolverCandidateMetadataOutput,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize)]
+pub struct ObjectiveScoreOutput {
+    pub latest_start: TimeOfDay,
+    pub finish_time: TimeOfDay,
+    pub travel_minutes: u32,
+    pub wait_minutes: u32,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
+pub struct SolverCandidateMetadataOutput {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub state_count: Option<usize>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub frontier_state_count: Option<usize>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub cluster_count: Option<usize>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub iteration_count: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub accepted_moves: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub improved_moves: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub seed: Option<u64>,
+    pub timed_out: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
@@ -134,7 +180,11 @@ impl TryFrom<OptimizeRouteRequest> for OptimizationProblem {
 }
 
 impl OptimizeRouteResponse {
-    pub(crate) fn from_plan(plan: RoutePlan, problem: &OptimizationProblem) -> Self {
+    pub(crate) fn from_plan(
+        plan: RoutePlan,
+        problem: &OptimizationProblem,
+        diagnostics: Option<&SolverDiagnostics>,
+    ) -> Self {
         let route = plan
             .stops
             .into_iter()
@@ -150,6 +200,84 @@ impl OptimizeRouteResponse {
         Self {
             route,
             total_travel_minutes: plan.total_travel_minutes,
+            solver_candidates: diagnostics.map(|diagnostics| {
+                diagnostics
+                    .candidates
+                    .iter()
+                    .map(|candidate| {
+                        SolverCandidateOutput::from_candidate(
+                            candidate,
+                            candidate.strategy == diagnostics.selected_strategy,
+                            problem,
+                        )
+                    })
+                    .collect()
+            }),
+        }
+    }
+}
+
+impl SolverCandidateOutput {
+    fn from_candidate(
+        candidate: &SolverCandidate,
+        best: bool,
+        problem: &OptimizationProblem,
+    ) -> Self {
+        let route = candidate
+            .route
+            .as_ref()
+            .map(|solution| {
+                solution
+                    .visit_order
+                    .iter()
+                    .map(|&index| {
+                        problem
+                            .locations()
+                            .get(index)
+                            .map(|location| location.id().to_owned())
+                            .unwrap_or_else(|| format!("#{index}"))
+                    })
+                    .collect()
+            })
+            .unwrap_or_default();
+        let objective_score = candidate.objective_score.and_then(|score| {
+            Some(ObjectiveScoreOutput {
+                latest_start: TimeOfDay::from_minutes(
+                    score.start_time_slot * TIME_SLOT_MINUTES as u16,
+                )
+                .ok()?,
+                finish_time: TimeOfDay::from_minutes(
+                    score.finish_time_slot * TIME_SLOT_MINUTES as u16,
+                )
+                .ok()?,
+                travel_minutes: score.travel_minutes,
+                wait_minutes: score.wait_minutes,
+            })
+        });
+        Self {
+            strategy: candidate.strategy.clone(),
+            best,
+            route,
+            feasible: candidate.feasible,
+            objective_score,
+            elapsed_ms: u64::try_from(candidate.elapsed.as_millis()).unwrap_or(u64::MAX),
+            metadata: SolverCandidateMetadataOutput::from(&candidate.metadata),
+        }
+    }
+}
+
+impl From<&SolverCandidateMetadata> for SolverCandidateMetadataOutput {
+    fn from(metadata: &SolverCandidateMetadata) -> Self {
+        Self {
+            state_count: metadata.state_count,
+            frontier_state_count: metadata.frontier_state_count,
+            cluster_count: metadata.cluster_count,
+            iteration_count: metadata.iteration_count,
+            accepted_moves: metadata.accepted_moves,
+            improved_moves: metadata.improved_moves,
+            seed: metadata.seed,
+            timed_out: metadata.timed_out,
+            error: metadata.error.clone(),
         }
     }
 }
@@ -186,7 +314,16 @@ pub enum RequestValidationError {
 
 #[cfg(test)]
 mod tests {
+    use std::time::Duration;
+
     use super::*;
+    use crate::{
+        domain::ScheduledStop,
+        solver::{
+            SolutionMetrics, SolverCandidate, SolverCandidateMetadata, SolverDiagnostics,
+            SolverSolution,
+        },
+    };
     use serde_json::json;
 
     fn request_with_locations(location_ids: &[&str]) -> OptimizeRouteRequest {
@@ -237,6 +374,63 @@ mod tests {
             error,
             RequestValidationError::DuplicateLocationId(id) if id == "A"
         ));
+    }
+
+    #[test]
+    fn response_exposes_ranked_solver_candidates_and_best_marker() {
+        let problem = OptimizationProblem::try_from(request_with_locations(&["A", "B"])).unwrap();
+        let diagnostics = SolverDiagnostics {
+            selected_strategy: "exact_bit_dp".to_owned(),
+            candidates: vec![SolverCandidate {
+                strategy: "exact_bit_dp".to_owned(),
+                route: Some(SolverSolution {
+                    visit_order: vec![0, 1],
+                }),
+                feasible: true,
+                objective_score: Some(SolutionMetrics {
+                    start_time_slot: 60,
+                    finish_time_slot: 61,
+                    travel_minutes: 10,
+                    wait_minutes: 0,
+                    score: 10,
+                }),
+                elapsed: Duration::from_millis(7),
+                metadata: SolverCandidateMetadata {
+                    state_count: Some(2),
+                    ..SolverCandidateMetadata::default()
+                },
+            }],
+        };
+        let response = OptimizeRouteResponse::from_plan(
+            RoutePlan {
+                stops: vec![
+                    ScheduledStop {
+                        location_index: 0,
+                        arrival_time: TimeOfDay::from_minutes(600).unwrap(),
+                        departure_time: Some(TimeOfDay::from_minutes(600).unwrap()),
+                    },
+                    ScheduledStop {
+                        location_index: 1,
+                        arrival_time: TimeOfDay::from_minutes(610).unwrap(),
+                        departure_time: None,
+                    },
+                ],
+                total_travel_minutes: 10,
+            },
+            &problem,
+            Some(&diagnostics),
+        );
+
+        let candidate = &response.solver_candidates.unwrap()[0];
+        assert!(candidate.best);
+        assert!(candidate.feasible);
+        assert_eq!(candidate.route, ["A", "B"]);
+        assert_eq!(candidate.elapsed_ms, 7);
+        assert_eq!(
+            candidate.objective_score.unwrap().latest_start.to_string(),
+            "10:00"
+        );
+        assert_eq!(candidate.metadata.state_count, Some(2));
     }
 
     #[test]

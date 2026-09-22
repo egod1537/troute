@@ -27,6 +27,32 @@ export interface RouteResponse {
     departure_time?: string;
   }[];
   total_travel_minutes: number;
+  solver_candidates?: SolverCandidate[];
+}
+
+export interface SolverCandidate {
+  strategy: string;
+  best: boolean;
+  route: string[];
+  feasible: boolean;
+  objective_score?: {
+    latest_start: string;
+    finish_time: string;
+    travel_minutes: number;
+    wait_minutes: number;
+  };
+  elapsed_ms: number;
+  metadata: {
+    state_count?: number;
+    frontier_state_count?: number;
+    cluster_count?: number;
+    iteration_count?: number;
+    accepted_moves?: number;
+    improved_moves?: number;
+    seed?: number;
+    timed_out: boolean;
+    error?: string;
+  };
 }
 
 export type StoredJobStatus =
@@ -197,6 +223,26 @@ export function parseRoute(response: ApiResponse): RouteResponse {
   ) {
     throw new ApiError(
       "경로 응답 형식 오류: route 항목과 total_travel_minutes가 필요합니다.",
+      response,
+    );
+  }
+  if (
+    data.solver_candidates !== undefined &&
+    (!Array.isArray(data.solver_candidates) ||
+      !data.solver_candidates.every(
+        (candidate) =>
+          object(candidate) &&
+          nonempty(candidate.strategy) &&
+          typeof candidate.best === "boolean" &&
+          Array.isArray(candidate.route) &&
+          candidate.route.every(nonempty) &&
+          typeof candidate.feasible === "boolean" &&
+          unsigned(candidate.elapsed_ms) &&
+          object(candidate.metadata),
+      ))
+  ) {
+    throw new ApiError(
+      "경로 응답 형식 오류: solver_candidates 항목이 올바르지 않습니다.",
       response,
     );
   }

@@ -15,12 +15,11 @@ use serde::{de::DeserializeOwned, Deserialize, Serialize};
 use crate::{
     domain::{Location, RoutingReference},
     matrix::TravelTimeMatrix,
-    routing::{RoutingError, RoutingProvider},
+    routing::{RoutingContext, RoutingError, RoutingProvider},
 };
 
 const DEFAULT_POLL_INTERVAL_MS: u64 = 250;
 const DEFAULT_TIMEOUT_MS: u64 = 30_000;
-const MATRIX_MODE: &str = "TRANSIT";
 const MAX_ERROR_BODY_CHARACTERS: usize = 2_048;
 
 #[derive(Debug, Clone)]
@@ -121,13 +120,20 @@ impl TcacheRoutingProvider {
 }
 
 impl RoutingProvider for TcacheRoutingProvider {
-    fn travel_time_matrix(&self, locations: &[Location]) -> Result<TravelTimeMatrix, RoutingError> {
+    fn travel_time_matrix(
+        &self,
+        locations: &[Location],
+        context: &RoutingContext,
+    ) -> Result<TravelTimeMatrix, RoutingError> {
         let deadline = Instant::now() + self.config.timeout;
         let endpoint = self.endpoint("api/route/matrix/jobs")?;
         let request = MatrixRequest {
             locations: locations.iter().map(MatrixLocation::from).collect(),
-            mode: MATRIX_MODE,
-            departure_time: Utc::now().to_rfc3339_opts(SecondsFormat::Secs, true),
+            mode: context.travel_mode.as_provider_value(),
+            departure_time: context
+                .departure_time
+                .unwrap_or_else(Utc::now)
+                .to_rfc3339_opts(SecondsFormat::Secs, true),
         };
         let created: CreateJobResponse = self.request_json(
             self.client.post(endpoint.clone()).json(&request),
@@ -390,6 +396,8 @@ mod tests {
     use super::*;
     use crate::domain::{TimeOfDay, TimeWindow};
 
+    static TCACHE_TEST_LOCK: Mutex<()> = Mutex::new(());
+
     struct ResponseSpec {
         status: u16,
         body: &'static str,
@@ -400,6 +408,7 @@ mod tests {
         base_url: Url,
         requests: Arc<Mutex<Vec<String>>>,
         stop: Arc<AtomicBool>,
+        _listener_guard: TcpListener,
         thread: Option<std::thread::JoinHandle<()>>,
     }
 
@@ -408,6 +417,10 @@ mod tests {
             let listener = TcpListener::bind("127.0.0.1:0").unwrap();
             listener.set_nonblocking(true).unwrap();
             let address = listener.local_addr().unwrap();
+            // Keep the port bound until MockServer::drop. Otherwise the worker
+            // can finish first and a concurrent test may reuse the port before
+            // the wake-up connection in drop runs.
+            let listener_guard = listener.try_clone().unwrap();
             let requests = Arc::new(Mutex::new(Vec::new()));
             let captured = Arc::clone(&requests);
             let stop = Arc::new(AtomicBool::new(false));
@@ -416,39 +429,51 @@ mod tests {
                 let mut responses = responses.into_iter();
                 while !stopped.load(Ordering::Relaxed) {
                     let Some(spec) = responses.next() else { break };
-                    let (mut stream, _) = loop {
-                        match listener.accept() {
-                            Ok(connection) => break connection,
-                            Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
-                                if stopped.load(Ordering::Relaxed) {
-                                    return;
+                    let (mut stream, request) = loop {
+                        let (mut stream, _) = loop {
+                            match listener.accept() {
+                                Ok(connection) => break connection,
+                                Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                                    if stopped.load(Ordering::Relaxed) {
+                                        return;
+                                    }
+                                    std::thread::sleep(Duration::from_millis(1));
                                 }
-                                std::thread::sleep(Duration::from_millis(1));
+                                Err(error) => panic!("mock server accept failed: {error}"),
                             }
-                            Err(error) => panic!("mock server accept failed: {error}"),
+                        };
+                        stream
+                            .set_read_timeout(Some(Duration::from_secs(1)))
+                            .unwrap();
+                        let request = read_request(&mut stream);
+                        if !request.is_empty() {
+                            break (stream, request);
                         }
                     };
-                    stream
-                        .set_read_timeout(Some(Duration::from_secs(1)))
-                        .unwrap();
-                    let request = read_request(&mut stream);
                     captured.lock().unwrap().push(request);
                     std::thread::sleep(spec.delay);
                     let reason = if spec.status >= 400 { "Error" } else { "OK" };
                     let response = format!(
-                        "HTTP/1.1 {} {}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                        "HTTP/1.0 {} {}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
                         spec.status,
                         reason,
                         spec.body.len(),
                         spec.body
                     );
-                    let _ = stream.write_all(response.as_bytes());
+                    stream
+                        .write_all(response.as_bytes())
+                        .expect("mock server response write failed");
+                    stream.flush().unwrap();
+                    stream.shutdown(std::net::Shutdown::Write).unwrap();
+                    let mut drain = [0_u8; 256];
+                    while stream.read(&mut drain).unwrap_or(0) > 0 {}
                 }
             });
             Self {
                 base_url: Url::parse(&format!("http://{address}/")).unwrap(),
                 requests,
                 stop,
+                _listener_guard: listener_guard,
                 thread: Some(thread),
             }
         }
@@ -509,7 +534,7 @@ mod tests {
     fn provider(server: &MockServer, timeout: Duration) -> TcacheRoutingProvider {
         TcacheRoutingProvider::new(TcacheRoutingConfig {
             base_url: server.base_url.clone(),
-            poll_interval: Duration::from_millis(1),
+            poll_interval: Duration::from_millis(10),
             timeout,
         })
         .unwrap()
@@ -536,6 +561,9 @@ mod tests {
 
     #[test]
     fn creates_polls_and_decodes_a_matrix_in_request_order() {
+        let _guard = TCACHE_TEST_LOCK
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
         let server = MockServer::start(vec![
             spec(202, r#"{"jobId":"matrix-1","status":"queued"}"#),
             spec(200, r#"{"status":"queued"}"#),
@@ -547,19 +575,27 @@ mod tests {
             ),
         ]);
         let matrix = provider(&server, Duration::from_secs(1))
-            .travel_time_matrix(&locations())
+            .travel_time_matrix(&locations(), &RoutingContext::default())
             .unwrap();
         assert_eq!(matrix.travel_minutes(0, 1), Some(2));
         assert_eq!(matrix.travel_minutes(1, 0), Some(2));
         let requests = server.requests.lock().unwrap();
-        assert!(requests[0].starts_with("POST /api/route/matrix/jobs "));
+        assert!(
+            requests[0].starts_with("POST /api/route/matrix/jobs "),
+            "{}",
+            requests[0]
+        );
         assert!(requests[0].contains(r#""id":"A","placeId":"place-A""#));
         assert!(requests[0].contains(r#""id":"B","placeId":"place-B""#));
+        assert!(requests[0].contains(r#""mode":"TRANSIT""#));
         assert!(requests[4].starts_with("GET /api/route/matrix/jobs/matrix-1/result "));
     }
 
     #[test]
     fn maps_failed_and_cancelled_jobs_to_routing_errors() {
+        let _guard = TCACHE_TEST_LOCK
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
         for (status, code) in [
             ("failed", "PAIR_ROUTE_FAILED"),
             ("cancelled", "JOB_CANCELLED"),
@@ -573,17 +609,23 @@ mod tests {
                 spec(200, leaked),
             ]);
             let error = provider(&server, Duration::from_secs(1))
-                .travel_time_matrix(&locations())
+                .travel_time_matrix(&locations(), &RoutingContext::default())
                 .unwrap_err();
-            assert!(error.to_string().contains(code));
+            assert!(
+                error.to_string().contains(code),
+                "expected {code} in {error}"
+            );
         }
     }
 
     #[test]
     fn reports_malformed_and_non_success_responses() {
+        let _guard = TCACHE_TEST_LOCK
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
         let malformed = MockServer::start(vec![spec(202, "not-json")]);
         let error = provider(&malformed, Duration::from_secs(1))
-            .travel_time_matrix(&locations())
+            .travel_time_matrix(&locations(), &RoutingContext::default())
             .unwrap_err();
         assert!(error.to_string().contains("cannot decode tcache JSON"));
 
@@ -592,7 +634,7 @@ mod tests {
             r#"{"error":{"code":"PROVIDER_ERROR","message":"offline"}}"#,
         )]);
         let error = provider(&unavailable, Duration::from_secs(1))
-            .travel_time_matrix(&locations())
+            .travel_time_matrix(&locations(), &RoutingContext::default())
             .unwrap_err();
         assert!(error.to_string().contains("HTTP 503"));
         assert!(error.to_string().contains("PROVIDER_ERROR"));
@@ -600,6 +642,9 @@ mod tests {
 
     #[test]
     fn rejects_location_order_and_matrix_validation_failures() {
+        let _guard = TCACHE_TEST_LOCK
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
         for result in [
             r#"{"jobId":"matrix-3","locations":[{"id":"B"},{"id":"A"}],"durationSeconds":[[0,60],[60,0]]}"#,
             r#"{"jobId":"matrix-3","locations":[{"id":"A"},{"id":"B"}],"durationSeconds":[[0],[60,0]]}"#,
@@ -611,7 +656,7 @@ mod tests {
                 spec(200, result),
             ]);
             let error = provider(&server, Duration::from_secs(1))
-                .travel_time_matrix(&locations())
+                .travel_time_matrix(&locations(), &RoutingContext::default())
                 .unwrap_err();
             assert!(error.to_string().contains("invalid tcache matrix result"));
         }
@@ -619,6 +664,9 @@ mod tests {
 
     #[test]
     fn times_out_and_attempts_to_cancel_the_tcache_job() {
+        let _guard = TCACHE_TEST_LOCK
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
         let server = MockServer::start(vec![
             spec(202, r#"{"jobId":"matrix-timeout"}"#),
             ResponseSpec {
@@ -629,7 +677,7 @@ mod tests {
             spec(200, r#"{"jobId":"matrix-timeout","status":"cancelled"}"#),
         ]);
         let error = provider(&server, Duration::from_millis(30))
-            .travel_time_matrix(&locations())
+            .travel_time_matrix(&locations(), &RoutingContext::default())
             .unwrap_err();
         assert!(error.to_string().contains("timed out"));
         std::thread::sleep(Duration::from_millis(100));
