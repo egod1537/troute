@@ -8,7 +8,9 @@ use troute::{
     development::{DevelopmentRouteSolver, DevelopmentRoutingProvider},
     http,
     observation::JobObservationRecorder,
+    routing::RoutingProvider,
     storage::{FileJobStore, FileJobTimelineStore, JobStore},
+    tcache::{TcacheRoutingConfig, TcacheRoutingProvider},
     RouteOptimizationService,
 };
 
@@ -38,6 +40,22 @@ async fn run() -> Result<(), Box<dyn Error>> {
         Err(env::VarError::NotPresent) => PathBuf::from(".local/troute"),
         Err(error) => return Err(error.into()),
     };
+    let routing_provider: Box<dyn RoutingProvider + Send + Sync> =
+        match env::var("ROUTING_PROVIDER") {
+            Ok(value) if value == "development" => Box::new(DevelopmentRoutingProvider),
+            Err(env::VarError::NotPresent) => Box::new(DevelopmentRoutingProvider),
+            Ok(value) if value == "tcache" => Box::new(TcacheRoutingProvider::new(
+                TcacheRoutingConfig::from_env()
+                    .map_err(|error| format!("invalid tcache configuration: {error}"))?,
+            )?),
+            Ok(value) => {
+                return Err(format!(
+                    "ROUTING_PROVIDER must be development or tcache (actual {value})"
+                )
+                .into())
+            }
+            Err(error) => return Err(error.into()),
+        };
     let job_store = Arc::new(FileJobStore::new(&data_dir)?);
     let recovered_jobs = job_store.recover_interrupted()?;
     let observation = JobObservationRecorder::new(Arc::new(FileJobTimelineStore::new(&data_dir)?));
@@ -46,8 +64,7 @@ async fn run() -> Result<(), Box<dyn Error>> {
     println!("Local job data directory: {}", data_dir.display());
     println!("Recovered interrupted jobs: {recovered_jobs}");
     let listener = TcpListener::bind(address).await?;
-    let optimizer =
-        RouteOptimizationService::new(DevelopmentRoutingProvider, DevelopmentRouteSolver);
+    let optimizer = RouteOptimizationService::new(routing_provider, DevelopmentRouteSolver);
     let app = http::router_with_storage(optimizer, Some(observation), Some(job_store));
 
     println!("troute server listening on http://{address}");

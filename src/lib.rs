@@ -20,6 +20,7 @@ pub mod schedule;
 pub mod service;
 pub mod solver;
 pub mod storage;
+pub mod tcache;
 
 pub use api::{DebugOptions, OptimizeRouteRequest, OptimizeRouteResponse};
 pub use cancellation::CancellationToken;

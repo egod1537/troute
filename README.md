@@ -44,7 +44,7 @@ troute
    +-- HTTP health endpoint
    +-- HTTP optimize endpoint
    +-- API types
-   +-- Routing Provider
+   +-- Routing Provider (development or tcache adapter)
    +-- Travel Time Matrix
    +-- Route Solver
    +-- Schedule Calculation
@@ -56,8 +56,9 @@ The component interfaces and v0 data flow are defined. The HTTP server exposes
 execute the provider -> solver -> schedule service pipeline and persist
 progress, result, error, cancellation, and observation data locally. The
 currently wired provider and solver are
-deterministic development placeholders; real travel-time lookup, actual
-optimization, Google Maps integration, and caching are not implemented.
+deterministic development provider or a tcache-backed Travel Time Matrix
+provider. Provider-specific route lookup, caching, and Google credentials stay
+inside tcache; the solver and scheduling layers only receive a matrix.
 Trasolve calls troute in one direction only. troute neither requires a Trasolve
 address nor sends callbacks to it. The separate developer testbed uses its own
 same-origin API proxy.
@@ -81,7 +82,7 @@ same-origin API proxy.
 - [x] `POST /optimize` HTTP integration contract
 - [x] Asynchronous Job submission, polling, and cancellation
 - [x] Developer testbed with health checks, input editor, and request timing
-- [ ] Distance matrix generation
+- [x] tcache Travel Time Matrix integration
 - [ ] Simple greedy route solver
 - [ ] 2-opt or similar local optimization
 - [ ] External routing data integration
@@ -130,6 +131,45 @@ when it is unset, submitted jobs run without a semaphore limit.
 troute starts without any Trasolve-specific environment variable. Consumers
 configure troute's base URL on their side and poll the Job APIs for progress and
 terminal results.
+
+## Routing provider configuration
+
+`ROUTING_PROVIDER=development` is the default and retains the deterministic
+15-minute development matrix. Set `ROUTING_PROVIDER=tcache` to create one
+matrix Job in tcache for each optimization request. `TCACHE_BASE_URL` is then
+required; invalid configuration fails application startup.
+
+| Variable | Default | Description |
+| --- | --- | --- |
+| `ROUTING_PROVIDER` | `development` | `development` or `tcache` |
+| `TCACHE_BASE_URL` | none | tcache server base URL; required for `tcache` |
+| `TCACHE_MATRIX_POLL_INTERVAL_MS` | `250` | positive status polling interval |
+| `TCACHE_MATRIX_TIMEOUT_MS` | `30000` | positive total matrix request timeout |
+
+The adapter creates `POST /api/route/matrix/jobs`, polls the returned Job,
+fetches `durationSeconds`, validates the location order and matrix shape, and
+converts seconds to whole minutes by rounding up. It attempts the tcache cancel
+endpoint when its total timeout expires. The current troute v0 domain contains
+only a wall-clock `start_time`, not a calendar date or timezone, while the
+existing `RoutingProvider` boundary accepts locations only. Consequently the
+adapter sends the current UTC instant as matrix `departureTime`; adding a
+dated optimization request can refine this later without exposing tcache HTTP
+details to the solver.
+
+### Real Place ID test fixtures
+
+Tokyo and Seoul 3/5/10-place datasets live in
+`tests/fixtures/places`. They are used as offline input by the Rust tests and
+generate the Place ID presets shown by the tcache Matrix Testbed. The normal
+test suite never calls Google. Validate fixtures with:
+
+```sh
+./scripts/verify_place_fixtures.sh
+```
+
+The live tcache/Google check is an ignored test and must be opted into with
+`RUN_REAL_ROUTE_TESTS=1`. Collection provenance, generation commands, and the
+update policy are documented in `tests/fixtures/places/README.md`.
 
 ## HTTP API
 

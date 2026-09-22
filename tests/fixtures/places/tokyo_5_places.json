@@ -1,0 +1,55 @@
+{
+  "name": "Tokyo 5 Places",
+  "description": "Tokyo central-area optimization fixture",
+  "region": "JP",
+  "timezone": "Asia/Tokyo",
+  "default_start_time": "09:00",
+  "verified_at": "2026-09-22",
+  "locations": [
+    {
+      "id": "tokyo-station",
+      "name": "Tokyo Station",
+      "place_id": "ChIJC3Cf2PuLGGAROO00ukl8JwA",
+      "address": "1 Chome-9 Marunouchi, Chiyoda City, Tokyo 100-0005, Japan",
+      "latitude": 35.6812996,
+      "longitude": 139.7670658,
+      "verified_at": "2026-09-22"
+    },
+    {
+      "id": "shibuya-station",
+      "name": "Shibuya Station",
+      "place_id": "ChIJnxAAO1aLGGARJqvi8d4oczM",
+      "address": "2 Chome-24 Shibuya, Tokyo 150-0002, Japan",
+      "latitude": 35.6580339,
+      "longitude": 139.7016358,
+      "verified_at": "2026-09-22"
+    },
+    {
+      "id": "shinjuku-station",
+      "name": "Shinjuku Station",
+      "place_id": "ChIJH7qx1tCMGGAR1f2s7PGhMhw",
+      "address": "3 Chome-38-1 Shinjuku, Shinjuku City, Tokyo 160-0022, Japan",
+      "latitude": 35.6896067,
+      "longitude": 139.7005713,
+      "verified_at": "2026-09-22"
+    },
+    {
+      "id": "senso-ji",
+      "name": "Sensō-ji",
+      "place_id": "ChIJ8T1GpMGOGGARDYGSgpooDWw",
+      "address": "2 Chome-3-1 Asakusa, Taito City, Tokyo 111-0032, Japan",
+      "latitude": 35.7147651,
+      "longitude": 139.7966553,
+      "verified_at": "2026-09-22"
+    },
+    {
+      "id": "ueno-station",
+      "name": "Ueno Station",
+      "place_id": "ChIJCwbTk56OGGARRJJPe22ziWw",
+      "address": "7 Chome-1 Ueno, Taito City, Tokyo 110-0005, Japan",
+      "latitude": 35.7141672,
+      "longitude": 139.7774091,
+      "verified_at": "2026-09-22"
+    }
+  ]
+}

@@ -1,0 +1,100 @@
+{
+  "name": "Tokyo 10 Places",
+  "description": "Tokyo performance and matrix-progress fixture",
+  "region": "JP",
+  "timezone": "Asia/Tokyo",
+  "default_start_time": "09:00",
+  "verified_at": "2026-09-22",
+  "locations": [
+    {
+      "id": "tokyo-station",
+      "name": "Tokyo Station",
+      "place_id": "ChIJC3Cf2PuLGGAROO00ukl8JwA",
+      "address": "1 Chome-9 Marunouchi, Chiyoda City, Tokyo 100-0005, Japan",
+      "latitude": 35.6812996,
+      "longitude": 139.7670658,
+      "verified_at": "2026-09-22"
+    },
+    {
+      "id": "shibuya-station",
+      "name": "Shibuya Station",
+      "place_id": "ChIJnxAAO1aLGGARJqvi8d4oczM",
+      "address": "2 Chome-24 Shibuya, Tokyo 150-0002, Japan",
+      "latitude": 35.6580339,
+      "longitude": 139.7016358,
+      "verified_at": "2026-09-22"
+    },
+    {
+      "id": "shinjuku-station",
+      "name": "Shinjuku Station",
+      "place_id": "ChIJH7qx1tCMGGAR1f2s7PGhMhw",
+      "address": "3 Chome-38-1 Shinjuku, Shinjuku City, Tokyo 160-0022, Japan",
+      "latitude": 35.6896067,
+      "longitude": 139.7005713,
+      "verified_at": "2026-09-22"
+    },
+    {
+      "id": "senso-ji",
+      "name": "Sensō-ji",
+      "place_id": "ChIJ8T1GpMGOGGARDYGSgpooDWw",
+      "address": "2 Chome-3-1 Asakusa, Taito City, Tokyo 111-0032, Japan",
+      "latitude": 35.7147651,
+      "longitude": 139.7966553,
+      "verified_at": "2026-09-22"
+    },
+    {
+      "id": "ueno-station",
+      "name": "Ueno Station",
+      "place_id": "ChIJCwbTk56OGGARRJJPe22ziWw",
+      "address": "7 Chome-1 Ueno, Taito City, Tokyo 110-0005, Japan",
+      "latitude": 35.7141672,
+      "longitude": 139.7774091,
+      "verified_at": "2026-09-22"
+    },
+    {
+      "id": "akihabara-station",
+      "name": "Akihabara Station",
+      "place_id": "ChIJKTP54qeOGGARsZf1fyU2jxU",
+      "address": "1 Chome Sotokanda, Chiyoda City, Tokyo 101-0028, Japan",
+      "latitude": 35.698383,
+      "longitude": 139.7730717,
+      "verified_at": "2026-09-22"
+    },
+    {
+      "id": "tokyo-skytree",
+      "name": "Tokyo Skytree",
+      "place_id": "ChIJ35ov0dCOGGARKvdDH7NPHX0",
+      "address": "1 Chome-1-2 Oshiage, Sumida City, Tokyo 131-0045, Japan",
+      "latitude": 35.7100627,
+      "longitude": 139.8107004,
+      "verified_at": "2026-09-22"
+    },
+    {
+      "id": "roppongi-hills",
+      "name": "Roppongi Hills",
+      "place_id": "ChIJM9xJEHeLGGARAshMWUgC_ls",
+      "address": "6 Chome-10-1 Roppongi, Minato City, Tokyo 106-6108, Japan",
+      "latitude": 35.6607397,
+      "longitude": 139.7292319,
+      "verified_at": "2026-09-22"
+    },
+    {
+      "id": "ikebukuro-station",
+      "name": "Ikebukuro Station",
+      "place_id": "ChIJ3eBDQF2NGGARTQMrXdJ1NyE",
+      "address": "1 Chome-28 Minamiikebukuro, Toshima City, Tokyo 171-0022, Japan",
+      "latitude": 35.7295028,
+      "longitude": 139.7109001,
+      "verified_at": "2026-09-22"
+    },
+    {
+      "id": "odaiba-marine-park",
+      "name": "Odaiba Marine Park",
+      "place_id": "ChIJ18IK6x2KGGARKTc2yLS-030",
+      "address": "1 Chome-4-4 Daiba, Minato City, Tokyo 135-0091, Japan",
+      "latitude": 35.6300488,
+      "longitude": 139.7756912,
+      "verified_at": "2026-09-22"
+    }
+  ]
+}

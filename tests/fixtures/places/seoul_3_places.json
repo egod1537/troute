@@ -1,0 +1,37 @@
+{
+  "name": "Seoul 3 Places",
+  "description": "Seoul central-area smoke-test fixture",
+  "region": "KR",
+  "timezone": "Asia/Seoul",
+  "default_start_time": "09:00",
+  "verified_at": "2026-09-22",
+  "locations": [
+    {
+      "id": "seoul-station",
+      "name": "Seoul Station",
+      "place_id": "ChIJQxWNcmaifDURTBfjk-JvH2Y",
+      "address": "Seoul, South Korea",
+      "latitude": 37.551856,
+      "longitude": 126.9708191,
+      "verified_at": "2026-09-22"
+    },
+    {
+      "id": "gangnam-station",
+      "name": "Gangnam Station",
+      "place_id": "ChIJKxs2jFmhfDURPP--kvKavw0",
+      "address": "Yeoksam-dong, Seoul, South Korea",
+      "latitude": 37.497952,
+      "longitude": 127.027619,
+      "verified_at": "2026-09-22"
+    },
+    {
+      "id": "hongik-university-station",
+      "name": "Hongik University Station",
+      "place_id": "ChIJ4d9T2emYfDURGK_RrkTeN0o",
+      "address": "Seoul, South Korea",
+      "latitude": 37.557527,
+      "longitude": 126.9244669,
+      "verified_at": "2026-09-22"
+    }
+  ]
+}

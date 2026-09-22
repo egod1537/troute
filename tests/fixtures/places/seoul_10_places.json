@@ -1,0 +1,100 @@
+{
+  "name": "Seoul 10 Places",
+  "description": "Seoul performance and matrix-progress fixture",
+  "region": "KR",
+  "timezone": "Asia/Seoul",
+  "default_start_time": "09:00",
+  "verified_at": "2026-09-22",
+  "locations": [
+    {
+      "id": "seoul-station",
+      "name": "Seoul Station",
+      "place_id": "ChIJQxWNcmaifDURTBfjk-JvH2Y",
+      "address": "Seoul, South Korea",
+      "latitude": 37.551856,
+      "longitude": 126.9708191,
+      "verified_at": "2026-09-22"
+    },
+    {
+      "id": "gangnam-station",
+      "name": "Gangnam Station",
+      "place_id": "ChIJKxs2jFmhfDURPP--kvKavw0",
+      "address": "Yeoksam-dong, Seoul, South Korea",
+      "latitude": 37.497952,
+      "longitude": 127.027619,
+      "verified_at": "2026-09-22"
+    },
+    {
+      "id": "hongik-university-station",
+      "name": "Hongik University Station",
+      "place_id": "ChIJ4d9T2emYfDURGK_RrkTeN0o",
+      "address": "Seoul, South Korea",
+      "latitude": 37.557527,
+      "longitude": 126.9244669,
+      "verified_at": "2026-09-22"
+    },
+    {
+      "id": "gyeongbokgung-palace",
+      "name": "Gyeongbokgung Palace",
+      "place_id": "ChIJod7tSseifDUR9hXHLFNGMIs",
+      "address": "161 Sajik-ro, Jongno District, Seoul, South Korea",
+      "latitude": 37.579617,
+      "longitude": 126.977041,
+      "verified_at": "2026-09-22"
+    },
+    {
+      "id": "myeongdong-station",
+      "name": "Myeongdong Station",
+      "place_id": "ChIJ_du5f_qifDURo58Y4M0dDfY",
+      "address": "Seoul, South Korea",
+      "latitude": 37.560918,
+      "longitude": 126.985865,
+      "verified_at": "2026-09-22"
+    },
+    {
+      "id": "dongdaemun-design-plaza",
+      "name": "Dongdaemun Design Plaza",
+      "place_id": "ChIJ8xRYr29FezUR3AtFqx2pIlw",
+      "address": "281 Eulji-ro, Jung District, Seoul, South Korea",
+      "latitude": 37.5665256,
+      "longitude": 127.0092236,
+      "verified_at": "2026-09-22"
+    },
+    {
+      "id": "jamsil-station",
+      "name": "Jamsil Station",
+      "place_id": "ChIJsaECEwqlfDURVEJQ6Agz7qc",
+      "address": "Jamsil 6-dong, Seoul, South Korea",
+      "latitude": 37.5132612,
+      "longitude": 127.1001336,
+      "verified_at": "2026-09-22"
+    },
+    {
+      "id": "yeouido-station",
+      "name": "Yeouido Station",
+      "place_id": "ChIJI0pyfD2ffDURS7Skr0U-e_M",
+      "address": "Seoul, South Korea",
+      "latitude": 37.521625,
+      "longitude": 126.924079,
+      "verified_at": "2026-09-22"
+    },
+    {
+      "id": "itaewon-station",
+      "name": "Itaewon Station",
+      "place_id": "ChIJHX2z-UqifDUR6L9ZIciWFzo",
+      "address": "16 Noksapyeong-daero 46-gil, Yongsan District, Seoul, South Korea",
+      "latitude": 37.534542,
+      "longitude": 126.994596,
+      "verified_at": "2026-09-22"
+    },
+    {
+      "id": "starfield-coex-mall",
+      "name": "Starfield COEX Mall",
+      "place_id": "ChIJIRVdC6pFezUR02aa2I7i57A",
+      "address": "513 Yeongdong-daero, Gangnam District, Seoul, South Korea",
+      "latitude": 37.5118346,
+      "longitude": 127.0597871,
+      "verified_at": "2026-09-22"
+    }
+  ]
+}

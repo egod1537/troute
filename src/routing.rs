@@ -10,6 +10,15 @@ pub trait RoutingProvider {
     fn travel_time_matrix(&self, locations: &[Location]) -> Result<TravelTimeMatrix, RoutingError>;
 }
 
+impl<T> RoutingProvider for Box<T>
+where
+    T: RoutingProvider + ?Sized,
+{
+    fn travel_time_matrix(&self, locations: &[Location]) -> Result<TravelTimeMatrix, RoutingError> {
+        (**self).travel_time_matrix(locations)
+    }
+}
+
 #[derive(Debug, Error)]
 pub enum RoutingError {
     #[error("routing provider failed: {0}")]
