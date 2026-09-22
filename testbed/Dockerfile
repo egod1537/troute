@@ -6,6 +6,7 @@ COPY testbed/tsconfig.json testbed/vite.config.ts testbed/index.html ./
 COPY testbed/src ./src
 COPY testbed/public ./public
 COPY assets /app/assets
+COPY tests/fixtures/places /app/tests/fixtures/places
 ARG VITE_TROUTE_API_BASE_URL=/api
 ARG VITE_TROUTE_ROUTE_PATH=
 ARG VITE_TROUTE_COMMIT_SHA=unknown
