@@ -21,6 +21,10 @@ Testbed가 함께 사용하는 Google Place ID의 source of truth다. troute는 
 - 실제 경로 확인: 로컬 tcache의 기존 Route Job API와 Google provider를 통해
   Tokyo Station → Shibuya Station `WALKING` 요청이 완료됨
   (`route_3f5bb21825ac4d259cbc2ddaf218372c`, cache miss, 5965 seconds)
+- 실제 matrix 확인: Tokyo 3 Places의 6개 directed pair를 tcache Matrix Job과
+  Google provider의 `WALKING` mode로 완료함
+  (`route-matrix-e6a0078d40c5405e9fd4a4cbf9e85c62`, cache miss 6,
+  provider call 6)
 
 Place ID 조회 성공과 모든 mode/pair에서 경로가 존재한다는 보장은 서로 다르다.
 예를 들어 provider 정책이나 대중교통 데이터에 따라 특정 pair/mode가 route
