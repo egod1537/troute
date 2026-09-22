@@ -60,6 +60,10 @@ impl Cluster {
 }
 
 pub trait ClusterStrategy: Send + Sync {
+    fn name(&self) -> &'static str {
+        "custom"
+    }
+
     fn cluster(
         &self,
         problem: &OptimizationProblem,
@@ -74,6 +78,10 @@ pub trait ClusterStrategy: Send + Sync {
 pub struct TravelTimeClusterStrategy;
 
 impl ClusterStrategy for TravelTimeClusterStrategy {
+    fn name(&self) -> &'static str {
+        "directed_nearest_neighbor"
+    }
+
     fn cluster(
         &self,
         problem: &OptimizationProblem,
@@ -113,6 +121,10 @@ impl ClusterStrategy for TravelTimeClusterStrategy {
 }
 
 pub trait ClusterOrderStrategy: Send + Sync {
+    fn name(&self) -> &'static str {
+        "custom"
+    }
+
     /// Returns indices into `clusters` in visit order.
     fn order(
         &self,
@@ -126,6 +138,10 @@ pub trait ClusterOrderStrategy: Send + Sync {
 pub struct GreedyClusterOrderStrategy;
 
 impl ClusterOrderStrategy for GreedyClusterOrderStrategy {
+    fn name(&self) -> &'static str {
+        "greedy_bridge"
+    }
+
     fn order(
         &self,
         clusters: &[Cluster],
@@ -184,6 +200,10 @@ impl<S> MstClusterOrderStrategy<S> {
 }
 
 impl<S: SymmetricDistanceStrategy> ClusterOrderStrategy for MstClusterOrderStrategy<S> {
+    fn name(&self) -> &'static str {
+        "mst_double_tree"
+    }
+
     fn order(
         &self,
         clusters: &[Cluster],
@@ -232,6 +252,14 @@ impl<S: SymmetricDistanceStrategy> ClusterOrderStrategy for MstClusterOrderStrat
 }
 
 pub trait LocalImprovementStrategy: Send + Sync {
+    fn name(&self) -> &'static str {
+        "custom"
+    }
+
+    fn enabled_operations(&self) -> LocalImprovementOperations {
+        LocalImprovementOperations::default()
+    }
+
     fn improve(
         &self,
         route: &mut Vec<usize>,
@@ -247,6 +275,13 @@ pub struct LocalImprovementResult {
     pub accepted_moves: usize,
 }
 
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct LocalImprovementOperations {
+    pub swap: bool,
+    pub relocate: bool,
+    pub two_opt: bool,
+}
+
 /// Tries swaps between the last member of one cluster and the first member of
 /// the next cluster. A move is accepted only when the shared objective says it
 /// is strictly better and the complete route remains feasible.
@@ -254,6 +289,18 @@ pub struct LocalImprovementResult {
 pub struct BoundarySwapLocalImprovement;
 
 impl LocalImprovementStrategy for BoundarySwapLocalImprovement {
+    fn name(&self) -> &'static str {
+        "boundary_swap"
+    }
+
+    fn enabled_operations(&self) -> LocalImprovementOperations {
+        LocalImprovementOperations {
+            swap: true,
+            relocate: false,
+            two_opt: false,
+        }
+    }
+
     fn improve(
         &self,
         route: &mut Vec<usize>,
@@ -313,9 +360,27 @@ impl LocalImprovementStrategy for BoundarySwapLocalImprovement {
 pub struct ClusteredSolverStats {
     pub cluster_count: usize,
     pub cluster_sizes: Vec<usize>,
+    pub cluster_strategy: String,
+    pub cluster_order_strategy: String,
+    pub cluster_order: Vec<usize>,
+    pub cluster_details: Vec<ClusterSolveStats>,
     pub exact_generated_states: usize,
     pub exact_frontier_states: usize,
     pub accepted_local_moves: usize,
+    pub improvement_strategy: String,
+    pub improvement_operations: LocalImprovementOperations,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ClusterSolveStats {
+    /// Zero-based index into the clusters returned by the cluster strategy.
+    pub cluster_index: usize,
+    pub members: Vec<usize>,
+    pub route: Vec<usize>,
+    pub entry: Option<usize>,
+    pub exit: Option<usize>,
+    pub exact_generated_states: usize,
+    pub exact_frontier_states: usize,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -413,9 +478,15 @@ impl<
                 stats: ClusteredSolverStats {
                     cluster_count: 0,
                     cluster_sizes: Vec::new(),
+                    cluster_strategy: self.cluster_strategy.name().to_owned(),
+                    cluster_order_strategy: self.order_strategy.name().to_owned(),
+                    cluster_order: Vec::new(),
+                    cluster_details: Vec::new(),
                     exact_generated_states: 0,
                     exact_frontier_states: 0,
                     accepted_local_moves: 0,
+                    improvement_strategy: self.local_improvement.name().to_owned(),
+                    improvement_operations: self.local_improvement.enabled_operations(),
                 },
             });
         }
@@ -439,6 +510,7 @@ impl<
             super::minutes_to_slot_ceil(u32::from(input.problem.start_time().minutes())) as u16;
         let mut exact_generated_states = 0;
         let mut exact_frontier_states = 0;
+        let mut cluster_details = Vec::with_capacity(clusters.len());
 
         for (position, &cluster_index) in cluster_order.iter().enumerate() {
             if input.cancellation.is_cancelled() {
@@ -458,6 +530,15 @@ impl<
             )?;
             exact_generated_states += solved.generated_states;
             exact_frontier_states += solved.frontier_states;
+            cluster_details.push(ClusterSolveStats {
+                cluster_index,
+                members: cluster.members.clone(),
+                entry: solved.order.first().copied(),
+                exit: solved.order.last().copied(),
+                route: solved.order.clone(),
+                exact_generated_states: solved.generated_states,
+                exact_frontier_states: solved.frontier_states,
+            });
             for member in solved.order {
                 current_slot = transition_time(&input, current_location, member, current_slot)
                     .ok_or(SolverError::NoFeasibleRoute)?;
@@ -516,9 +597,15 @@ impl<
                     .iter()
                     .map(|cluster| cluster.members.len())
                     .collect(),
+                cluster_strategy: self.cluster_strategy.name().to_owned(),
+                cluster_order_strategy: self.order_strategy.name().to_owned(),
+                cluster_order,
+                cluster_details,
                 exact_generated_states,
                 exact_frontier_states,
                 accepted_local_moves: improvement.accepted_moves,
+                improvement_strategy: self.local_improvement.name().to_owned(),
+                improvement_operations: self.local_improvement.enabled_operations(),
             },
         })
     }
@@ -897,8 +984,29 @@ mod tests {
         assert_eq!(locations, (0..18).collect::<Vec<_>>());
         assert!(result.stats.cluster_sizes.iter().all(|&size| size <= 5));
         assert_eq!(result.stats.cluster_count, 4);
+        assert_eq!(result.stats.cluster_strategy, "directed_nearest_neighbor");
+        assert_eq!(result.stats.cluster_order_strategy, "greedy_bridge");
+        assert_eq!(result.stats.cluster_order.len(), 4);
+        assert_eq!(result.stats.cluster_details.len(), 4);
+        assert!(result
+            .stats
+            .cluster_details
+            .iter()
+            .zip(&result.stats.cluster_order)
+            .all(|(detail, order)| detail.cluster_index == *order));
+        assert!(result.stats.cluster_details.iter().all(|detail| {
+            detail.entry == detail.route.first().copied()
+                && detail.exit == detail.route.last().copied()
+                && detail.members.len() == detail.route.len()
+                && detail.exact_generated_states > 0
+                && detail.exact_frontier_states > 0
+        }));
         assert!(result.stats.exact_generated_states > 0);
         assert!(result.stats.exact_frontier_states > 0);
+        assert_eq!(result.stats.improvement_strategy, "boundary_swap");
+        assert!(result.stats.improvement_operations.swap);
+        assert!(!result.stats.improvement_operations.relocate);
+        assert!(!result.stats.improvement_operations.two_opt);
     }
 
     #[test]

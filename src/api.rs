@@ -22,6 +22,8 @@ pub struct OptimizeRouteRequest {
     pub locations: Vec<LocationInput>,
     pub start_time: TimeOfDay,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub travel_time_matrix: Option<Vec<Vec<u32>>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub debug: Option<DebugOptions>,
 }
 
@@ -40,6 +42,8 @@ pub struct DebugOptions {
 #[serde(deny_unknown_fields)]
 pub struct LocationInput {
     pub id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub name: Option<String>,
     pub place_id: String,
     pub open_time: TimeOfDay,
     pub close_time: TimeOfDay,
@@ -81,7 +85,83 @@ pub struct SolverCandidateMetadataOutput {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub frontier_state_count: Option<usize>,
     #[serde(skip_serializing_if = "Option::is_none")]
+    pub frontier_cell_count: Option<usize>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub cluster_count: Option<usize>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub cluster_sizes: Option<Vec<usize>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub cluster_strategy: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub cluster_order_strategy: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub cluster_order: Option<Vec<usize>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub cluster_details: Option<Vec<ClusterDiagnosticOutput>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub score_before_improvement: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub score_after_improvement: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub improvement_strategy: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub swap_enabled: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub relocate_enabled: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub two_opt_enabled: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub symmetric_distance_strategy: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub mst_cost: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub mst_edge_count: Option<usize>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub mst_edges: Option<Vec<MstEdgeDiagnosticOutput>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub euler_tour: Option<Vec<String>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub shortcut_route: Option<Vec<String>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub odd_vertices: Option<Vec<String>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub odd_vertex_count: Option<usize>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub matching_strategy: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub matching_cost: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub matching_pairs: Option<Vec<MatchingPairDiagnosticOutput>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub initial_strategy: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub initial_route: Option<Vec<String>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub final_route: Option<Vec<String>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub initial_score: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub final_score: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub initial_temperature: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub final_temperature: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub cooling_rate: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub swap_move_count: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub relocate_move_count: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub two_opt_move_count: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub accepted_worse_moves: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub infeasible_candidates: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub accepted_infeasible_moves: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub best_feasible: Option<bool>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub iteration_count: Option<u64>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -93,6 +173,33 @@ pub struct SolverCandidateMetadataOutput {
     pub timed_out: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub error: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
+pub struct ClusterDiagnosticOutput {
+    pub cluster: usize,
+    pub members: Vec<String>,
+    pub route: Vec<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub entry: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub exit: Option<String>,
+    pub state_count: usize,
+    pub frontier_state_count: usize,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
+pub struct MstEdgeDiagnosticOutput {
+    pub from: String,
+    pub to: String,
+    pub distance: u64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
+pub struct MatchingPairDiagnosticOutput {
+    pub left: String,
+    pub right: String,
+    pub distance: u64,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
@@ -132,6 +239,9 @@ impl TryFrom<OptimizeRouteRequest> for OptimizationProblem {
                 actual: request.locations.len(),
             });
         }
+        if request.travel_time_matrix.is_some() {
+            return Err(RequestValidationError::CallerSuppliedMatrixUnsupported);
+        }
         let mut ids = HashSet::with_capacity(request.locations.len());
         let mut locations = Vec::with_capacity(request.locations.len());
 
@@ -141,6 +251,16 @@ impl TryFrom<OptimizeRouteRequest> for OptimizationProblem {
             }
             if input.id.chars().count() > MAX_STRING_CHARACTERS {
                 return Err(RequestValidationError::LocationIdTooLong {
+                    maximum: MAX_STRING_CHARACTERS,
+                });
+            }
+            if input
+                .name
+                .as_ref()
+                .is_some_and(|name| name.chars().count() > MAX_STRING_CHARACTERS)
+            {
+                return Err(RequestValidationError::LocationNameTooLong {
+                    location_id: input.id,
                     maximum: MAX_STRING_CHARACTERS,
                 });
             }
@@ -271,7 +391,76 @@ impl From<&SolverCandidateMetadata> for SolverCandidateMetadataOutput {
         Self {
             state_count: metadata.state_count,
             frontier_state_count: metadata.frontier_state_count,
+            frontier_cell_count: metadata.frontier_cell_count,
             cluster_count: metadata.cluster_count,
+            cluster_sizes: metadata.cluster_sizes.clone(),
+            cluster_strategy: metadata.cluster_strategy.clone(),
+            cluster_order_strategy: metadata.cluster_order_strategy.clone(),
+            cluster_order: metadata.cluster_order.clone(),
+            cluster_details: metadata.cluster_details.as_ref().map(|clusters| {
+                clusters
+                    .iter()
+                    .map(|cluster| ClusterDiagnosticOutput {
+                        cluster: cluster.cluster,
+                        members: cluster.members.clone(),
+                        route: cluster.route.clone(),
+                        entry: cluster.entry.clone(),
+                        exit: cluster.exit.clone(),
+                        state_count: cluster.state_count,
+                        frontier_state_count: cluster.frontier_state_count,
+                    })
+                    .collect()
+            }),
+            score_before_improvement: metadata.score_before_improvement,
+            score_after_improvement: metadata.score_after_improvement,
+            improvement_strategy: metadata.improvement_strategy.clone(),
+            swap_enabled: metadata.swap_enabled,
+            relocate_enabled: metadata.relocate_enabled,
+            two_opt_enabled: metadata.two_opt_enabled,
+            symmetric_distance_strategy: metadata.symmetric_distance_strategy.clone(),
+            mst_cost: metadata.mst_cost,
+            mst_edge_count: metadata.mst_edge_count,
+            mst_edges: metadata.mst_edges.as_ref().map(|edges| {
+                edges
+                    .iter()
+                    .map(|edge| MstEdgeDiagnosticOutput {
+                        from: edge.from.clone(),
+                        to: edge.to.clone(),
+                        distance: edge.distance,
+                    })
+                    .collect()
+            }),
+            euler_tour: metadata.euler_tour.clone(),
+            shortcut_route: metadata.shortcut_route.clone(),
+            odd_vertices: metadata.odd_vertices.clone(),
+            odd_vertex_count: metadata.odd_vertex_count,
+            matching_strategy: metadata.matching_strategy.clone(),
+            matching_cost: metadata.matching_cost,
+            matching_pairs: metadata.matching_pairs.as_ref().map(|pairs| {
+                pairs
+                    .iter()
+                    .map(|pair| MatchingPairDiagnosticOutput {
+                        left: pair.left.clone(),
+                        right: pair.right.clone(),
+                        distance: pair.distance,
+                    })
+                    .collect()
+            }),
+            initial_strategy: metadata.initial_strategy.clone(),
+            initial_route: metadata.initial_route.clone(),
+            final_route: metadata.final_route.clone(),
+            initial_score: metadata.initial_score,
+            final_score: metadata.final_score,
+            initial_temperature: metadata.initial_temperature.clone(),
+            final_temperature: metadata.final_temperature.clone(),
+            cooling_rate: metadata.cooling_rate.clone(),
+            swap_move_count: metadata.swap_move_count,
+            relocate_move_count: metadata.relocate_move_count,
+            two_opt_move_count: metadata.two_opt_move_count,
+            accepted_worse_moves: metadata.accepted_worse_moves,
+            infeasible_candidates: metadata.infeasible_candidates,
+            accepted_infeasible_moves: metadata.accepted_infeasible_moves,
+            best_feasible: metadata.best_feasible,
             iteration_count: metadata.iteration_count,
             accepted_moves: metadata.accepted_moves,
             improved_moves: metadata.improved_moves,
@@ -298,12 +487,16 @@ pub enum RequestValidationError {
     EmptyLocationId,
     #[error("location id must not exceed {maximum} characters")]
     LocationIdTooLong { maximum: usize },
+    #[error("location name must not exceed {maximum} characters for location {location_id}")]
+    LocationNameTooLong { location_id: String, maximum: usize },
     #[error("place_id must not be empty for location {location_id}")]
     EmptyPlaceId { location_id: String },
     #[error("place_id must not exceed {maximum} characters for location {location_id}")]
     PlaceIdTooLong { location_id: String, maximum: usize },
     #[error("duplicate location id: {0}")]
     DuplicateLocationId(String),
+    #[error("travel_time_matrix cannot be supplied; troute always obtains it from tcache")]
+    CallerSuppliedMatrixUnsupported,
     #[error("invalid time window for location {location_id}: {source}")]
     InvalidTimeWindow {
         location_id: String,
@@ -397,6 +590,8 @@ mod tests {
                 elapsed: Duration::from_millis(7),
                 metadata: SolverCandidateMetadata {
                     state_count: Some(2),
+                    frontier_state_count: Some(2),
+                    frontier_cell_count: Some(2),
                     ..SolverCandidateMetadata::default()
                 },
             }],
@@ -431,6 +626,8 @@ mod tests {
             "10:00"
         );
         assert_eq!(candidate.metadata.state_count, Some(2));
+        assert_eq!(candidate.metadata.frontier_state_count, Some(2));
+        assert_eq!(candidate.metadata.frontier_cell_count, Some(2));
     }
 
     #[test]

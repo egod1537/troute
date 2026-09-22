@@ -151,6 +151,20 @@ where
             result
         }
     }
+
+    pub fn build_travel_time_matrix(
+        &self,
+        request: OptimizeRouteRequest,
+    ) -> Result<crate::matrix::TravelTimeMatrix, OptimizationServiceError> {
+        let problem = OptimizationProblem::try_from(request)?;
+        let routing_context = RoutingContext {
+            departure_time: Some(chrono::Utc::now()),
+            ..RoutingContext::default()
+        };
+        self.routing_provider
+            .travel_time_matrix(problem.locations(), &routing_context)
+            .map_err(Into::into)
+    }
 }
 
 fn check_cancelled(cancellation: &CancellationToken) -> Result<(), OptimizationServiceError> {
@@ -360,6 +374,90 @@ mod tests {
         assert!(candidates
             .iter()
             .any(|candidate| candidate.strategy == "exact_bit_dp"));
+        let exact = candidates
+            .iter()
+            .find(|candidate| candidate.strategy == "exact_bit_dp")
+            .unwrap();
+        assert!(exact.metadata.state_count.is_some());
+        assert!(exact.metadata.frontier_state_count.is_some());
+        assert!(exact.metadata.frontier_cell_count.is_some());
+        let clustered = candidates
+            .iter()
+            .find(|candidate| candidate.strategy == "clustered")
+            .unwrap();
+        assert_eq!(clustered.metadata.cluster_count, Some(0));
+        assert_eq!(clustered.metadata.cluster_sizes, Some(Vec::new()));
+        assert_eq!(
+            clustered.metadata.cluster_strategy.as_deref(),
+            Some("directed_nearest_neighbor")
+        );
+        assert_eq!(
+            clustered.metadata.cluster_order_strategy.as_deref(),
+            Some("greedy_bridge")
+        );
+        assert!(clustered.metadata.score_before_improvement.is_some());
+        assert!(clustered.metadata.score_after_improvement.is_some());
+        assert_eq!(clustered.metadata.swap_enabled, Some(true));
+        assert_eq!(clustered.metadata.relocate_enabled, Some(false));
+        assert_eq!(clustered.metadata.two_opt_enabled, Some(false));
+        let mst = candidates
+            .iter()
+            .find(|candidate| candidate.strategy == "mst_double_tree")
+            .unwrap();
+        assert_eq!(
+            mst.metadata.symmetric_distance_strategy.as_deref(),
+            Some("average_bidirectional")
+        );
+        assert_eq!(mst.metadata.mst_edge_count, Some(1));
+        assert_eq!(mst.metadata.mst_edges.as_ref().unwrap().len(), 1);
+        assert_eq!(
+            mst.metadata.euler_tour.as_ref().unwrap(),
+            &vec!["A".to_owned(), "B".to_owned(), "A".to_owned()]
+        );
+        assert_eq!(
+            mst.metadata.shortcut_route.as_ref().unwrap(),
+            &vec!["A".to_owned(), "B".to_owned()]
+        );
+        let christofides = candidates
+            .iter()
+            .find(|candidate| candidate.strategy == "christofides")
+            .unwrap();
+        assert_eq!(christofides.metadata.mst_edge_count, Some(1));
+        assert_eq!(christofides.metadata.odd_vertex_count, Some(2));
+        assert_eq!(
+            christofides.metadata.odd_vertices.as_ref().unwrap(),
+            &vec!["A".to_owned(), "B".to_owned()]
+        );
+        assert_eq!(
+            christofides.metadata.matching_strategy.as_deref(),
+            Some("bit_dp")
+        );
+        assert_eq!(
+            christofides.metadata.matching_pairs.as_ref().unwrap().len(),
+            1
+        );
+        assert_eq!(
+            christofides.metadata.shortcut_route.as_ref().unwrap(),
+            &vec!["A".to_owned(), "B".to_owned()]
+        );
+        let sa_greedy = candidates
+            .iter()
+            .find(|candidate| candidate.strategy.starts_with("sa_greedy_seed_"))
+            .unwrap();
+        assert_eq!(
+            sa_greedy.metadata.initial_strategy.as_deref(),
+            Some("greedy")
+        );
+        assert_eq!(
+            sa_greedy.metadata.initial_route.as_ref().unwrap(),
+            &vec!["A".to_owned(), "B".to_owned()]
+        );
+        assert_eq!(
+            sa_greedy.metadata.final_route.as_ref().unwrap(),
+            &vec!["A".to_owned(), "B".to_owned()]
+        );
+        assert_eq!(sa_greedy.metadata.iteration_count, Some(0));
+        assert_eq!(sa_greedy.metadata.best_feasible, Some(true));
         assert_eq!(
             candidates.iter().filter(|candidate| candidate.best).count(),
             1

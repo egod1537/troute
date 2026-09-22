@@ -167,19 +167,27 @@ impl SimulatedAnnealingConfig {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq)]
 pub struct SimulatedAnnealingStats {
     pub iterations: u64,
     pub accepted_moves: u64,
     pub improved_moves: u64,
+    pub swap_moves: u64,
+    pub relocate_moves: u64,
+    pub two_opt_moves: u64,
     pub accepted_worse_moves: u64,
     pub infeasible_candidates: u64,
     pub accepted_infeasible_moves: u64,
+    pub initial_temperature: f64,
+    pub final_temperature: f64,
+    pub cooling_rate: f64,
     pub elapsed: Duration,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct SimulatedAnnealingResult {
+    pub initial_solution: SolverSolution,
+    pub initial_metrics: Option<SolutionMetrics>,
     pub solution: SolverSolution,
     pub metrics: SolutionMetrics,
     pub stats: SimulatedAnnealingStats,
@@ -283,6 +291,8 @@ impl<I: InitialRouteStrategy, N: NeighborhoodStrategy, O: ObjectivePolicy>
             &current,
             config.penalties,
         )?;
+        let initial_solution = current.clone();
+        let initial_metrics = current_evaluation.feasible_metrics;
         let mut best_feasible = current_evaluation
             .feasible_metrics
             .map(|metrics| (current.clone(), metrics));
@@ -291,6 +301,9 @@ impl<I: InitialRouteStrategy, N: NeighborhoodStrategy, O: ObjectivePolicy>
         let mut iterations = 0_u64;
         let mut accepted_moves = 0_u64;
         let mut improved_moves = 0_u64;
+        let mut swap_moves = 0_u64;
+        let mut relocate_moves = 0_u64;
+        let mut two_opt_moves = 0_u64;
         let mut accepted_worse_moves = 0_u64;
         let mut infeasible_candidates = 0_u64;
         let mut accepted_infeasible_moves = 0_u64;
@@ -302,12 +315,17 @@ impl<I: InitialRouteStrategy, N: NeighborhoodStrategy, O: ObjectivePolicy>
             if input.cancellation.is_cancelled() {
                 return Err(SolverError::Cancelled);
             }
-            let Some((candidate, _movement)) = self
+            let Some((candidate, movement)) = self
                 .neighborhood_strategy
                 .neighbor(&current.visit_order, &mut rng)
             else {
                 break;
             };
+            match movement {
+                NeighborhoodMove::Swap { .. } => swap_moves += 1,
+                NeighborhoodMove::Relocate { .. } => relocate_moves += 1,
+                NeighborhoodMove::TwoOpt { .. } => two_opt_moves += 1,
+            }
             let candidate = SolverSolution {
                 visit_order: candidate,
             };
@@ -370,15 +388,23 @@ impl<I: InitialRouteStrategy, N: NeighborhoodStrategy, O: ObjectivePolicy>
         )?;
         debug_assert_eq!(verified, metrics);
         Ok(SimulatedAnnealingResult {
+            initial_solution,
+            initial_metrics,
             solution,
             metrics: verified,
             stats: SimulatedAnnealingStats {
                 iterations,
                 accepted_moves,
                 improved_moves,
+                swap_moves,
+                relocate_moves,
+                two_opt_moves,
                 accepted_worse_moves,
                 infeasible_candidates,
                 accepted_infeasible_moves,
+                initial_temperature: config.initial_temperature,
+                final_temperature: temperature,
+                cooling_rate: config.cooling_rate,
                 elapsed: started.elapsed(),
             },
         })
@@ -581,10 +607,19 @@ mod tests {
         let second = solve();
 
         assert_eq!(first.solution, second.solution);
+        assert_eq!(first.initial_solution, second.initial_solution);
+        assert_eq!(first.initial_metrics, second.initial_metrics);
         assert_eq!(first.metrics, second.metrics);
         assert_eq!(first.stats.iterations, second.stats.iterations);
         assert_eq!(first.stats.accepted_moves, second.stats.accepted_moves);
         assert_eq!(first.stats.improved_moves, second.stats.improved_moves);
+        assert_eq!(
+            first.stats.swap_moves + first.stats.relocate_moves + first.stats.two_opt_moves,
+            first.stats.iterations
+        );
+        assert_eq!(first.stats.initial_temperature, 1_000.0);
+        assert_eq!(first.stats.cooling_rate, 0.99);
+        assert!(first.stats.final_temperature < first.stats.initial_temperature);
         assert_eq!(
             first.stats.accepted_infeasible_moves,
             second.stats.accepted_infeasible_moves

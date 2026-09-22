@@ -96,6 +96,7 @@ pub fn build_optimize_request_from_fixture(
             .into_iter()
             .map(|location| LocationInput {
                 id: location.id,
+                name: Some(location.name),
                 place_id: location.place_id,
                 open_time,
                 close_time,
@@ -103,6 +104,7 @@ pub fn build_optimize_request_from_fixture(
             })
             .collect(),
         start_time,
+        travel_time_matrix: None,
         debug: None::<DebugOptions>,
     })
 }

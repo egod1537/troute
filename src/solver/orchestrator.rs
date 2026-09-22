@@ -11,18 +11,16 @@ use std::{
     time::{Duration, Instant},
 };
 
-use rand::{rngs::StdRng, SeedableRng};
-
 use crate::{cancellation::CancellationToken, domain::TimeOfDay};
 
 use super::{
-    AutoPerfectMatching, AverageSymmetricDistance, ChristofidesInitialRoute, ClusteredInitialRoute,
-    ClusteredSolver, ClusteredSolverConfig, DefaultObjectivePolicy, ExactBitDpSolver,
-    GreedyInitialRoute, InitialRouteGenerator, MatchingStrategyConfig, MixedNeighborhoodStrategy,
-    MstDoubleTreeInitialRoute, ObjectiveEvaluator, RouteSolver, SimulatedAnnealingConfig,
-    SimulatedAnnealingSolver, SolverCandidate, SolverCandidateMetadata, SolverDiagnostics,
-    SolverError, SolverInput, SolverRunResult, SolverSolution, EXACT_MAX_LOCATIONS,
-    TIME_SLOT_MINUTES,
+    AutoPerfectMatching, AverageSymmetricDistance, ChristofidesInitialRoute, ClusterDiagnostic,
+    ClusteredInitialRoute, ClusteredSolver, ClusteredSolverConfig, DefaultObjectivePolicy,
+    ExactBitDpSolver, GreedyInitialRoute, MatchingPairDiagnostic, MatchingStrategyConfig,
+    MixedNeighborhoodStrategy, MstDoubleTreeInitialRoute, MstEdgeDiagnostic, ObjectiveEvaluator,
+    RouteSolver, SimulatedAnnealingConfig, SimulatedAnnealingSolver, SolverCandidate,
+    SolverCandidateMetadata, SolverDiagnostics, SolverError, SolverInput, SolverRunResult,
+    SolverSolution, EXACT_MAX_LOCATIONS, TIME_SLOT_MINUTES,
 };
 
 const DEFAULT_MAX_CONCURRENCY: usize = 4;
@@ -358,9 +356,7 @@ fn execute_strategy<E: ObjectiveEvaluator>(
                     watcher_cancellation.cancel();
                     break;
                 }
-                let wait = timeout
-                    .saturating_sub(elapsed)
-                    .min(TIMEOUT_POLL_INTERVAL);
+                let wait = timeout.saturating_sub(elapsed).min(TIMEOUT_POLL_INTERVAL);
                 match done_rx.recv_timeout(wait) {
                     Ok(()) | Err(mpsc::RecvTimeoutError::Disconnected) => break,
                     Err(mpsc::RecvTimeoutError::Timeout) => {}
@@ -480,14 +476,10 @@ fn built_in_strategies(
         Arc::new(ClusteredStrategy {
             solver: ClusteredSolver::with_config(cluster_config),
         }),
-        Arc::new(InitialGeneratorStrategy {
-            name: "mst_double_tree".to_owned(),
-            seed: 0,
+        Arc::new(MstDoubleTreeStrategy {
             generator: MstDoubleTreeInitialRoute::default(),
         }),
-        Arc::new(InitialGeneratorStrategy {
-            name: "christofides".to_owned(),
-            seed: 0,
+        Arc::new(ChristofidesStrategy {
             generator: ChristofidesInitialRoute::new(AverageSymmetricDistance, matching),
         }),
     ];
@@ -499,24 +491,28 @@ fn built_in_strategies(
         };
         strategies.push(Arc::new(AnnealingStrategy::new(
             format!("sa_greedy_seed_{seed}"),
+            "greedy",
             seed,
             sa_config,
             GreedyInitialRoute,
         )?));
         strategies.push(Arc::new(AnnealingStrategy::new(
             format!("sa_mst_seed_{seed}"),
+            "mst_double_tree",
             seed,
             sa_config,
             MstDoubleTreeInitialRoute::default(),
         )?));
         strategies.push(Arc::new(AnnealingStrategy::new(
             format!("sa_christofides_seed_{seed}"),
+            "christofides",
             seed,
             sa_config,
             ChristofidesInitialRoute::new(AverageSymmetricDistance, matching),
         )?));
         strategies.push(Arc::new(AnnealingStrategy::new(
             format!("sa_clustered_seed_{seed}"),
+            "clustered",
             seed,
             sa_config,
             ClusteredInitialRoute::new(ClusteredSolver::with_config(cluster_config)),
@@ -546,6 +542,7 @@ impl OrchestratedStrategy for ExactStrategy {
             metadata: SolverCandidateMetadata {
                 state_count: Some(result.stats.generated_states),
                 frontier_state_count: Some(result.stats.frontier_states),
+                frontier_cell_count: Some(result.stats.frontier_cells),
                 ..SolverCandidateMetadata::default()
             },
         })
@@ -562,13 +559,56 @@ impl OrchestratedStrategy for ClusteredStrategy {
     }
 
     fn execute(&self, input: SolverInput<'_>) -> Result<StrategyExecution, SolverError> {
+        let problem = input.problem;
         let result = self.solver.solve_detailed(input)?;
+        let location_id = |index: usize| problem.locations()[index].id().to_owned();
         Ok(StrategyExecution {
             solution: result.solution,
             metadata: SolverCandidateMetadata {
                 state_count: Some(result.stats.exact_generated_states),
                 frontier_state_count: Some(result.stats.exact_frontier_states),
                 cluster_count: Some(result.stats.cluster_count),
+                cluster_sizes: Some(result.stats.cluster_sizes),
+                cluster_strategy: Some(result.stats.cluster_strategy),
+                cluster_order_strategy: Some(result.stats.cluster_order_strategy),
+                cluster_order: Some(
+                    result
+                        .stats
+                        .cluster_order
+                        .iter()
+                        .map(|index| index + 1)
+                        .collect(),
+                ),
+                cluster_details: Some(
+                    result
+                        .stats
+                        .cluster_details
+                        .iter()
+                        .map(|cluster| ClusterDiagnostic {
+                            cluster: cluster.cluster_index + 1,
+                            members: cluster
+                                .members
+                                .iter()
+                                .map(|&index| location_id(index))
+                                .collect(),
+                            route: cluster
+                                .route
+                                .iter()
+                                .map(|&index| location_id(index))
+                                .collect(),
+                            entry: cluster.entry.map(location_id),
+                            exit: cluster.exit.map(location_id),
+                            state_count: cluster.exact_generated_states,
+                            frontier_state_count: cluster.exact_frontier_states,
+                        })
+                        .collect(),
+                ),
+                score_before_improvement: Some(result.metrics_before_improvement.score),
+                score_after_improvement: Some(result.metrics.score),
+                improvement_strategy: Some(result.stats.improvement_strategy),
+                swap_enabled: Some(result.stats.improvement_operations.swap),
+                relocate_enabled: Some(result.stats.improvement_operations.relocate),
+                two_opt_enabled: Some(result.stats.improvement_operations.two_opt),
                 improved_moves: Some(result.stats.accepted_local_moves as u64),
                 ..SolverCandidateMetadata::default()
             },
@@ -576,32 +616,149 @@ impl OrchestratedStrategy for ClusteredStrategy {
     }
 }
 
-struct InitialGeneratorStrategy<G> {
-    name: String,
-    seed: u64,
-    generator: G,
+struct MstDoubleTreeStrategy {
+    generator: MstDoubleTreeInitialRoute,
 }
 
-impl<G: InitialRouteGenerator> OrchestratedStrategy for InitialGeneratorStrategy<G> {
+impl OrchestratedStrategy for MstDoubleTreeStrategy {
     fn name(&self) -> &str {
-        &self.name
+        "mst_double_tree"
     }
 
     fn execute(&self, input: SolverInput<'_>) -> Result<StrategyExecution, SolverError> {
-        let mut rng = StdRng::seed_from_u64(self.seed);
-        let solution = self.generator.generate(input, &mut rng)?;
+        let location_ids: Vec<_> = input
+            .problem
+            .locations()
+            .iter()
+            .map(|location| location.id().to_owned())
+            .collect();
+        let result = self.generator.generate_detailed(input)?;
+        let location_id = |index: usize| location_ids[index].clone();
+        let mst_cost = result.mst_edges.iter().map(|edge| edge.distance).sum();
+        let metadata = SolverCandidateMetadata {
+            symmetric_distance_strategy: Some(result.symmetric_distance_strategy),
+            mst_cost: Some(mst_cost),
+            mst_edge_count: Some(result.mst_edges.len()),
+            mst_edges: Some(
+                result
+                    .mst_edges
+                    .iter()
+                    .map(|edge| MstEdgeDiagnostic {
+                        from: location_id(edge.from),
+                        to: location_id(edge.to),
+                        distance: edge.distance,
+                    })
+                    .collect(),
+            ),
+            euler_tour: Some(
+                result
+                    .euler_tour
+                    .iter()
+                    .map(|&index| location_id(index))
+                    .collect(),
+            ),
+            shortcut_route: Some(
+                result
+                    .solution
+                    .visit_order
+                    .iter()
+                    .map(|&index| location_id(index))
+                    .collect(),
+            ),
+            seed: Some(0),
+            ..SolverCandidateMetadata::default()
+        };
         Ok(StrategyExecution {
-            solution,
-            metadata: SolverCandidateMetadata {
-                seed: Some(self.seed),
-                ..SolverCandidateMetadata::default()
-            },
+            solution: result.solution,
+            metadata,
+        })
+    }
+}
+
+struct ChristofidesStrategy {
+    generator: ChristofidesInitialRoute<AverageSymmetricDistance, AutoPerfectMatching>,
+}
+
+impl OrchestratedStrategy for ChristofidesStrategy {
+    fn name(&self) -> &str {
+        "christofides"
+    }
+
+    fn execute(&self, input: SolverInput<'_>) -> Result<StrategyExecution, SolverError> {
+        let location_ids: Vec<_> = input
+            .problem
+            .locations()
+            .iter()
+            .map(|location| location.id().to_owned())
+            .collect();
+        let result = self.generator.generate_detailed(input)?;
+        let location_id = |index: usize| location_ids[index].clone();
+        let mst_cost = result.mst_edges.iter().map(|edge| edge.distance).sum();
+        let matching_cost = result.matching_edges.iter().map(|edge| edge.distance).sum();
+        let metadata = SolverCandidateMetadata {
+            symmetric_distance_strategy: Some(result.symmetric_distance_strategy),
+            mst_cost: Some(mst_cost),
+            mst_edge_count: Some(result.mst_edges.len()),
+            mst_edges: Some(
+                result
+                    .mst_edges
+                    .iter()
+                    .map(|edge| MstEdgeDiagnostic {
+                        from: location_id(edge.from),
+                        to: location_id(edge.to),
+                        distance: edge.distance,
+                    })
+                    .collect(),
+            ),
+            odd_vertices: Some(
+                result
+                    .odd_vertices
+                    .iter()
+                    .map(|&index| location_id(index))
+                    .collect(),
+            ),
+            odd_vertex_count: Some(result.odd_vertices.len()),
+            matching_strategy: Some(result.matching_strategy),
+            matching_cost: Some(matching_cost),
+            matching_pairs: Some(
+                result
+                    .matching_edges
+                    .iter()
+                    .map(|edge| MatchingPairDiagnostic {
+                        left: location_id(edge.left),
+                        right: location_id(edge.right),
+                        distance: edge.distance,
+                    })
+                    .collect(),
+            ),
+            euler_tour: Some(
+                result
+                    .euler_tour
+                    .iter()
+                    .map(|&index| location_id(index))
+                    .collect(),
+            ),
+            shortcut_route: Some(
+                result
+                    .solution
+                    .visit_order
+                    .iter()
+                    .map(|&index| location_id(index))
+                    .collect(),
+            ),
+            seed: Some(0),
+            ..SolverCandidateMetadata::default()
+        };
+        Ok(StrategyExecution {
+            solution: result.solution,
+            metadata,
         })
     }
 }
 
 struct AnnealingStrategy<I> {
     name: String,
+    initial_strategy: &'static str,
     seed: u64,
     solver: SimulatedAnnealingSolver<I, MixedNeighborhoodStrategy, DefaultObjectivePolicy>,
 }
@@ -609,12 +766,14 @@ struct AnnealingStrategy<I> {
 impl<I> AnnealingStrategy<I> {
     fn new(
         name: String,
+        initial_strategy: &'static str,
         seed: u64,
         config: SimulatedAnnealingConfig,
         initial: I,
     ) -> Result<Self, SolverError> {
         Ok(Self {
             name,
+            initial_strategy,
             seed,
             solver: SimulatedAnnealingSolver::new(
                 config,
@@ -632,10 +791,46 @@ impl<I: super::InitialRouteStrategy> OrchestratedStrategy for AnnealingStrategy<
     }
 
     fn execute(&self, input: SolverInput<'_>) -> Result<StrategyExecution, SolverError> {
+        let location_ids: Vec<_> = input
+            .problem
+            .locations()
+            .iter()
+            .map(|location| location.id().to_owned())
+            .collect();
         let result = self.solver.solve_detailed(input)?;
+        let location_id = |index: usize| location_ids[index].clone();
         Ok(StrategyExecution {
-            solution: result.solution,
+            solution: result.solution.clone(),
             metadata: SolverCandidateMetadata {
+                initial_strategy: Some(self.initial_strategy.to_owned()),
+                initial_route: Some(
+                    result
+                        .initial_solution
+                        .visit_order
+                        .iter()
+                        .map(|&index| location_id(index))
+                        .collect(),
+                ),
+                final_route: Some(
+                    result
+                        .solution
+                        .visit_order
+                        .iter()
+                        .map(|&index| location_id(index))
+                        .collect(),
+                ),
+                initial_score: result.initial_metrics.map(|metrics| metrics.score),
+                final_score: Some(result.metrics.score),
+                initial_temperature: Some(result.stats.initial_temperature.to_string()),
+                final_temperature: Some(result.stats.final_temperature.to_string()),
+                cooling_rate: Some(result.stats.cooling_rate.to_string()),
+                swap_move_count: Some(result.stats.swap_moves),
+                relocate_move_count: Some(result.stats.relocate_moves),
+                two_opt_move_count: Some(result.stats.two_opt_moves),
+                accepted_worse_moves: Some(result.stats.accepted_worse_moves),
+                infeasible_candidates: Some(result.stats.infeasible_candidates),
+                accepted_infeasible_moves: Some(result.stats.accepted_infeasible_moves),
+                best_feasible: Some(true),
                 iteration_count: Some(result.stats.iterations),
                 accepted_moves: Some(result.stats.accepted_moves),
                 improved_moves: Some(result.stats.improved_moves),
@@ -1037,6 +1232,93 @@ mod tests {
             })
             .collect();
         assert_eq!(first_sa, second_sa);
+        for candidate in first
+            .candidates
+            .iter()
+            .filter(|candidate| candidate.strategy.starts_with("sa_"))
+        {
+            let metadata = &candidate.metadata;
+            assert!(metadata.initial_strategy.is_some());
+            assert_eq!(metadata.initial_route.as_ref().unwrap().len(), 5);
+            assert_eq!(
+                metadata.final_route.as_ref().unwrap(),
+                &candidate
+                    .route
+                    .as_ref()
+                    .unwrap()
+                    .visit_order
+                    .iter()
+                    .map(|&index| problem.locations()[index].id().to_owned())
+                    .collect::<Vec<_>>()
+            );
+            assert_eq!(
+                metadata.final_score,
+                candidate.objective_score.map(|score| score.score)
+            );
+            assert!(metadata.initial_temperature.is_some());
+            assert!(metadata.final_temperature.is_some());
+            assert_eq!(metadata.cooling_rate.as_deref(), Some("0.995"));
+            assert_eq!(
+                metadata.swap_move_count.unwrap()
+                    + metadata.relocate_move_count.unwrap()
+                    + metadata.two_opt_move_count.unwrap(),
+                metadata.iteration_count.unwrap()
+            );
+            assert_eq!(metadata.best_feasible, Some(true));
+        }
+
+        let mst = first
+            .candidates
+            .iter()
+            .find(|candidate| candidate.strategy == "mst_double_tree")
+            .unwrap();
+        assert_eq!(
+            mst.metadata.symmetric_distance_strategy.as_deref(),
+            Some("average_bidirectional")
+        );
+        assert_eq!(mst.metadata.mst_edge_count, Some(4));
+        assert_eq!(mst.metadata.mst_edges.as_ref().unwrap().len(), 4);
+        assert_eq!(mst.metadata.euler_tour.as_ref().unwrap().len(), 9);
+        assert_eq!(
+            mst.metadata.shortcut_route.as_ref().unwrap(),
+            &mst.route
+                .as_ref()
+                .unwrap()
+                .visit_order
+                .iter()
+                .map(|&index| problem.locations()[index].id().to_owned())
+                .collect::<Vec<_>>()
+        );
+
+        let christofides = first
+            .candidates
+            .iter()
+            .find(|candidate| candidate.strategy == "christofides")
+            .unwrap();
+        assert_eq!(christofides.metadata.mst_edge_count, Some(4));
+        assert_eq!(
+            christofides.metadata.matching_strategy.as_deref(),
+            Some("bit_dp")
+        );
+        assert_eq!(
+            christofides.metadata.odd_vertex_count,
+            christofides.metadata.odd_vertices.as_ref().map(Vec::len)
+        );
+        assert_eq!(
+            christofides.metadata.matching_pairs.as_ref().unwrap().len() * 2,
+            christofides.metadata.odd_vertex_count.unwrap()
+        );
+        assert_eq!(
+            christofides.metadata.shortcut_route.as_ref().unwrap(),
+            &christofides
+                .route
+                .as_ref()
+                .unwrap()
+                .visit_order
+                .iter()
+                .map(|&index| problem.locations()[index].id().to_owned())
+                .collect::<Vec<_>>()
+        );
 
         let exact = first
             .candidates

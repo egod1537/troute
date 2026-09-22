@@ -1,0 +1,164 @@
+[
+  {
+    "n": 5,
+    "seed": 42,
+    "passed": true,
+    "feasible": true,
+    "exact": {
+      "objective": 15,
+      "latest_start": 1380,
+      "finish": 1430,
+      "travel": 15,
+      "wait": 0
+    },
+    "brute_force": {
+      "objective": 15,
+      "latest_start": 1380,
+      "finish": 1430,
+      "travel": 15,
+      "wait": 0
+    },
+    "generated_states": 14,
+    "frontier_states": 14,
+    "unpruned_generated_states": 20,
+    "unpruned_frontier_states": 20,
+    "pruning_ratio": 0.30000000000000004,
+    "elapsed_ms": 0.065541,
+    "error": null
+  },
+  {
+    "n": 5,
+    "seed": 1337,
+    "passed": true,
+    "feasible": true,
+    "exact": {
+      "objective": 16,
+      "latest_start": 1390,
+      "finish": 1430,
+      "travel": 16,
+      "wait": 0
+    },
+    "brute_force": {
+      "objective": 16,
+      "latest_start": 1390,
+      "finish": 1430,
+      "travel": 16,
+      "wait": 0
+    },
+    "generated_states": 16,
+    "frontier_states": 14,
+    "unpruned_generated_states": 18,
+    "unpruned_frontier_states": 18,
+    "pruning_ratio": 0.2222222222222222,
+    "elapsed_ms": 0.051666000000000004,
+    "error": null
+  },
+  {
+    "n": 8,
+    "seed": 42,
+    "passed": true,
+    "feasible": true,
+    "exact": {
+      "objective": 19,
+      "latest_start": 1340,
+      "finish": 1430,
+      "travel": 19,
+      "wait": 0
+    },
+    "brute_force": {
+      "objective": 19,
+      "latest_start": 1340,
+      "finish": 1430,
+      "travel": 19,
+      "wait": 0
+    },
+    "generated_states": 348,
+    "frontier_states": 206,
+    "unpruned_generated_states": 1873,
+    "unpruned_frontier_states": 1873,
+    "pruning_ratio": 0.8900160170848905,
+    "elapsed_ms": 1.462791,
+    "error": null
+  },
+  {
+    "n": 8,
+    "seed": 1337,
+    "passed": true,
+    "feasible": true,
+    "exact": {
+      "objective": 20,
+      "latest_start": 1330,
+      "finish": 1430,
+      "travel": 20,
+      "wait": 0
+    },
+    "brute_force": {
+      "objective": 20,
+      "latest_start": 1330,
+      "finish": 1430,
+      "travel": 20,
+      "wait": 0
+    },
+    "generated_states": 335,
+    "frontier_states": 209,
+    "unpruned_generated_states": 1759,
+    "unpruned_frontier_states": 1759,
+    "pruning_ratio": 0.8811824900511654,
+    "elapsed_ms": 1.228958,
+    "error": null
+  },
+  {
+    "n": 10,
+    "seed": 42,
+    "passed": true,
+    "feasible": true,
+    "exact": {
+      "objective": 24,
+      "latest_start": 1280,
+      "finish": 1430,
+      "travel": 24,
+      "wait": 0
+    },
+    "brute_force": {
+      "objective": 24,
+      "latest_start": 1280,
+      "finish": 1430,
+      "travel": 24,
+      "wait": 0
+    },
+    "generated_states": 2064,
+    "frontier_states": 1120,
+    "unpruned_generated_states": 102569,
+    "unpruned_frontier_states": 102569,
+    "pruning_ratio": 0.9890805214051029,
+    "elapsed_ms": 62.229791,
+    "error": null
+  },
+  {
+    "n": 10,
+    "seed": 1337,
+    "passed": true,
+    "feasible": true,
+    "exact": {
+      "objective": 23,
+      "latest_start": 1300,
+      "finish": 1430,
+      "travel": 23,
+      "wait": 0
+    },
+    "brute_force": {
+      "objective": 23,
+      "latest_start": 1300,
+      "finish": 1430,
+      "travel": 23,
+      "wait": 0
+    },
+    "generated_states": 2311,
+    "frontier_states": 1232,
+    "unpruned_generated_states": 99044,
+    "unpruned_frontier_states": 99044,
+    "pruning_ratio": 0.9875610839626833,
+    "elapsed_ms": 47.412749999999996,
+    "error": null
+  }
+]

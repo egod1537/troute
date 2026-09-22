@@ -8,12 +8,14 @@ export interface RouteInput {
   job_id: string;
   locations: {
     id: string;
+    name?: string;
     place_id: string;
     open_time: string;
     close_time: string;
     stay_minutes: number;
   }[];
   start_time: string;
+  travel_time_matrix?: number[][];
   debug?: {
     min_job_duration_ms?: number;
   };
@@ -45,7 +47,61 @@ export interface SolverCandidate {
   metadata: {
     state_count?: number;
     frontier_state_count?: number;
+    frontier_cell_count?: number;
     cluster_count?: number;
+    cluster_sizes?: number[];
+    cluster_strategy?: string;
+    cluster_order_strategy?: string;
+    cluster_order?: number[];
+    cluster_details?: {
+      cluster: number;
+      members: string[];
+      route: string[];
+      entry?: string;
+      exit?: string;
+      state_count: number;
+      frontier_state_count: number;
+    }[];
+    score_before_improvement?: number;
+    score_after_improvement?: number;
+    improvement_strategy?: string;
+    swap_enabled?: boolean;
+    relocate_enabled?: boolean;
+    two_opt_enabled?: boolean;
+    symmetric_distance_strategy?: string;
+    mst_cost?: number;
+    mst_edge_count?: number;
+    mst_edges?: {
+      from: string;
+      to: string;
+      distance: number;
+    }[];
+    euler_tour?: string[];
+    shortcut_route?: string[];
+    odd_vertices?: string[];
+    odd_vertex_count?: number;
+    matching_strategy?: string;
+    matching_cost?: number;
+    matching_pairs?: {
+      left: string;
+      right: string;
+      distance: number;
+    }[];
+    initial_strategy?: string;
+    initial_route?: string[];
+    final_route?: string[];
+    initial_score?: number;
+    final_score?: number;
+    initial_temperature?: string;
+    final_temperature?: string;
+    cooling_rate?: string;
+    swap_move_count?: number;
+    relocate_move_count?: number;
+    two_opt_move_count?: number;
+    accepted_worse_moves?: number;
+    infeasible_candidates?: number;
+    accepted_infeasible_moves?: number;
+    best_feasible?: boolean;
     iteration_count?: number;
     accepted_moves?: number;
     improved_moves?: number;
@@ -176,11 +232,17 @@ export function parseInput(text: string): RouteInput {
       "debug.min_job_duration_ms는 0~60000 범위의 정수여야 합니다.",
     );
   }
+  if (input.travel_time_matrix !== undefined) {
+    throw new Error(
+      "travel_time_matrix는 입력할 수 없습니다. 최적화 시 tcache에서 항상 새로 조회합니다.",
+    );
+  }
   const locationIds = new Set<string>();
   for (const [index, location] of input.locations.entries()) {
     if (
       !object(location) ||
       !nonempty(location.id) ||
+      (location.name !== undefined && typeof location.name !== "string") ||
       !nonempty(location.place_id) ||
       !time(location.open_time) ||
       !time(location.close_time) ||
@@ -321,6 +383,25 @@ export async function runRoute(
     );
   const response = await request(ROUTE_PATH, input);
   return { response, route: parseRoute(response) };
+}
+
+export async function fetchTravelTimeMatrix(
+  input: RouteInput,
+): Promise<number[][]> {
+  const response = await request("/integration/matrix", {
+    ...input,
+    travel_time_matrix: undefined,
+  });
+  if (
+    !object(response.body) ||
+    !Array.isArray(response.body.travel_time_matrix) ||
+    !response.body.travel_time_matrix.every(
+      (row) => Array.isArray(row) && row.every(unsigned),
+    )
+  ) {
+    throw new ApiError("매트릭스 응답 형식이 올바르지 않습니다.", response);
+  }
+  return response.body.travel_time_matrix as number[][];
 }
 
 async function integrationJson<T>(path: string, signal?: AbortSignal): Promise<T> {

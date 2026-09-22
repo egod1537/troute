@@ -24,7 +24,8 @@ pub mod storage;
 pub mod tcache;
 
 pub use api::{
-    DebugOptions, ObjectiveScoreOutput, OptimizeRouteRequest, OptimizeRouteResponse,
+    ClusterDiagnosticOutput, DebugOptions, MatchingPairDiagnosticOutput, MstEdgeDiagnosticOutput,
+    ObjectiveScoreOutput, OptimizeRouteRequest, OptimizeRouteResponse,
     SolverCandidateMetadataOutput, SolverCandidateOutput,
 };
 pub use cancellation::CancellationToken;

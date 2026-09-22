@@ -81,6 +81,11 @@ struct CancelJobResponse {
 }
 
 #[derive(Debug, Serialize)]
+struct MatrixPreviewResponse {
+    travel_time_matrix: Vec<Vec<u32>>,
+}
+
+#[derive(Debug, Serialize)]
 struct ErrorEnvelope {
     error: ErrorBody,
 }
@@ -327,6 +332,7 @@ where
         .route("/health", get(health))
         .route("/optimize", post(optimize))
         .route("/integration/jobs", get(list_jobs).post(submit_job))
+        .route("/integration/matrix", post(build_matrix))
         .route("/integration/jobs/{job_id}", get(get_job))
         .route("/integration/jobs/{job_id}/events", get(job_events))
         .route("/integration/jobs/{job_id}/cancel", post(cancel_job))
@@ -358,6 +364,32 @@ fn max_concurrent_jobs_from_env() -> Option<usize> {
 
 async fn health() -> Json<HealthResponse> {
     Json(HealthResponse { status: "ok" })
+}
+
+async fn build_matrix(
+    State(state): State<AppState>,
+    request: Result<Json<OptimizeRouteRequest>, JsonRejection>,
+) -> Result<Json<MatrixPreviewResponse>, ApiError> {
+    let Json(mut request) = request.map_err(ApiError::from_json_rejection)?;
+    request.travel_time_matrix = None;
+    OptimizationProblem::try_from(request.clone())
+        .map_err(OptimizationServiceError::InvalidRequest)
+        .map_err(ApiError::from_service)?;
+    let executor = state.executor.clone();
+    let matrix = tokio::task::spawn_blocking(move || executor.build_travel_time_matrix(request))
+        .await
+        .map_err(|error| {
+            ApiError::new(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "MATRIX_EXECUTION_FAILED",
+                "Travel-time matrix generation failed unexpectedly.",
+                error.to_string(),
+            )
+        })?
+        .map_err(ApiError::from_service)?;
+    Ok(Json(MatrixPreviewResponse {
+        travel_time_matrix: matrix.into_rows(),
+    }))
 }
 
 async fn optimize(

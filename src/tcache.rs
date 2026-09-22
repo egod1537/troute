@@ -31,8 +31,8 @@ pub struct TcacheRoutingConfig {
 
 impl TcacheRoutingConfig {
     pub fn from_env() -> Result<Self, String> {
-        let base_url = env::var("TCACHE_BASE_URL")
-            .map_err(|_| "TCACHE_BASE_URL is required when ROUTING_PROVIDER=tcache".to_owned())?;
+        let base_url =
+            env::var("TCACHE_BASE_URL").map_err(|_| "TCACHE_BASE_URL is required".to_owned())?;
         if base_url.trim().is_empty() {
             return Err("TCACHE_BASE_URL must not be empty".to_owned());
         }

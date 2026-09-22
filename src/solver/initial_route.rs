@@ -20,6 +20,10 @@ pub trait InitialRouteGenerator: Send + Sync {
 /// Converts the directed travel-time matrix into the undirected weights used
 /// only while building an MST.
 pub trait SymmetricDistanceStrategy: Send + Sync {
+    fn name(&self) -> &'static str {
+        "custom"
+    }
+
     fn symmetric_distance(
         &self,
         matrix: &TravelTimeMatrix,
@@ -50,6 +54,10 @@ fn directed_pair(
 pub struct AverageSymmetricDistance;
 
 impl SymmetricDistanceStrategy for AverageSymmetricDistance {
+    fn name(&self) -> &'static str {
+        "average_bidirectional"
+    }
+
     fn symmetric_distance(
         &self,
         matrix: &TravelTimeMatrix,
@@ -65,6 +73,10 @@ impl SymmetricDistanceStrategy for AverageSymmetricDistance {
 pub struct MinSymmetricDistance;
 
 impl SymmetricDistanceStrategy for MinSymmetricDistance {
+    fn name(&self) -> &'static str {
+        "minimum_bidirectional"
+    }
+
     fn symmetric_distance(
         &self,
         matrix: &TravelTimeMatrix,
@@ -80,6 +92,10 @@ impl SymmetricDistanceStrategy for MinSymmetricDistance {
 pub struct MaxSymmetricDistance;
 
 impl SymmetricDistanceStrategy for MaxSymmetricDistance {
+    fn name(&self) -> &'static str {
+        "maximum_bidirectional"
+    }
+
     fn symmetric_distance(
         &self,
         matrix: &TravelTimeMatrix,
@@ -100,6 +116,7 @@ pub struct MstEdge {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct MstDoubleTreeResult {
+    pub symmetric_distance_strategy: String,
     pub mst_edges: Vec<MstEdge>,
     pub euler_tour: Vec<usize>,
     pub solution: SolverSolution,
@@ -154,6 +171,7 @@ impl<S: SymmetricDistanceStrategy> MstDoubleTreeInitialRoute<S> {
         }
 
         Ok(MstDoubleTreeResult {
+            symmetric_distance_strategy: self.symmetric_distance.name().to_owned(),
             mst_edges: edges,
             euler_tour,
             solution: SolverSolution { visit_order },
@@ -591,6 +609,17 @@ mod tests {
             .unwrap();
 
         assert_eq!(first, second);
+        assert_eq!(first.symmetric_distance_strategy, "average_bidirectional");
+        assert_eq!(first.mst_edges.len(), 4);
+        assert_eq!(
+            first
+                .mst_edges
+                .iter()
+                .map(|edge| edge.distance)
+                .sum::<u64>(),
+            8
+        );
+        assert_eq!(first.euler_tour.len(), 2 * first.mst_edges.len() + 1);
         assert_eq!(first.solution.visit_order.first(), Some(&0));
         assert_eq!(first.solution.visit_order.last(), Some(&4));
         let unique: BTreeSet<_> = first.solution.visit_order.iter().copied().collect();

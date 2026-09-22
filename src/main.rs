@@ -5,10 +5,8 @@ use std::{
 
 use tokio::net::TcpListener;
 use troute::{
-    development::DevelopmentRoutingProvider,
     http,
     observation::JobObservationRecorder,
-    routing::RoutingProvider,
     solver::{
         MatchingStrategyConfig, SolverOrchestrator, SolverOrchestratorConfig, EXACT_MAX_LOCATIONS,
         MAX_EXACT_CLUSTER_SIZE,
@@ -44,22 +42,10 @@ async fn run() -> Result<(), Box<dyn Error>> {
         Err(env::VarError::NotPresent) => PathBuf::from(".local/troute"),
         Err(error) => return Err(error.into()),
     };
-    let routing_provider: Box<dyn RoutingProvider + Send + Sync> =
-        match env::var("ROUTING_PROVIDER") {
-            Ok(value) if value == "development" => Box::new(DevelopmentRoutingProvider),
-            Err(env::VarError::NotPresent) => Box::new(DevelopmentRoutingProvider),
-            Ok(value) if value == "tcache" => Box::new(TcacheRoutingProvider::new(
-                TcacheRoutingConfig::from_env()
-                    .map_err(|error| format!("invalid tcache configuration: {error}"))?,
-            )?),
-            Ok(value) => {
-                return Err(format!(
-                    "ROUTING_PROVIDER must be development or tcache (actual {value})"
-                )
-                .into())
-            }
-            Err(error) => return Err(error.into()),
-        };
+    let routing_provider = TcacheRoutingProvider::new(
+        TcacheRoutingConfig::from_env()
+            .map_err(|error| format!("invalid tcache configuration: {error}"))?,
+    )?;
     let exact_limit = read_bounded_size(
         "TROUTE_EXACT_LIMIT",
         EXACT_MAX_LOCATIONS,

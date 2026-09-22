@@ -9,6 +9,7 @@ export function createSample(): RouteInput {
     locations: [
       {
         id: "A",
+        name: "Start",
         place_id: "place-a",
         open_time: "09:00",
         close_time: "18:00",
@@ -16,6 +17,7 @@ export function createSample(): RouteInput {
       },
       {
         id: "B",
+        name: "Waypoint",
         place_id: "place-b",
         open_time: "10:00",
         close_time: "20:00",
@@ -23,13 +25,19 @@ export function createSample(): RouteInput {
       },
       {
         id: "C",
+        name: "Destination",
         place_id: "place-c",
         open_time: "11:00",
         close_time: "19:00",
         stay_minutes: 45,
       },
     ],
-    start_time: "09:00",
+    start_time: "00:00",
+    travel_time_matrix: [
+      [0, 30, 45],
+      [28, 0, 15],
+      [40, 18, 0],
+    ],
     debug: {
       min_job_duration_ms: 4_000,
     },

@@ -25,6 +25,10 @@ pub struct PerfectMatchingEdge {
 /// Computes a minimum-weight perfect matching over `vertices`. `distances` is
 /// indexed by positions in `vertices`, not by global location indices.
 pub trait PerfectMatchingStrategy: Send + Sync {
+    fn strategy_name(&self, _vertex_count: usize) -> &'static str {
+        "custom"
+    }
+
     fn minimum_weight_perfect_matching(
         &self,
         vertices: &[usize],
@@ -69,6 +73,10 @@ impl BitDpPerfectMatching {
 }
 
 impl PerfectMatchingStrategy for BitDpPerfectMatching {
+    fn strategy_name(&self, _vertex_count: usize) -> &'static str {
+        "bit_dp"
+    }
+
     fn minimum_weight_perfect_matching(
         &self,
         vertices: &[usize],
@@ -154,6 +162,10 @@ impl BlossomPerfectMatching {
 }
 
 impl PerfectMatchingStrategy for BlossomPerfectMatching {
+    fn strategy_name(&self, _vertex_count: usize) -> &'static str {
+        "blossom"
+    }
+
     fn minimum_weight_perfect_matching(
         &self,
         vertices: &[usize],
@@ -352,6 +364,14 @@ impl AutoPerfectMatching {
 }
 
 impl PerfectMatchingStrategy for AutoPerfectMatching {
+    fn strategy_name(&self, vertex_count: usize) -> &'static str {
+        match self.selected_strategy(vertex_count) {
+            MatchingStrategyChoice::BitDp => "bit_dp",
+            MatchingStrategyChoice::Blossom => "blossom",
+            MatchingStrategyChoice::Auto => unreachable!("auto is resolved above"),
+        }
+    }
+
     fn minimum_weight_perfect_matching(
         &self,
         vertices: &[usize],
@@ -493,6 +513,8 @@ pub fn eulerian_multigraph_tour(
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ChristofidesResult {
+    pub symmetric_distance_strategy: String,
+    pub matching_strategy: String,
     pub mst_edges: Vec<MstEdge>,
     pub odd_vertices: Vec<usize>,
     pub matching_edges: Vec<PerfectMatchingEdge>,
@@ -577,6 +599,11 @@ impl<S: SymmetricDistanceStrategy, P: PerfectMatchingStrategy> ChristofidesIniti
         move_fixed_destination_to_end(&mut visit_order, input.problem.end_location_index())?;
 
         Ok(ChristofidesResult {
+            symmetric_distance_strategy: self.symmetric_distance.name().to_owned(),
+            matching_strategy: self
+                .perfect_matching
+                .strategy_name(odd_vertices.len())
+                .to_owned(),
             mst_edges,
             odd_vertices,
             matching_edges,
@@ -867,6 +894,7 @@ mod tests {
         assert_eq!(visited, (0..12).collect());
         assert_eq!(result.solution.visit_order.first(), Some(&0));
         assert_eq!(result.solution.visit_order.last(), Some(&11));
+        assert_eq!(result.matching_strategy, "blossom");
     }
 
     #[test]
@@ -885,6 +913,8 @@ mod tests {
             .flat_map(|edge| [edge.left, edge.right])
             .collect();
         assert_eq!(odd_set, matched);
+        assert_eq!(result.symmetric_distance_strategy, "average_bidirectional");
+        assert_eq!(result.matching_strategy, "bit_dp");
         assert!(odd_degree_vertices(6, &result.eulerian_edges)
             .unwrap()
             .is_empty());

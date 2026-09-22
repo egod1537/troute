@@ -44,7 +44,7 @@ troute
    +-- HTTP health endpoint
    +-- HTTP optimize endpoint
    +-- API types
-   +-- Routing Provider (development or tcache adapter)
+   +-- Routing Provider (tcache adapter)
    +-- Travel Time Matrix
    +-- Route Solver
    +-- Schedule Calculation
@@ -55,9 +55,8 @@ The component interfaces and v0 data flow are defined. The HTTP server exposes
 `POST /optimize`, and polling APIs under `/integration/jobs`. Background jobs
 execute the provider -> solver -> schedule service pipeline and persist
 progress, result, error, cancellation, and observation data locally. The
-currently wired provider and solver are
-deterministic development provider or a tcache-backed Travel Time Matrix
-provider. Provider-specific route lookup, caching, and Google credentials stay
+runtime always uses the tcache-backed Travel Time Matrix provider.
+Provider-specific route lookup, caching, and Google credentials stay
 inside tcache; the solver and scheduling layers only receive a matrix.
 Trasolve calls troute in one direction only. troute neither requires a Trasolve
 address nor sends callbacks to it. The separate developer testbed uses its own
@@ -134,15 +133,14 @@ terminal results.
 
 ## Routing provider configuration
 
-`ROUTING_PROVIDER=development` is the default and retains the deterministic
-15-minute development matrix. Set `ROUTING_PROVIDER=tcache` to create one
-matrix Job in tcache for each optimization request. `TCACHE_BASE_URL` is then
-required; invalid configuration fails application startup.
+Every optimization creates one matrix Job in tcache. `TCACHE_BASE_URL` is
+required, and missing or invalid configuration fails application startup.
+Caller-supplied `travel_time_matrix` values are rejected so optimization cannot
+bypass tcache.
 
 | Variable | Default | Description |
 | --- | --- | --- |
-| `ROUTING_PROVIDER` | `development` | `development` or `tcache` |
-| `TCACHE_BASE_URL` | none | tcache server base URL; required for `tcache` |
+| `TCACHE_BASE_URL` | none | required tcache server base URL |
 | `TCACHE_MATRIX_POLL_INTERVAL_MS` | `250` | positive status polling interval |
 | `TCACHE_MATRIX_TIMEOUT_MS` | `30000` | positive total matrix request timeout |
 | `TROUTE_EXACT_LIMIT` | `15` | maximum location count at which the orchestrator also runs exact bit-DP; 1–15 |
@@ -277,8 +275,8 @@ curl -i -X POST http://127.0.0.1:8080/optimize \
   }'
 ```
 
-With the deterministic development matrix, the selected route portion of a
-successful response looks like the following. The default orchestrator also
+With a matrix returned by tcache, the selected route portion of a successful
+response looks like the following. The default orchestrator also
 adds the `solver_candidates` comparison described below (omitted here for
 brevity):
 
@@ -446,9 +444,9 @@ OptimizeRouteRequest
 
 The solver only reads `OptimizationProblem` and `TravelTimeMatrix`; it does not
 call HTTP, tcache, caches, Google APIs, or place-ID lookup code.
-`DevelopmentRoutingProvider` returns a deterministic fixed matrix,
-`StaticMatrixRoutingProvider` returns a caller-supplied matrix, and
-`TcacheRoutingProvider` uses tcache's native matrix job API. Providers which
+`DevelopmentRoutingProvider` and `StaticMatrixRoutingProvider` remain test
+utilities. The server runtime wires only `TcacheRoutingProvider`, which uses
+tcache's native matrix job API. Providers which
 only support directed pair lookups can implement `TravelTimeProvider` and use
 `PairwiseMatrixRoutingProvider` to build the complete matrix. This leaves both
 pair-query and native matrix-query strategies interchangeable without solver
@@ -732,8 +730,8 @@ The Rust API implements `GET /health` and `POST /optimize`. Configure
 payload; otherwise it continues to run a health check. The client renders
 `route` / `total_travel_minutes` from the existing DTOs. Error status and
 response bodies remain visible, including malformed JSON and infeasible-route
-errors. Results currently come from the documented deterministic development
-provider and solver, not a production optimization algorithm.
+errors. Route optimization always obtains its travel-time matrix from tcache
+before running the solver orchestrator.
 
 For local development (Node 22.12+; Docker builds use Node 24), start the API
 with `cargo run` and run these commands in another terminal:
@@ -1015,17 +1013,36 @@ aliases such as `troute-main` and `troute-w1-jjs`, and configure each backend's
 `TROUTE_URL` accordingly. Never switch branches inside a running process.
 Preview deployment automation is outside the current scope.
 
+## Algorithm validation
+
+The deterministic correctness suite cross-checks the exact solver against an
+independent brute-force oracle, compares Pareto pruning on and off, exercises
+10-minute slot boundaries, and compares Bit-DP and Blossom perfect matching:
+
+```sh
+cargo test --test algorithm_validation
+```
+
+Run the release-mode quality and performance matrix with:
+
+```sh
+cargo run --release --bin algorithm_validation -- \
+  --output-dir benchmark-results
+```
+
+The default matrix uses seeds `42` and `1337` at N=5, 8, 10, 12, 15, 20, 30,
+and 50 where each strategy applies. `--n 5,10` and `--seed 42,99` select an
+explicit reproducible subset. Failures include N and seed, and the runner writes
+`exact-vs-bruteforce.json`, `heuristic-gap.json`, `large-n-performance.json`,
+and `orchestrator-results.json`.
+
 ## Secrets
 
 `.env` and `.env.*` are excluded from Git and the Docker build context;
 `.env.example` contains only safe defaults. Do not commit keys or tokens.
-No Google Maps key is needed for the deterministic development provider. Add
-`GOOGLE_MAPS_API_KEY` through environment configuration only when an actual
-provider integration requires it.
+Google credentials belong to tcache and are not configured in troute.
 
 ## Project Status
 
-Early development. The v0 types, component boundaries, health and optimize HTTP
-endpoints, and container environment are in place. The optimize endpoint uses
-temporary deterministic provider/solver implementations; production routing
-data and optimization algorithms are pending.
+The v0 types, component boundaries, health and optimize HTTP endpoints, tcache
+matrix integration, and solver orchestrator are in place.

@@ -35,6 +35,10 @@ impl TravelTimeMatrix {
     pub fn travel_minutes(&self, from: usize, to: usize) -> Option<u32> {
         self.rows.get(from)?.get(to).copied()
     }
+
+    pub fn into_rows(self) -> Vec<Vec<u32>> {
+        self.rows
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Error)]

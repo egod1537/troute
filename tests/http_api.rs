@@ -361,6 +361,40 @@ async fn health_remains_available() {
     assert_eq!(response.body, json!({ "status": "ok" }));
 }
 
+#[tokio::test]
+async fn matrix_preview_uses_the_configured_routing_provider() {
+    let response = send(
+        Method::POST,
+        "/integration/matrix",
+        Some("application/json"),
+        valid_request().to_string(),
+    )
+    .await;
+
+    assert_eq!(response.status, StatusCode::OK);
+    assert_eq!(
+        response.body["travel_time_matrix"],
+        json!([[0, 15, 15], [15, 0, 15], [15, 15, 0]])
+    );
+}
+
+#[tokio::test]
+async fn optimize_rejects_a_caller_supplied_matrix() {
+    let mut request = valid_request();
+    request["travel_time_matrix"] = json!([[0, 7, 99], [31, 0, 9], [41, 27, 0]]);
+
+    let response = send(
+        Method::POST,
+        "/optimize",
+        Some("application/json"),
+        request.to_string(),
+    )
+    .await;
+
+    assert_eq!(response.status, StatusCode::BAD_REQUEST);
+    assert_eq!(response.body["error"]["code"], "INVALID_REQUEST");
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn async_submit_returns_202_before_solver_and_persists_state_transitions() {
     let temporary = TestDirectory::new();

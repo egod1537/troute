@@ -33,6 +33,17 @@ pub trait JobExecutor: Send + Sync {
         reporter: &dyn OptimizationEventReporter,
         cancellation: &CancellationToken,
     ) -> Result<OptimizeRouteResponse, OptimizationServiceError>;
+
+    fn build_travel_time_matrix(
+        &self,
+        _request: OptimizeRouteRequest,
+    ) -> Result<crate::matrix::TravelTimeMatrix, OptimizationServiceError> {
+        Err(OptimizationServiceError::Routing(
+            crate::routing::RoutingError::Provider(
+                "matrix preview is unavailable for this executor".to_owned(),
+            ),
+        ))
+    }
 }
 
 impl<P, S> JobExecutor for RouteOptimizationService<P, S>
@@ -47,6 +58,13 @@ where
         cancellation: &CancellationToken,
     ) -> Result<OptimizeRouteResponse, OptimizationServiceError> {
         self.optimize_with_cancellation(request, reporter, cancellation)
+    }
+
+    fn build_travel_time_matrix(
+        &self,
+        request: OptimizeRouteRequest,
+    ) -> Result<crate::matrix::TravelTimeMatrix, OptimizationServiceError> {
+        RouteOptimizationService::build_travel_time_matrix(self, request)
     }
 }
 
