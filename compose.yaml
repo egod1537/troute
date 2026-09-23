@@ -21,7 +21,7 @@ services:
       dockerfile: testbed/Dockerfile
       args:
         VITE_TROUTE_API_BASE_URL: ${VITE_TROUTE_API_BASE_URL:-/api}
-        VITE_TROUTE_ROUTE_PATH: ${VITE_TROUTE_ROUTE_PATH:-}
+        VITE_TROUTE_ROUTE_PATH: ${VITE_TROUTE_ROUTE_PATH:-/optimize}
         VITE_TROUTE_COMMIT_SHA: ${TROUTE_COMMIT_SHA:-unknown}
     restart: unless-stopped
     environment:

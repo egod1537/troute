@@ -767,8 +767,9 @@ absolute `VITE_TROUTE_API_BASE_URL` requires that API to explicitly allow the
 frontend origin; the recommended `/api` setup needs no such configuration.
 
 `VITE_*` values are public build-time configuration. For Compose builds, set
-`VITE_TROUTE_API_BASE_URL` and optional `VITE_TROUTE_ROUTE_PATH` in the root
-`.env`, then rebuild. For Vite development use `testbed/.env.local`. Never put
+`VITE_TROUTE_API_BASE_URL` and `VITE_TROUTE_ROUTE_PATH` in the root `.env`, then
+rebuild. The route path defaults to `/optimize`. For Vite development use
+`testbed/.env.local`. Never put
 API keys in these variables. Remote private access should forward the testbed
 port through your existing private connection; it does not require exposing
 the API port or publishing a public domain.

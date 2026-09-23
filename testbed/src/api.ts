@@ -1,8 +1,9 @@
 export const API_BASE = (
   import.meta.env.VITE_TROUTE_API_BASE_URL || "/api"
 ).replace(/\/$/, "");
-// Intentionally unset: the current Rust binary exposes only GET /health.
-export const ROUTE_PATH = (import.meta.env.VITE_TROUTE_ROUTE_PATH || "").trim();
+export const ROUTE_PATH = (
+  import.meta.env.VITE_TROUTE_ROUTE_PATH ?? "/optimize"
+).trim();
 
 export interface RouteInput {
   job_id: string;
