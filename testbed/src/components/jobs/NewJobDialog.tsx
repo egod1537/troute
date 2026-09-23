@@ -22,6 +22,10 @@ function blankMatrix(size: number): string[][] {
   return Array.from({ length: size }, (_, row) => Array.from({ length: size }, (_, column) => row === column ? "0" : ""));
 }
 const matrixFromNumbers = (matrix: number[][]) => matrix.map((row) => row.map(String));
+function completeMatrix(matrix: string[][], size: number): number[][] | undefined {
+  if (matrix.length !== size || matrix.some((row) => row.length !== size || row.some((value) => value.trim() === ""))) return undefined;
+  return matrix.map((row) => row.map(Number));
+}
 
 export function NewJobDialog({ isOpen, dark, existingJobIds, onClose, onCreate }: NewJobDialogProps) {
   const [jobId, setJobId] = useState("");
@@ -51,13 +55,17 @@ export function NewJobDialog({ isOpen, dark, existingJobIds, onClose, onCreate }
     if (isOpen) { loadRequest(createSample()); setRawOpen(true); setCsvOpen(false); setCsvInput(""); }
   }, [isOpen]);
 
-  const formRequest = useMemo<RouteInput>(() => ({
-    job_id: jobId,
-    locations: locations.map((location) => ({ id: location.id.trim(), name: location.name.trim() || undefined, place_id: location.placeId.trim(), open_time: location.openTime, close_time: location.closeTime, stay_minutes: Number(location.stayMinutes) })),
-    // Midnight is the contract's minimum earliest-start bound. The solver still selects the latest feasible start.
-    start_time: "00:00",
-    debug: { min_job_duration_ms: 4_000 },
-  }), [jobId, locations]);
+  const formRequest = useMemo<RouteInput>(() => {
+    const suppliedMatrix = completeMatrix(matrix, locations.length);
+    return {
+      job_id: jobId,
+      locations: locations.map((location) => ({ id: location.id.trim(), name: location.name.trim() || undefined, place_id: location.placeId.trim(), open_time: location.openTime, close_time: location.closeTime, stay_minutes: Number(location.stayMinutes) })),
+      // Midnight is the contract's minimum earliest-start bound. The solver still selects the latest feasible start.
+      start_time: "00:00",
+      travel_time_matrix: suppliedMatrix,
+      debug: { min_job_duration_ms: 4_000 },
+    };
+  }, [jobId, locations, matrix]);
   useEffect(() => { if (!rawEditing) setRawInput(JSON.stringify(formRequest, null, 2)); }, [formRequest, rawEditing]);
 
   function clearFeedback() {
@@ -70,6 +78,8 @@ export function NewJobDialog({ isOpen, dark, existingJobIds, onClose, onCreate }
   }
   function validateForm(validateMatrix = true): RouteInput | null {
     const errors: Record<string, string> = {};
+    const suppliedMatrix = validateMatrix ? completeMatrix(matrix, locations.length) : undefined;
+    const hasMatrixInput = matrix.some((row, rowIndex) => row.some((value, columnIndex) => rowIndex !== columnIndex && value.trim() !== ""));
     if (!jobId.trim()) errors.jobId = "Job ID를 입력하세요.";
     if (existingJobIds.has(jobId.trim())) errors.jobId = `job_id "${jobId.trim()}"가 이 세션에 이미 존재합니다.`;
     if (locations.length < 2) errors.locations = "장소가 최소 2개 필요합니다.";
@@ -79,15 +89,15 @@ export function NewJobDialog({ isOpen, dark, existingJobIds, onClose, onCreate }
       if (!location.id.trim()) errors[`${prefix}.id`] = "ID가 필요합니다.";
       else if (ids.has(location.id.trim())) errors[`${prefix}.id`] = "ID는 중복될 수 없습니다.";
       ids.add(location.id.trim());
-      if (!location.placeId.trim()) errors[`${prefix}.placeId`] = "tcache 조회에는 Place ID가 필요합니다.";
+      if (!location.placeId.trim() && !suppliedMatrix) errors[`${prefix}.placeId`] = "매트릭스가 없으면 tcache 조회용 Place ID가 필요합니다.";
       if (!TIME_PATTERN.test(location.openTime)) errors[`${prefix}.openTime`] = "HH:MM 형식이 필요합니다.";
       if (!TIME_PATTERN.test(location.closeTime)) errors[`${prefix}.closeTime`] = "HH:MM 형식이 필요합니다.";
       if (TIME_PATTERN.test(location.openTime) && TIME_PATTERN.test(location.closeTime) && location.openTime > location.closeTime) errors[`${prefix}.closeTime`] = "Close는 Open보다 빠를 수 없습니다.";
       const stay = Number(location.stayMinutes);
       if (!Number.isInteger(stay) || stay < 0) errors[`${prefix}.stayMinutes`] = "0 이상의 정수를 입력하세요.";
     });
-    if (validateMatrix && (matrix.length !== locations.length || matrix.some((row) => row.length !== locations.length))) errors.matrix = "매트릭스 크기가 장소 수와 일치하지 않습니다.";
-    else if (validateMatrix) matrix.forEach((row, rowIndex) => row.forEach((value, columnIndex) => {
+    if (validateMatrix && hasMatrixInput && (matrix.length !== locations.length || matrix.some((row) => row.length !== locations.length))) errors.matrix = "매트릭스 크기가 장소 수와 일치하지 않습니다.";
+    else if (validateMatrix && hasMatrixInput) matrix.forEach((row, rowIndex) => row.forEach((value, columnIndex) => {
       const parsed = Number(value);
       if (value.trim() === "" || !Number.isInteger(parsed) || parsed < 0) errors[`matrix.${rowIndex}.${columnIndex}`] = "0 이상의 정수를 입력하세요.";
       else if (rowIndex === columnIndex && parsed !== 0) errors[`matrix.${rowIndex}.${columnIndex}`] = "대각선 값은 0이어야 합니다.";
@@ -98,7 +108,7 @@ export function NewJobDialog({ isOpen, dark, existingJobIds, onClose, onCreate }
   }
   function parseAndValidate() {
     try {
-      const request = rawEditing ? parseInput(rawInput) : validateForm(false);
+      const request = rawEditing ? parseInput(rawInput) : validateForm();
       if (!request) return null;
       if (existingJobIds.has(request.job_id)) throw new Error(`job_id "${request.job_id}"가 이 세션에 이미 존재합니다.`);
       setFieldErrors({}); setValidation({ valid: true, message: "유효함" }); return request;
@@ -249,7 +259,7 @@ export function NewJobDialog({ isOpen, dark, existingJobIds, onClose, onCreate }
       </section>
 
       <section className="new-job-section" aria-labelledby="matrix-heading">
-        <div className="section-heading"><div><h2 id="matrix-heading">이동 시간 매트릭스 미리보기</h2><p className={Classes.TEXT_MUTED}>확인용 방향별 이동 시간입니다. 최적화 요청에는 포함되지 않으며 서버가 tcache에서 다시 조회합니다.</p></div></div>
+        <div className="section-heading"><div><h2 id="matrix-heading">이동 시간 매트릭스</h2><p className={Classes.TEXT_MUTED}>완성된 매트릭스는 최적화 요청에 포함되어 tcache 조회를 생략합니다. 비워 두면 Place ID로 tcache에서 조회합니다.</p></div></div>
         <div className="form-table-scroll matrix-scroll"><table className="matrix-input-table"><thead><tr><th aria-label="출발 및 도착" />{locations.map((location, index) => <th key={location.key}>{location.id || index + 1}</th>)}</tr></thead>
           <tbody>{locations.map((location, rowIndex) => <tr key={location.key}><th>{location.id || rowIndex + 1}</th>{locations.map((column, columnIndex) => { const error = fieldErrors[`matrix.${rowIndex}.${columnIndex}`]; return <td key={column.key}><input aria-label={`${location.id || rowIndex + 1}에서 ${column.id || columnIndex + 1} 이동 시간`} aria-invalid={Boolean(error)} className={`bp6-input ${error ? "field-invalid" : ""}`} type="number" min="0" step="1" disabled={rowIndex === columnIndex} value={matrix[rowIndex]?.[columnIndex] ?? ""} onChange={(event) => { const value = event.target.value; setMatrix((current) => current.map((row, currentRow) => currentRow === rowIndex ? row.map((cell, currentColumn) => currentColumn === columnIndex ? value : cell) : row)); clearFeedback(); }} /></td>; })}</tr>)}</tbody>
         </table></div>

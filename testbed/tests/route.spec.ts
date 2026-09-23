@@ -257,7 +257,11 @@ test("job is inserted and selected before the request completes, then succeeds",
     const request = route.request().postDataJSON();
     expect(request.job_id).toBe("route-immediate");
     expect(request.start_time).toBe("00:00");
-    expect(request.travel_time_matrix).toBeUndefined();
+    expect(request.travel_time_matrix).toEqual([
+      [0, 30, 45],
+      [28, 0, 15],
+      [40, 18, 0],
+    ]);
     await routeGate;
     await route.fulfill({ json: routeResult });
   });
@@ -503,7 +507,7 @@ test("form edits directed matrix, resizes with locations, and exposes five prese
   await expect(dialog.getByLabel("A에서 B 이동 시간")).toHaveValue("12");
   await expect(dialog.getByLabel("B에서 A 이동 시간")).toHaveValue("17");
   await dialog.getByRole("button", { name: "검증" }).click();
-  await expect(dialog.getByRole("alert")).toContainText("tcache 조회에는 Place ID가 필요합니다.");
+  await expect(dialog.getByText("유효함", { exact: true })).toBeVisible();
   expect(presetMatrixRequests).toBe(1);
 });
 
@@ -526,7 +530,7 @@ test("CSV and tcache matrix input update the shared form and raw JSON", async ({
   await dialog.getByLabel("매트릭스 CSV").fill("0,5,6\n7,0,8\n9,10,0");
   await dialog.getByRole("button", { name: "CSV 적용" }).click();
   await expect(dialog.getByLabel("A에서 B 이동 시간")).toHaveValue("5");
-  await expect(editor).not.toHaveValue(/"travel_time_matrix"/);
+  await expect(editor).toHaveValue(/"travel_time_matrix"/);
 
   await dialog.getByRole("button", { name: "tcache에서 가져오기" }).click();
   await expect.poll(() => matrixRequests).toBe(1);

@@ -8,6 +8,7 @@ use crate::{
         NoopOptimizationEventReporter, OptimizationErrorCode, OptimizationEventReporter,
         ProgressStage,
     },
+    matrix::TravelTimeMatrix,
     result_debug::shuffle_solution,
     routing::{RoutingContext, RoutingError, RoutingProvider},
     schedule::{calculate_schedule_from, ScheduleError},
@@ -61,6 +62,7 @@ where
                     .unwrap_or(false)
                     .then_some(debug.shuffle_seed)
             });
+            let supplied_matrix = request.travel_time_matrix.clone();
             let problem = OptimizationProblem::try_from(request)?;
             reporter.progress(
                 ProgressStage::Accepted,
@@ -71,16 +73,25 @@ where
             reporter.progress(
                 ProgressStage::BuildingMatrix,
                 20,
-                Some("Building travel-time matrix."),
+                Some(if supplied_matrix.is_some() {
+                    "Using caller-supplied travel-time matrix."
+                } else {
+                    "Building travel-time matrix."
+                }),
             );
             check_cancelled(cancellation)?;
-            let routing_context = RoutingContext {
-                departure_time: Some(chrono::Utc::now()),
-                ..RoutingContext::default()
+            let matrix = match supplied_matrix {
+                Some(rows) => TravelTimeMatrix::new(rows)
+                    .expect("request validation guarantees a non-empty square matrix"),
+                None => {
+                    let routing_context = RoutingContext {
+                        departure_time: Some(chrono::Utc::now()),
+                        ..RoutingContext::default()
+                    };
+                    self.routing_provider
+                        .travel_time_matrix(problem.locations(), &routing_context)?
+                }
             };
-            let matrix = self
-                .routing_provider
-                .travel_time_matrix(problem.locations(), &routing_context)?;
             check_cancelled(cancellation)?;
             reporter.progress(ProgressStage::Solving, 60, Some("Optimizing visit order."));
             check_cancelled(cancellation)?;
@@ -503,6 +514,19 @@ mod tests {
                 RecordedEvent::Error(OptimizationErrorCode::RoutingUnavailable),
             ]
         );
+    }
+
+    #[test]
+    fn supplied_matrix_bypasses_the_routing_provider() {
+        let service = RouteOptimizationService::new(FailingRoutingProvider, DevelopmentRouteSolver);
+        let mut request = valid_request();
+        request.locations[0].place_id.clear();
+        request.locations[1].place_id.clear();
+        request.travel_time_matrix = Some(vec![vec![0, 7], vec![9, 0]]);
+
+        let response = service.optimize(request).unwrap();
+
+        assert_eq!(response.total_travel_minutes, 7);
     }
 
     #[test]

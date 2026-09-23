@@ -233,10 +233,33 @@ export function parseInput(text: string): RouteInput {
       "debug.min_job_duration_ms는 0~60000 범위의 정수여야 합니다.",
     );
   }
-  if (input.travel_time_matrix !== undefined) {
-    throw new Error(
-      "travel_time_matrix는 입력할 수 없습니다. 최적화 시 tcache에서 항상 새로 조회합니다.",
-    );
+  const locationCount = input.locations.length;
+  const hasSuppliedMatrix = input.travel_time_matrix !== undefined;
+  if (hasSuppliedMatrix) {
+    if (
+      !Array.isArray(input.travel_time_matrix) ||
+      input.travel_time_matrix.length !== locationCount
+    ) {
+      throw new Error(
+        `travel_time_matrix는 locations와 같은 ${locationCount}x${locationCount} 크기여야 합니다.`,
+      );
+    }
+    input.travel_time_matrix.forEach((row, rowIndex) => {
+      if (
+        !Array.isArray(row) ||
+        row.length !== locationCount ||
+        !row.every(unsigned)
+      ) {
+        throw new Error(
+          `travel_time_matrix[${rowIndex}]는 0 이상의 정수 ${locationCount}개를 포함해야 합니다.`,
+        );
+      }
+      if (row[rowIndex] !== 0) {
+        throw new Error(
+          `travel_time_matrix[${rowIndex}][${rowIndex}]는 0이어야 합니다.`,
+        );
+      }
+    });
   }
   const locationIds = new Set<string>();
   for (const [index, location] of input.locations.entries()) {
@@ -244,13 +267,15 @@ export function parseInput(text: string): RouteInput {
       !object(location) ||
       !nonempty(location.id) ||
       (location.name !== undefined && typeof location.name !== "string") ||
-      !nonempty(location.place_id) ||
+      (hasSuppliedMatrix
+        ? typeof location.place_id !== "string"
+        : !nonempty(location.place_id)) ||
       !time(location.open_time) ||
       !time(location.close_time) ||
       !unsigned(location.stay_minutes)
     ) {
       throw new Error(
-        `locations[${index}]에는 id, place_id, HH:MM 형식의 open_time/close_time, 0 이상의 정수 stay_minutes가 필요합니다.`,
+        `locations[${index}]에는 id, ${hasSuppliedMatrix ? "문자열 place_id" : "유효한 place_id"}, HH:MM 형식의 open_time/close_time, 0 이상의 정수 stay_minutes가 필요합니다.`,
       );
     }
     if (locationIds.has(location.id)) {

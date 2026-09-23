@@ -134,12 +134,11 @@ terminal results.
 
 ## Routing provider configuration
 
-Every optimization queries one tcache Route Job for each directed pair, and
-`PairwiseMatrixRoutingProvider` assembles those results into the troute-owned
-matrix. `TCACHE_BASE_URL` is
+When `travel_time_matrix` is omitted, optimization queries one tcache Route Job
+for each directed pair, and `PairwiseMatrixRoutingProvider` assembles those
+results into the troute-owned matrix. A caller-supplied matrix bypasses tcache
+after its dimensions and zero diagonal are validated. `TCACHE_BASE_URL` is
 required, and missing or invalid configuration fails application startup.
-Caller-supplied `travel_time_matrix` values are rejected so optimization cannot
-bypass tcache.
 
 | Variable | Default | Description |
 | --- | --- | --- |
@@ -212,10 +211,12 @@ such as `9:00`, `24:00`, or `09:60` are rejected. Requests must contain 2 to 500
 locations. The first location is the fixed start, the last location is the
 fixed destination, and only locations between them may be reordered by the
 solver. The required `job_id` is an opaque correlation value supplied by
-Trasolve; it must be non-blank and at most 128 characters. Location IDs and
-Place IDs must be non-blank strings of at most 512 characters, and location IDs
-must be unique. Overnight windows are not supported, so `open_time` must not be
-later than `close_time`. The request body limit is 1 MiB.
+Trasolve; it must be non-blank and at most 128 characters. Location IDs must be
+non-blank strings of at most 512 characters and unique. Place IDs must be
+non-blank strings of at most 512 characters when `travel_time_matrix` is
+omitted; they may be blank when a matrix is supplied because tcache is bypassed.
+Overnight windows are not supported, so `open_time` must not be later than
+`close_time`. The request body limit is 1 MiB.
 
 For manual progress, SSE, and cancellation testing, a request may include the
 optional diagnostic setting below:

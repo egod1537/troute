@@ -379,7 +379,7 @@ async fn matrix_preview_uses_the_configured_routing_provider() {
 }
 
 #[tokio::test]
-async fn optimize_rejects_a_caller_supplied_matrix() {
+async fn optimize_uses_a_caller_supplied_matrix() {
     let mut request = valid_request();
     request["travel_time_matrix"] = json!([[0, 7, 99], [31, 0, 9], [41, 27, 0]]);
 
@@ -391,8 +391,8 @@ async fn optimize_rejects_a_caller_supplied_matrix() {
     )
     .await;
 
-    assert_eq!(response.status, StatusCode::BAD_REQUEST);
-    assert_eq!(response.body["error"]["code"], "INVALID_REQUEST");
+    assert_eq!(response.status, StatusCode::OK);
+    assert_eq!(response.body["total_travel_minutes"], 16);
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

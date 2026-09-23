@@ -239,8 +239,29 @@ impl TryFrom<OptimizeRouteRequest> for OptimizationProblem {
                 actual: request.locations.len(),
             });
         }
-        if request.travel_time_matrix.is_some() {
-            return Err(RequestValidationError::CallerSuppliedMatrixUnsupported);
+        let has_supplied_matrix = request.travel_time_matrix.is_some();
+        if let Some(matrix) = request.travel_time_matrix.as_ref() {
+            if matrix.len() != request.locations.len() {
+                return Err(RequestValidationError::TravelTimeMatrixSizeMismatch {
+                    expected: request.locations.len(),
+                    actual: matrix.len(),
+                });
+            }
+            for (row, values) in matrix.iter().enumerate() {
+                if values.len() != request.locations.len() {
+                    return Err(RequestValidationError::TravelTimeMatrixRowSizeMismatch {
+                        row,
+                        expected: request.locations.len(),
+                        actual: values.len(),
+                    });
+                }
+                if values[row] != 0 {
+                    return Err(RequestValidationError::TravelTimeMatrixDiagonalNonzero {
+                        index: row,
+                        actual: values[row],
+                    });
+                }
+            }
         }
         let mut ids = HashSet::with_capacity(request.locations.len());
         let mut locations = Vec::with_capacity(request.locations.len());
@@ -264,7 +285,7 @@ impl TryFrom<OptimizeRouteRequest> for OptimizationProblem {
                     maximum: MAX_STRING_CHARACTERS,
                 });
             }
-            if input.place_id.trim().is_empty() {
+            if !has_supplied_matrix && input.place_id.trim().is_empty() {
                 return Err(RequestValidationError::EmptyPlaceId {
                     location_id: input.id,
                 });
@@ -495,8 +516,18 @@ pub enum RequestValidationError {
     PlaceIdTooLong { location_id: String, maximum: usize },
     #[error("duplicate location id: {0}")]
     DuplicateLocationId(String),
-    #[error("travel_time_matrix cannot be supplied; troute always obtains it from tcache")]
-    CallerSuppliedMatrixUnsupported,
+    #[error(
+        "travel_time_matrix has {actual} rows; expected {expected} for the supplied locations"
+    )]
+    TravelTimeMatrixSizeMismatch { expected: usize, actual: usize },
+    #[error("travel_time_matrix row {row} has length {actual}; expected {expected}")]
+    TravelTimeMatrixRowSizeMismatch {
+        row: usize,
+        expected: usize,
+        actual: usize,
+    },
+    #[error("travel_time_matrix diagonal entry [{index}][{index}] must be 0; actual {actual}")]
+    TravelTimeMatrixDiagonalNonzero { index: usize, actual: u32 },
     #[error("invalid time window for location {location_id}: {source}")]
     InvalidTimeWindow {
         location_id: String,
@@ -566,6 +597,35 @@ mod tests {
         assert!(matches!(
             error,
             RequestValidationError::DuplicateLocationId(id) if id == "A"
+        ));
+    }
+
+    #[test]
+    fn supplied_matrix_is_validated_and_allows_empty_place_ids() {
+        let mut request = request_with_locations(&["A", "B"]);
+        request.locations[0].place_id.clear();
+        request.locations[1].place_id.clear();
+        request.travel_time_matrix = Some(vec![vec![0, 7], vec![9, 0]]);
+        OptimizationProblem::try_from(request).unwrap();
+
+        let mut wrong_size = request_with_locations(&["A", "B"]);
+        wrong_size.travel_time_matrix = Some(vec![vec![0]]);
+        assert!(matches!(
+            OptimizationProblem::try_from(wrong_size),
+            Err(RequestValidationError::TravelTimeMatrixSizeMismatch {
+                expected: 2,
+                actual: 1
+            })
+        ));
+
+        let mut nonzero_diagonal = request_with_locations(&["A", "B"]);
+        nonzero_diagonal.travel_time_matrix = Some(vec![vec![1, 7], vec![9, 0]]);
+        assert!(matches!(
+            OptimizationProblem::try_from(nonzero_diagonal),
+            Err(RequestValidationError::TravelTimeMatrixDiagonalNonzero {
+                index: 0,
+                actual: 1
+            })
         ));
     }
 
