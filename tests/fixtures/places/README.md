@@ -1,6 +1,6 @@
 # Real Place ID fixtures
 
-이 디렉터리는 troute unit test, 수동 tcache integration test, tcache Matrix
+이 디렉터리는 troute unit test, 수동 tcache integration test, tcache Route
 Testbed가 함께 사용하는 Google Place ID의 source of truth다. troute는 이
 데이터를 사용할 뿐 Places API를 호출하거나 런타임에 장소를 검색하지 않는다.
 
@@ -21,10 +21,9 @@ Testbed가 함께 사용하는 Google Place ID의 source of truth다. troute는 
 - 실제 경로 확인: 로컬 tcache의 기존 Route Job API와 Google provider를 통해
   Tokyo Station → Shibuya Station `WALKING` 요청이 완료됨
   (`route_3f5bb21825ac4d259cbc2ddaf218372c`, cache miss, 5965 seconds)
-- 실제 matrix 확인: Tokyo 3 Places의 6개 directed pair를 tcache Matrix Job과
-  Google provider의 `WALKING` mode로 완료함
-  (`route-matrix-e6a0078d40c5405e9fd4a4cbf9e85c62`, cache miss 6,
-  provider call 6)
+- 실제 matrix 확인: Tokyo 3 Places의 6개 directed pair를 기존 tcache Route
+  Job API와 Google provider의 `WALKING` mode로 각각 조회해 troute 내부에서
+  directed matrix로 조립함
 
 Place ID 조회 성공과 모든 mode/pair에서 경로가 존재한다는 보장은 서로 다르다.
 예를 들어 provider 정책이나 대중교통 데이터에 따라 특정 pair/mode가 route
@@ -50,8 +49,8 @@ ID는 갱신할 것을 권장한다. 참고:
 
 ## 실제 tcache integration test
 
-matrix endpoint가 포함된 tcache와 Google Routes provider를 실행한 뒤 명시적으로
-ignored test를 실행한다. 기본 CI에서는 실행하지 않는다.
+tcache Route Job API와 Google Routes provider를 실행한 뒤 명시적으로 ignored
+test를 실행한다. 기본 CI에서는 실행하지 않는다.
 
 ```sh
 TCACHE_BASE_URL=http://localhost:3200 \
@@ -89,7 +88,7 @@ node scripts/generate_testbed_place_presets.mjs --check
 3. 3/5 fixture가 10개 fixture의 prefix가 되도록 갱신한다.
 4. `verified_at`을 실제 확인일로 바꾼다.
 5. 기본 검증과 Testbed preset 생성을 실행한다.
-6. 실제 tcache route 또는 matrix query로 최소 한 번 확인한다.
+6. 실제 tcache pair Route Job query로 최소 한 번 확인한다.
 
 Place ID invalid가 확인된 경우에만 값을 교체하고, 변경 설명에는 장소명, 이전 ID,
 새 ID, 검증일을 남긴다. API key나 provider secret은 fixture에 저장하지 않는다.

@@ -157,6 +157,8 @@ pub enum RoutingError {
 
 #[cfg(test)]
 mod tests {
+    use std::sync::Mutex;
+
     use super::*;
     use crate::domain::{RoutingReference, TimeOfDay, TimeWindow};
 
@@ -177,7 +179,10 @@ mod tests {
             .collect()
     }
 
-    struct DirectedPairs;
+    #[derive(Default)]
+    struct DirectedPairs {
+        calls: Mutex<Vec<(String, String)>>,
+    }
 
     impl TravelTimeProvider for DirectedPairs {
         fn travel_time(
@@ -186,6 +191,10 @@ mod tests {
             to: &Location,
             _context: &RoutingContext,
         ) -> Result<TravelTime, RoutingError> {
+            self.calls
+                .lock()
+                .unwrap()
+                .push((from.id().to_owned(), to.id().to_owned()));
             Ok(TravelTime {
                 minutes: from.id().parse::<u32>().unwrap() * 10 + to.id().parse::<u32>().unwrap(),
             })
@@ -194,12 +203,24 @@ mod tests {
 
     #[test]
     fn pair_queries_build_a_directed_matrix() {
-        let matrix = PairwiseMatrixRoutingProvider::new(DirectedPairs)
+        let provider = PairwiseMatrixRoutingProvider::new(DirectedPairs::default());
+        let matrix = provider
             .travel_time_matrix(&locations(), &RoutingContext::default())
             .unwrap();
         assert_eq!(matrix.travel_minutes(0, 2), Some(2));
         assert_eq!(matrix.travel_minutes(2, 0), Some(20));
         assert_eq!(matrix.travel_minutes(1, 1), Some(0));
+        assert_eq!(
+            *provider.inner().calls.lock().unwrap(),
+            [
+                ("0".to_owned(), "1".to_owned()),
+                ("0".to_owned(), "2".to_owned()),
+                ("1".to_owned(), "0".to_owned()),
+                ("1".to_owned(), "2".to_owned()),
+                ("2".to_owned(), "0".to_owned()),
+                ("2".to_owned(), "1".to_owned()),
+            ]
+        );
     }
 
     #[test]

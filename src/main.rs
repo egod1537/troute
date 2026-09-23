@@ -7,12 +7,13 @@ use tokio::net::TcpListener;
 use troute::{
     http,
     observation::JobObservationRecorder,
+    routing::PairwiseMatrixRoutingProvider,
     solver::{
         MatchingStrategyConfig, SolverOrchestrator, SolverOrchestratorConfig, EXACT_MAX_LOCATIONS,
         MAX_EXACT_CLUSTER_SIZE,
     },
     storage::{FileJobStore, FileJobTimelineStore, JobStore},
-    tcache::{TcacheRoutingConfig, TcacheRoutingProvider},
+    tcache::{TcacheRoutingConfig, TcacheTravelTimeProvider},
     RouteOptimizationService,
 };
 
@@ -42,10 +43,11 @@ async fn run() -> Result<(), Box<dyn Error>> {
         Err(env::VarError::NotPresent) => PathBuf::from(".local/troute"),
         Err(error) => return Err(error.into()),
     };
-    let routing_provider = TcacheRoutingProvider::new(
+    let travel_time_provider = TcacheTravelTimeProvider::new(
         TcacheRoutingConfig::from_env()
             .map_err(|error| format!("invalid tcache configuration: {error}"))?,
     )?;
+    let routing_provider = PairwiseMatrixRoutingProvider::new(travel_time_provider);
     let exact_limit = read_bounded_size(
         "TROUTE_EXACT_LIMIT",
         EXACT_MAX_LOCATIONS,

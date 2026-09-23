@@ -55,7 +55,8 @@ The component interfaces and v0 data flow are defined. The HTTP server exposes
 `POST /optimize`, and polling APIs under `/integration/jobs`. Background jobs
 execute the provider -> solver -> schedule service pipeline and persist
 progress, result, error, cancellation, and observation data locally. The
-runtime always uses the tcache-backed Travel Time Matrix provider.
+runtime always uses tcache-backed pair route queries to build its travel-time
+matrix.
 Provider-specific route lookup, caching, and Google credentials stay
 inside tcache; the solver and scheduling layers only receive a matrix.
 Trasolve calls troute in one direction only. troute neither requires a Trasolve
@@ -133,7 +134,9 @@ terminal results.
 
 ## Routing provider configuration
 
-Every optimization creates one matrix Job in tcache. `TCACHE_BASE_URL` is
+Every optimization queries one tcache Route Job for each directed pair, and
+`PairwiseMatrixRoutingProvider` assembles those results into the troute-owned
+matrix. `TCACHE_BASE_URL` is
 required, and missing or invalid configuration fails application startup.
 Caller-supplied `travel_time_matrix` values are rejected so optimization cannot
 bypass tcache.
@@ -141,8 +144,8 @@ bypass tcache.
 | Variable | Default | Description |
 | --- | --- | --- |
 | `TCACHE_BASE_URL` | none | required tcache server base URL |
-| `TCACHE_MATRIX_POLL_INTERVAL_MS` | `250` | positive status polling interval |
-| `TCACHE_MATRIX_TIMEOUT_MS` | `30000` | positive total matrix request timeout |
+| `TCACHE_POLL_INTERVAL_MS` | `250` | positive Route Job status polling interval |
+| `TCACHE_REQUEST_TIMEOUT_MS` | `30000` | positive total timeout for each pair query |
 | `TROUTE_EXACT_LIMIT` | `15` | maximum location count at which the orchestrator also runs exact bit-DP; 1–15 |
 | `TROUTE_MAX_EXACT_CLUSTER_SIZE` | `10` | requested intermediate locations per exact cluster; 1–15 (internally capped at 13 to reserve entry/exit anchors) |
 | `SOLVER_MAX_CONCURRENCY` | `4` | maximum independently running solver strategies; 1–256 |
@@ -151,16 +154,18 @@ bypass tcache.
 | `MATCHING_STRATEGY` | `auto` | Christofides benchmark/debug override: `auto`, `bitdp`, or `blossom` |
 | `MATCHING_BIT_DP_THRESHOLD` | `20` | auto-policy odd-vertex threshold, from 0 through 20 |
 
-The adapter creates `POST /api/route/matrix/jobs`, polls the returned Job,
-fetches `durationSeconds`, validates the location order and matrix shape, and
-converts seconds to whole minutes by rounding up. It attempts the tcache cancel
-endpoint when its total timeout expires. The current troute v0 domain contains
+The adapter creates `POST /api/route/jobs` with two Place IDs, polls the returned
+Job, reads `result.routes[0].durationSeconds`, and converts seconds to whole
+minutes by rounding up. It attempts the tcache Route Job cancel endpoint when a
+pair query times out. The deprecated `TCACHE_MATRIX_POLL_INTERVAL_MS` and
+`TCACHE_MATRIX_TIMEOUT_MS` names remain fallback aliases. The current troute v0
+domain contains
 only a wall-clock `start_time`, not a calendar date or timezone. The
 `RoutingProvider` boundary accepts a `RoutingContext` containing departure
 instant, travel mode, timezone, and extensible routing options. The service
-currently supplies the current UTC instant as matrix `departureTime`; adding a
-dated optimization request can refine this later without exposing tcache HTTP
-details to the solver.
+currently supplies the current UTC instant as each pair's `departureTime`;
+adding a dated optimization request can refine this later without exposing
+tcache HTTP details to the solver.
 
 ### Real Place ID test fixtures
 
@@ -275,8 +280,8 @@ curl -i -X POST http://127.0.0.1:8080/optimize \
   }'
 ```
 
-With a matrix returned by tcache, the selected route portion of a successful
-response looks like the following. The default orchestrator also
+With a matrix assembled from tcache pair queries, the selected route portion of
+a successful response looks like the following. The default orchestrator also
 adds the `solver_candidates` comparison described below (omitted here for
 brevity):
 
@@ -445,12 +450,10 @@ OptimizeRouteRequest
 The solver only reads `OptimizationProblem` and `TravelTimeMatrix`; it does not
 call HTTP, tcache, caches, Google APIs, or place-ID lookup code.
 `DevelopmentRoutingProvider` and `StaticMatrixRoutingProvider` remain test
-utilities. The server runtime wires only `TcacheRoutingProvider`, which uses
-tcache's native matrix job API. Providers which
-only support directed pair lookups can implement `TravelTimeProvider` and use
-`PairwiseMatrixRoutingProvider` to build the complete matrix. This leaves both
-pair-query and native matrix-query strategies interchangeable without solver
-changes.
+utilities. The server runtime wires `TcacheTravelTimeProvider` through
+`PairwiseMatrixRoutingProvider`. The former knows only tcache's existing Route
+Job HTTP contract and the latter builds the complete directed matrix. The
+solver remains isolated from pair-query, polling, cache, and HTTP details.
 
 `DevelopmentRouteSolver` remains available for tests and development flows
 which intentionally preserve input order, but it is no longer the default
@@ -730,8 +733,8 @@ The Rust API implements `GET /health` and `POST /optimize`. Configure
 payload; otherwise it continues to run a health check. The client renders
 `route` / `total_travel_minutes` from the existing DTOs. Error status and
 response bodies remain visible, including malformed JSON and infeasible-route
-errors. Route optimization always obtains its travel-time matrix from tcache
-before running the solver orchestrator.
+errors. Route optimization always assembles its travel-time matrix from tcache
+pair Route Jobs before running the solver orchestrator.
 
 For local development (Node 22.12+; Docker builds use Node 24), start the API
 with `cargo run` and run these commands in another terminal:
