@@ -734,8 +734,15 @@ The Rust API implements `GET /health` and `POST /optimize`. Configure
 payload; otherwise it continues to run a health check. The client renders
 `route` / `total_travel_minutes` from the existing DTOs. Error status and
 response bodies remain visible, including malformed JSON and infeasible-route
-errors. Route optimization always assembles its travel-time matrix from tcache
-pair Route Jobs before running the solver orchestrator.
+errors. Route optimization uses a supplied `travel_time_matrix` directly and
+only assembles one from tcache pair Route Jobs when the matrix is omitted.
+
+The Tokyo, Seoul, and Synthetic testbed presets are self-contained: each ships
+with a deterministic demo matrix, so selecting or submitting a preset does not
+depend on current Google Routes availability. Place presets estimate walking
+minutes from their fixture coordinates; use `tcache에서 가져오기` to explicitly
+replace that demo matrix with live provider values. Their all-day time windows
+and 30-minute intermediate stays keep every preset feasible for solver testing.
 
 For local development (Node 22.12+; Docker builds use Node 24), start the API
 with `cargo run` and run these commands in another terminal:

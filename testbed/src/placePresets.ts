@@ -22,7 +22,51 @@ export interface JobPreset {
 
 interface PlaceFixture {
   name: string;
-  locations: { id: string; name: string; place_id: string }[];
+  locations: {
+    id: string;
+    name: string;
+    place_id: string;
+    latitude: number;
+    longitude: number;
+  }[];
+}
+
+const EARTH_RADIUS_KILOMETERS = 6_371;
+const WALKING_ROUTE_FACTOR = 1.25;
+const WALKING_SPEED_KILOMETERS_PER_HOUR = 4.8;
+
+function estimatedWalkingMinutes(
+  from: PlaceFixture["locations"][number],
+  to: PlaceFixture["locations"][number],
+): number {
+  const radians = (degrees: number) => degrees * Math.PI / 180;
+  const latitudeDelta = radians(to.latitude - from.latitude);
+  const longitudeDelta = radians(to.longitude - from.longitude);
+  const fromLatitude = radians(from.latitude);
+  const toLatitude = radians(to.latitude);
+  const haversine =
+    Math.sin(latitudeDelta / 2) ** 2 +
+    Math.cos(fromLatitude) * Math.cos(toLatitude) *
+      Math.sin(longitudeDelta / 2) ** 2;
+  const straightLineKilometers =
+    2 * EARTH_RADIUS_KILOMETERS * Math.asin(Math.sqrt(haversine));
+  return Math.max(
+    1,
+    Math.ceil(
+      straightLineKilometers * WALKING_ROUTE_FACTOR /
+        WALKING_SPEED_KILOMETERS_PER_HOUR * 60,
+    ),
+  );
+}
+
+function estimatedWalkingMatrix(
+  locations: PlaceFixture["locations"],
+): number[][] {
+  return locations.map((from, row) =>
+    locations.map((to, column) =>
+      row === column ? 0 : estimatedWalkingMinutes(from, to),
+    ),
+  );
 }
 
 function placePreset(
@@ -33,14 +77,15 @@ function placePreset(
     key,
     name: fixture.name.replace(" Places", ""),
     kind: "places",
+    travelTimeMatrix: estimatedWalkingMatrix(fixture.locations),
     locations: fixture.locations.map(({ id, name, place_id }, index) => ({
       id,
       name,
       placeId: place_id,
-      openTime: "09:00",
-      closeTime: "18:00",
+      openTime: "00:00",
+      closeTime: "23:59",
       stayMinutes:
-        index === 0 || index === fixture.locations.length - 1 ? 0 : 60,
+        index === 0 || index === fixture.locations.length - 1 ? 0 : 30,
     })),
   };
 }

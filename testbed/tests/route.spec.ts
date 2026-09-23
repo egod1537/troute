@@ -490,11 +490,11 @@ test("form edits directed matrix, resizes with locations, and exposes five prese
   await dialog.getByRole("button", { name: "Tokyo 5", exact: true }).click();
   await expect(page.getByText("현재 입력을 Tokyo 5 preset으로 교체할까요?")).toBeVisible();
   await page.getByRole("button", { name: "교체", exact: true }).click();
-  await expect.poll(() => presetMatrixRequests).toBe(1);
+  expect(presetMatrixRequests).toBe(0);
   await expect(dialog.locator(".location-input-table tbody tr")).toHaveCount(5);
   await expect(dialog.getByLabel("1번 장소 Place ID")).not.toHaveValue("");
   await expect(dialog.locator(".matrix-input-table tbody input")).toHaveCount(25);
-  await expect(dialog.getByLabel("tokyo-station에서 shibuya-station 이동 시간")).toHaveValue("12");
+  await expect(dialog.getByLabel("tokyo-station에서 shibuya-station 이동 시간")).not.toHaveValue("");
   await dialog.getByRole("button", { name: "검증" }).click();
   await expect(dialog.getByText("유효함", { exact: true })).toBeVisible();
 
@@ -508,7 +508,18 @@ test("form edits directed matrix, resizes with locations, and exposes five prese
   await expect(dialog.getByLabel("B에서 A 이동 시간")).toHaveValue("17");
   await dialog.getByRole("button", { name: "검증" }).click();
   await expect(dialog.getByText("유효함", { exact: true })).toBeVisible();
-  expect(presetMatrixRequests).toBe(1);
+  expect(presetMatrixRequests).toBe(0);
+
+  for (const [name, size] of [["Tokyo 3", 3], ["Tokyo 10", 10], ["Seoul 5", 5]] as const) {
+    await dialog.getByRole("button", { name, exact: true }).click();
+    await expect(page.getByText(`현재 입력을 ${name} preset으로 교체할까요?`)).toBeVisible();
+    await page.getByRole("button", { name: "교체", exact: true }).click();
+    await expect(dialog.locator(".location-input-table tbody tr")).toHaveCount(size);
+    await expect(dialog.locator(".matrix-input-table tbody input")).toHaveCount(size * size);
+    await dialog.getByRole("button", { name: "검증" }).click();
+    await expect(dialog.getByText("유효함", { exact: true })).toBeVisible();
+  }
+  expect(presetMatrixRequests).toBe(0);
 });
 
 test("CSV and tcache matrix input update the shared form and raw JSON", async ({
