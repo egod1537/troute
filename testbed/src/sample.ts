@@ -29,7 +29,7 @@ export function createSample(): RouteInput {
         place_id: "place-c",
         open_time: "11:00",
         close_time: "19:00",
-        stay_minutes: 45,
+        stay_minutes: 40,
       },
     ],
     start_time: "00:00",

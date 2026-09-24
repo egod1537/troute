@@ -220,11 +220,11 @@ fn request_with_debug_duration(job_id: &str, duration_ms: u64) -> Value {
 fn request_with_debug_shuffle(job_id: &str, duration_ms: u64) -> Value {
     let mut request = request_with_job_id(job_id);
     request["locations"] = json!([
-        {"id":"place-1","place_id":"GOOGLE_PLACE_ID_1","open_time":"00:00","close_time":"23:59","stay_minutes":0},
-        {"id":"place-2","place_id":"GOOGLE_PLACE_ID_2","open_time":"00:00","close_time":"23:59","stay_minutes":2},
-        {"id":"place-3","place_id":"GOOGLE_PLACE_ID_3","open_time":"00:00","close_time":"23:59","stay_minutes":3},
-        {"id":"place-4","place_id":"GOOGLE_PLACE_ID_4","open_time":"00:00","close_time":"23:59","stay_minutes":4},
-        {"id":"place-5","place_id":"GOOGLE_PLACE_ID_5","open_time":"00:00","close_time":"23:59","stay_minutes":0}
+        {"id":"place-1","place_id":"GOOGLE_PLACE_ID_1","open_time":"00:00","close_time":"23:50","stay_minutes":0},
+        {"id":"place-2","place_id":"GOOGLE_PLACE_ID_2","open_time":"00:00","close_time":"23:50","stay_minutes":20},
+        {"id":"place-3","place_id":"GOOGLE_PLACE_ID_3","open_time":"00:00","close_time":"23:50","stay_minutes":30},
+        {"id":"place-4","place_id":"GOOGLE_PLACE_ID_4","open_time":"00:00","close_time":"23:50","stay_minutes":40},
+        {"id":"place-5","place_id":"GOOGLE_PLACE_ID_5","open_time":"00:00","close_time":"23:50","stay_minutes":0}
     ]);
     request["debug"] = json!({
         "min_job_duration_ms": duration_ms,
@@ -382,6 +382,7 @@ async fn matrix_preview_uses_the_configured_routing_provider() {
 async fn optimize_uses_a_caller_supplied_matrix() {
     let mut request = valid_request();
     request["travel_time_matrix"] = json!([[0, 7, 99], [31, 0, 9], [41, 27, 0]]);
+    request["travel_mode"] = json!("BICYCLING");
 
     let response = send(
         Method::POST,
@@ -393,6 +394,64 @@ async fn optimize_uses_a_caller_supplied_matrix() {
 
     assert_eq!(response.status, StatusCode::OK);
     assert_eq!(response.body["total_travel_minutes"], 16);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn integration_job_preserves_travel_mode_in_list_detail_and_sse_snapshot() {
+    let temporary = TestDirectory::new();
+    let store = Arc::new(FileJobStore::new(&temporary.0).unwrap());
+    let app = http::router_with_storage(
+        RouteOptimizationService::new(DevelopmentRoutingProvider, DevelopmentRouteSolver),
+        None,
+        Some(store.clone()),
+    );
+    let mut request = request_with_job_id("travel-mode-job");
+    request["travel_mode"] = json!("WALKING");
+
+    let submitted = send_to(
+        app.clone(),
+        Method::POST,
+        "/integration/jobs",
+        Some("application/json"),
+        request.to_string(),
+    )
+    .await;
+    assert_eq!(submitted.status, StatusCode::ACCEPTED);
+    wait_for_job_status(store.as_ref(), "travel-mode-job", JobStatus::Completed).await;
+
+    let detail = send_to(
+        app.clone(),
+        Method::GET,
+        "/integration/jobs/travel-mode-job",
+        None,
+        String::new(),
+    )
+    .await;
+    assert_eq!(detail.status, StatusCode::OK);
+    assert_eq!(detail.body["request"]["travel_mode"], "WALKING");
+
+    let list = send_to(
+        app.clone(),
+        Method::GET,
+        "/integration/jobs?limit=50",
+        None,
+        String::new(),
+    )
+    .await;
+    assert_eq!(list.status, StatusCode::OK);
+    let entry = list.body["jobs"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|entry| entry["job_id"] == "travel-mode-job")
+        .unwrap();
+    assert_eq!(entry["travel_mode"], "WALKING");
+
+    let (_, mut body) = open_event_stream(app, "travel-mode-job").await;
+    let mut buffered = String::new();
+    let snapshot = next_sse_message(&mut body, &mut buffered).await.unwrap();
+    assert_eq!(sse_field(&snapshot, "event"), Some("snapshot"));
+    assert_eq!(sse_data(&snapshot)["request"]["travel_mode"], "WALKING");
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -1750,6 +1809,12 @@ async fn invalid_requests_return_stable_json_errors_without_panicking() {
     invalid_window["locations"][0]["close_time"] = json!("18:00");
     let mut incorrect_type = valid_request();
     incorrect_type["locations"][0]["stay_minutes"] = json!("sixty");
+    let mut unaligned_open_time = valid_request();
+    unaligned_open_time["locations"][0]["open_time"] = json!("09:07");
+    let mut unaligned_close_time = valid_request();
+    unaligned_close_time["locations"][0]["close_time"] = json!("18:25");
+    let mut unaligned_stay = valid_request();
+    unaligned_stay["locations"][0]["stay_minutes"] = json!(15);
     let mut too_many_locations = valid_request();
     too_many_locations["locations"] = Value::Array(
         (0..501)
@@ -1768,6 +1833,10 @@ async fn invalid_requests_return_stable_json_errors_without_panicking() {
     location_id_too_long["locations"][0]["id"] = json!("x".repeat(513));
     let mut unknown_field = valid_request();
     unknown_field["unexpected"] = json!(true);
+    let mut invalid_travel_mode = valid_request();
+    invalid_travel_mode["travel_mode"] = json!("CAR");
+    let mut lowercase_travel_mode = valid_request();
+    lowercase_travel_mode["travel_mode"] = json!("transit");
 
     for body in [
         empty_job_id,
@@ -1780,9 +1849,14 @@ async fn invalid_requests_return_stable_json_errors_without_panicking() {
         duplicate_ids,
         invalid_window,
         incorrect_type,
+        unaligned_open_time,
+        unaligned_close_time,
+        unaligned_stay,
         too_many_locations,
         location_id_too_long,
         unknown_field,
+        invalid_travel_mode,
+        lowercase_travel_mode,
     ] {
         let response = send(
             Method::POST,

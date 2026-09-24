@@ -175,6 +175,12 @@ impl ApiError {
                     "Travel-time routing is temporarily unavailable.",
                     reason,
                 ),
+                source @ RoutingError::MatrixBuild { .. } => Self::new(
+                    StatusCode::SERVICE_UNAVAILABLE,
+                    "ROUTING_UNAVAILABLE",
+                    "Travel-time routing is temporarily unavailable.",
+                    source.to_string(),
+                ),
                 other => Self::new(
                     StatusCode::INTERNAL_SERVER_ERROR,
                     "ROUTING_MATRIX_ERROR",

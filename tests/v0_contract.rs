@@ -1,7 +1,7 @@
 use troute::{
     domain::Location,
     matrix::TravelTimeMatrix,
-    routing::{RoutingContext, RoutingError, RoutingProvider},
+    routing::{RoutingContext, RoutingError, RoutingProvider, TravelMode},
     solver::{RouteSolver, SolverError, SolverInput, SolverSolution},
     OptimizeRouteRequest, RouteOptimizationService,
 };
@@ -58,6 +58,23 @@ impl RoutingProvider for FixedRoutingProvider {
     }
 }
 
+struct ExpectedTravelModeProvider(TravelMode);
+
+impl RoutingProvider for ExpectedTravelModeProvider {
+    fn travel_time_matrix(
+        &self,
+        locations: &[Location],
+        context: &RoutingContext,
+    ) -> Result<TravelTimeMatrix, RoutingError> {
+        assert_eq!(context.travel_mode, self.0);
+        let rows = INDEXED_TRAVEL_MINUTES[..locations.len()]
+            .iter()
+            .map(|row| row[..locations.len()].to_vec())
+            .collect();
+        TravelTimeMatrix::new(rows).map_err(RoutingError::InvalidMatrix)
+    }
+}
+
 struct FixedSolver;
 
 impl RouteSolver for FixedSolver {
@@ -93,13 +110,13 @@ fn v0_pipeline_returns_ids_schedule_and_travel_total() {
                     "place_id": "google-place-id-c",
                     "open_time": "11:00",
                     "close_time": "19:00",
-                    "stay_minutes": 45
+                    "stay_minutes": 40
                 },
                 {
                     "id": "D",
                     "place_id": "google-place-id-d",
                     "open_time": "00:00",
-                    "close_time": "23:59",
+                    "close_time": "23:50",
                     "stay_minutes": 0
                 }
             ],
@@ -118,13 +135,13 @@ fn v0_pipeline_returns_ids_schedule_and_travel_total() {
     assert_eq!(json["route"][0]["departure_time"], "09:00");
     assert_eq!(json["route"][1]["location_id"], "C");
     assert_eq!(json["route"][1]["arrival_time"], "09:25");
-    assert_eq!(json["route"][1]["departure_time"], "11:45");
+    assert_eq!(json["route"][1]["departure_time"], "11:40");
     assert_eq!(json["route"][2]["location_id"], "B");
-    assert_eq!(json["route"][2]["arrival_time"], "12:10");
-    assert_eq!(json["route"][2]["departure_time"], "13:40");
+    assert_eq!(json["route"][2]["arrival_time"], "12:05");
+    assert_eq!(json["route"][2]["departure_time"], "13:35");
     assert_eq!(json["route"][3]["location_id"], "D");
-    assert_eq!(json["route"][3]["arrival_time"], "14:10");
-    assert_eq!(json["route"][3]["departure_time"], "14:10");
+    assert_eq!(json["route"][3]["arrival_time"], "14:05");
+    assert_eq!(json["route"][3]["departure_time"], "14:05");
 }
 
 #[test]
@@ -140,15 +157,32 @@ fn malformed_hhmm_time_is_rejected() {
     assert!(result.is_err());
 }
 
+#[test]
+fn travel_mode_defaults_to_transit_and_accepts_all_supported_values() {
+    for (requested, expected) in [
+        (None, TravelMode::Transit),
+        (Some(TravelMode::Transit), TravelMode::Transit),
+        (Some(TravelMode::Driving), TravelMode::Driving),
+        (Some(TravelMode::Walking), TravelMode::Walking),
+        (Some(TravelMode::Bicycling), TravelMode::Bicycling),
+    ] {
+        let mut request = debug_request(None);
+        request.travel_mode = requested;
+        RouteOptimizationService::new(ExpectedTravelModeProvider(expected), InputOrderSolver)
+            .optimize(request)
+            .unwrap();
+    }
+}
+
 fn debug_request(debug: Option<serde_json::Value>) -> OptimizeRouteRequest {
     let mut value = serde_json::json!({
         "job_id": "route-debug-shuffle-test",
         "locations": [
-            {"id":"A","place_id":"a","open_time":"00:00","close_time":"23:59","stay_minutes":0},
-            {"id":"B","place_id":"b","open_time":"00:00","close_time":"23:59","stay_minutes":2},
-            {"id":"C","place_id":"c","open_time":"00:00","close_time":"23:59","stay_minutes":3},
-            {"id":"D","place_id":"d","open_time":"00:00","close_time":"23:59","stay_minutes":4},
-            {"id":"E","place_id":"e","open_time":"00:00","close_time":"23:59","stay_minutes":0}
+            {"id":"A","place_id":"a","open_time":"00:00","close_time":"23:50","stay_minutes":0},
+            {"id":"B","place_id":"b","open_time":"00:00","close_time":"23:50","stay_minutes":20},
+            {"id":"C","place_id":"c","open_time":"00:00","close_time":"23:50","stay_minutes":30},
+            {"id":"D","place_id":"d","open_time":"00:00","close_time":"23:50","stay_minutes":40},
+            {"id":"E","place_id":"e","open_time":"00:00","close_time":"23:50","stay_minutes":0}
         ],
         "start_time": "09:00"
     });
@@ -210,9 +244,9 @@ fn seeded_debug_shuffle_rebuilds_the_entire_schedule_from_shuffled_legs() {
 
     let index_and_stay = |id: &str| match id {
         "A" => (0_usize, 0_u32),
-        "B" => (1, 2),
-        "C" => (2, 3),
-        "D" => (3, 4),
+        "B" => (1, 20),
+        "C" => (2, 30),
+        "D" => (3, 40),
         "E" => (4, 0),
         unexpected => panic!("unexpected location id: {unexpected}"),
     };

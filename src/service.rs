@@ -63,6 +63,7 @@ where
                     .then_some(debug.shuffle_seed)
             });
             let supplied_matrix = request.travel_time_matrix.clone();
+            let travel_mode = request.travel_mode.unwrap_or_default();
             let problem = OptimizationProblem::try_from(request)?;
             reporter.progress(
                 ProgressStage::Accepted,
@@ -86,6 +87,7 @@ where
                 None => {
                     let routing_context = RoutingContext {
                         departure_time: Some(chrono::Utc::now()),
+                        travel_mode,
                         ..RoutingContext::default()
                     };
                     self.routing_provider
@@ -167,9 +169,11 @@ where
         &self,
         request: OptimizeRouteRequest,
     ) -> Result<crate::matrix::TravelTimeMatrix, OptimizationServiceError> {
+        let travel_mode = request.travel_mode.unwrap_or_default();
         let problem = OptimizationProblem::try_from(request)?;
         let routing_context = RoutingContext {
             departure_time: Some(chrono::Utc::now()),
+            travel_mode,
             ..RoutingContext::default()
         };
         self.routing_provider
@@ -240,7 +244,7 @@ pub enum OptimizationServiceError {
 
 #[cfg(test)]
 mod tests {
-    use std::sync::Mutex;
+    use std::sync::{Arc, Mutex};
 
     use super::*;
     use crate::{
@@ -248,6 +252,7 @@ mod tests {
         domain::Location,
         events::{OptimizationErrorCode, ProgressStage},
         matrix::TravelTimeMatrix,
+        routing::TravelMode,
         solver::{
             ExactBitDpSolver, SimulatedAnnealingConfig, SolverOrchestrator,
             SolverOrchestratorConfig, SolverSolution,
@@ -322,6 +327,22 @@ mod tests {
         ) -> Result<TravelTimeMatrix, RoutingError> {
             TravelTimeMatrix::new(vec![vec![0]])
                 .map_err(|error| RoutingError::Provider(error.to_string()))
+        }
+    }
+
+    struct CapturingRoutingProvider {
+        modes: Arc<Mutex<Vec<TravelMode>>>,
+    }
+
+    impl RoutingProvider for CapturingRoutingProvider {
+        fn travel_time_matrix(
+            &self,
+            _locations: &[Location],
+            context: &RoutingContext,
+        ) -> Result<TravelTimeMatrix, RoutingError> {
+            self.modes.lock().unwrap().push(context.travel_mode);
+            TravelTimeMatrix::new(vec![vec![0, 15], vec![15, 0]])
+                .map_err(RoutingError::InvalidMatrix)
         }
     }
 
@@ -520,6 +541,7 @@ mod tests {
     fn supplied_matrix_bypasses_the_routing_provider() {
         let service = RouteOptimizationService::new(FailingRoutingProvider, DevelopmentRouteSolver);
         let mut request = valid_request();
+        request.travel_mode = Some(TravelMode::Driving);
         request.locations[0].place_id.clear();
         request.locations[1].place_id.clear();
         request.travel_time_matrix = Some(vec![vec![0, 7], vec![9, 0]]);
@@ -527,6 +549,31 @@ mod tests {
         let response = service.optimize(request).unwrap();
 
         assert_eq!(response.total_travel_minutes, 7);
+    }
+
+    #[test]
+    fn request_travel_mode_reaches_routing_context_and_defaults_to_transit() {
+        for (requested, expected) in [
+            (None, TravelMode::Transit),
+            (Some(TravelMode::Transit), TravelMode::Transit),
+            (Some(TravelMode::Driving), TravelMode::Driving),
+            (Some(TravelMode::Walking), TravelMode::Walking),
+            (Some(TravelMode::Bicycling), TravelMode::Bicycling),
+        ] {
+            let modes = Arc::new(Mutex::new(Vec::new()));
+            let service = RouteOptimizationService::new(
+                CapturingRoutingProvider {
+                    modes: Arc::clone(&modes),
+                },
+                DevelopmentRouteSolver,
+            );
+            let mut request = valid_request();
+            request.travel_mode = requested;
+
+            service.optimize(request).unwrap();
+
+            assert_eq!(*modes.lock().unwrap(), [expected]);
+        }
     }
 
     #[test]
@@ -557,14 +604,14 @@ mod tests {
                     "id": "A",
                     "place_id": "place-a",
                     "open_time": "00:00",
-                    "close_time": "23:59",
+                    "close_time": "23:50",
                     "stay_minutes": 0
                 },
                 {
                     "id": "B",
                     "place_id": "place-b",
                     "open_time": "00:00",
-                    "close_time": "23:59",
+                    "close_time": "23:50",
                     "stay_minutes": 0
                 }
             ],

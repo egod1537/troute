@@ -16,6 +16,7 @@ use crate::{
     api::{OptimizeRouteRequest, OptimizeRouteResponse},
     events::ProgressStage,
     observation::{JobTimelineEntry, JobTimelineStore},
+    routing::TravelMode,
 };
 
 static NEXT_TEMP_FILE: AtomicU64 = AtomicU64::new(1);
@@ -84,6 +85,8 @@ pub struct StoredJob {
 pub struct JobIndexEntry {
     pub job_id: String,
     pub status: JobStatus,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub travel_mode: Option<TravelMode>,
     pub created_at: i64,
     pub updated_at: i64,
 }
@@ -218,9 +221,13 @@ impl FileJobStore {
     }
 
     fn update_index_entry(&self, state: &JobState) -> Result<(), JobStoreError> {
+        let request: OptimizeRouteRequest =
+            read_json(&self.job_dir(&state.job_id).join("request.json"))?;
         let mut index = self.read_index()?;
         index.jobs.retain(|entry| entry.job_id != state.job_id);
-        index.jobs.insert(0, index_entry(state));
+        index
+            .jobs
+            .insert(0, index_entry(state, request.travel_mode));
         sort_index(&mut index.jobs);
         atomic_write_json(&self.index_path(), &index)
     }
@@ -231,7 +238,8 @@ impl FileJobStore {
             let state_path = directory.join("state.json");
             if state_path.is_file() {
                 let state: JobState = read_json(&state_path)?;
-                jobs.push(index_entry(&state));
+                let request: OptimizeRouteRequest = read_json(&directory.join("request.json"))?;
+                jobs.push(index_entry(&state, request.travel_mode));
             }
         }
         sort_index(&mut jobs);
@@ -672,10 +680,11 @@ fn read_directories(path: &Path) -> Result<Vec<PathBuf>, JobStoreError> {
     Ok(directories)
 }
 
-fn index_entry(state: &JobState) -> JobIndexEntry {
+fn index_entry(state: &JobState, travel_mode: Option<TravelMode>) -> JobIndexEntry {
     JobIndexEntry {
         job_id: state.job_id.clone(),
         status: state.status,
+        travel_mode,
         created_at: state.created_at,
         updated_at: state.updated_at,
     }
@@ -741,8 +750,8 @@ mod tests {
         serde_json::from_value(json!({
             "job_id": job_id,
             "locations": [
-                {"id":"A","place_id":"place-a","open_time":"00:00","close_time":"23:59","stay_minutes":0},
-                {"id":"B","place_id":"place-b","open_time":"00:00","close_time":"23:59","stay_minutes":0}
+                {"id":"A","place_id":"place-a","open_time":"00:00","close_time":"23:50","stay_minutes":0},
+                {"id":"B","place_id":"place-b","open_time":"00:00","close_time":"23:50","stay_minutes":0}
             ],
             "start_time": "09:00"
         }))

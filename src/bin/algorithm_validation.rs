@@ -243,13 +243,13 @@ fn generated_case(n: usize, seed: u64) -> GeneratedCase {
             let open = if endpoint {
                 0
             } else {
-                rng.gen_range(8 * 60..=11 * 60)
+                rng.gen_range(8 * 6..=11 * 6) * 10
             };
             serde_json::json!({
                 "id": format!("location-{index}"),
                 "place_id": format!("place-{index}"),
                 "open_time": hhmm(open),
-                "close_time": "23:59",
+                "close_time": "23:50",
                 "stay_minutes": if endpoint { 0 } else { rng.gen_range(0..=1) * 10 },
             })
         })

@@ -9,8 +9,8 @@ use support::place_fixtures::{
 };
 use troute::{
     domain::OptimizationProblem,
+    providers::tcache::{TcacheRoutingConfig, TcacheTravelTimeProvider},
     routing::{PairwiseMatrixRoutingProvider, RoutingContext, RoutingProvider, TravelMode},
-    tcache::{TcacheRoutingConfig, TcacheTravelTimeProvider},
 };
 
 #[test]

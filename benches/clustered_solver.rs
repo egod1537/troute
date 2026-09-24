@@ -357,7 +357,7 @@ fn problem(location_count: usize) -> OptimizationProblem {
                 "id": index.to_string(),
                 "place_id": format!("place-{index}"),
                 "open_time": "09:00",
-                "close_time": "23:59",
+                "close_time": "23:50",
                 "stay_minutes": if index == 0 || index + 1 == location_count { 0 } else { 10 }
             }))
             .collect::<Vec<_>>(),

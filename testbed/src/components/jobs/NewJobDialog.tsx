@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { Alert, Button, Callout, Classes, Collapse, Dialog, DialogBody, DialogFooter, Intent, Spinner, Tag, TextArea } from "@blueprintjs/core";
-import { fetchTravelTimeMatrix, parseInput, type RouteInput } from "../../api";
+import { fetchTravelTimeMatrix, isTenMinuteDuration, isTenMinuteTime, parseInput, type RouteInput } from "../../api";
 import { JOB_PRESETS, type JobPreset } from "../../placePresets";
 import { createSample } from "../../sample";
 
@@ -13,7 +13,6 @@ interface FormLocation {
   openTime: string; closeTime: string; stayMinutes: string;
 }
 interface ValidationResult { valid: boolean; message: string }
-const TIME_PATTERN = /^(?:[01]\d|2[0-3]):[0-5]\d$/;
 
 function locationFromRequest(location: RouteInput["locations"][number], index: number): FormLocation {
   return { key: `${location.id}-${index}-${Date.now()}`, id: location.id, name: location.name ?? "", placeId: location.place_id, openTime: location.open_time, closeTime: location.close_time, stayMinutes: String(location.stay_minutes) };
@@ -41,19 +40,38 @@ export function NewJobDialog({ isOpen, dark, existingJobIds, onClose, onCreate }
   const [matrixLoading, setMatrixLoading] = useState(false);
   const [pendingPreset, setPendingPreset] = useState<JobPreset | null>(null);
   const matrixRequestSequence = useRef(0);
+  const matrixAbortController = useRef<AbortController | null>(null);
+
+  function cancelMatrixRequest() {
+    matrixAbortController.current?.abort();
+    matrixAbortController.current = null;
+    matrixRequestSequence.current += 1;
+    setMatrixLoading(false);
+  }
+
+  function beginMatrixRequest() {
+    cancelMatrixRequest();
+    const controller = new AbortController();
+    matrixAbortController.current = controller;
+    const requestSequence = matrixRequestSequence.current;
+    setMatrixLoading(true);
+    return { controller, requestSequence };
+  }
 
   function loadRequest(request: RouteInput) {
+    cancelMatrixRequest();
     setJobId(request.job_id);
     setLocations(request.locations.map(locationFromRequest));
     setMatrix(request.travel_time_matrix ? matrixFromNumbers(request.travel_time_matrix) : blankMatrix(request.locations.length));
     setRawInput(JSON.stringify(request, null, 2));
-    matrixRequestSequence.current += 1;
-    setMatrixLoading(false); setPendingPreset(null);
+    setPendingPreset(null);
     setRawEditing(false); setValidation(null); setFieldErrors({});
   }
   useEffect(() => {
     if (isOpen) { loadRequest(createSample()); setRawOpen(true); setCsvOpen(false); setCsvInput(""); }
+    else cancelMatrixRequest();
   }, [isOpen]);
+  useEffect(() => () => matrixAbortController.current?.abort(), []);
 
   const formRequest = useMemo<RouteInput>(() => {
     const suppliedMatrix = completeMatrix(matrix, locations.length);
@@ -69,8 +87,8 @@ export function NewJobDialog({ isOpen, dark, existingJobIds, onClose, onCreate }
   useEffect(() => { if (!rawEditing) setRawInput(JSON.stringify(formRequest, null, 2)); }, [formRequest, rawEditing]);
 
   function clearFeedback() {
-    matrixRequestSequence.current += 1;
-    setMatrixLoading(false); setValidation(null); setFieldErrors({}); setRawEditing(false);
+    cancelMatrixRequest();
+    setValidation(null); setFieldErrors({}); setRawEditing(false);
   }
   function updateLocation(index: number, field: keyof Omit<FormLocation, "key">, value: string) {
     setLocations((current) => current.map((location, itemIndex) => itemIndex === index ? { ...location, [field]: value } : location));
@@ -90,11 +108,11 @@ export function NewJobDialog({ isOpen, dark, existingJobIds, onClose, onCreate }
       else if (ids.has(location.id.trim())) errors[`${prefix}.id`] = "ID는 중복될 수 없습니다.";
       ids.add(location.id.trim());
       if (!location.placeId.trim() && !suppliedMatrix) errors[`${prefix}.placeId`] = "매트릭스가 없으면 tcache 조회용 Place ID가 필요합니다.";
-      if (!TIME_PATTERN.test(location.openTime)) errors[`${prefix}.openTime`] = "HH:MM 형식이 필요합니다.";
-      if (!TIME_PATTERN.test(location.closeTime)) errors[`${prefix}.closeTime`] = "HH:MM 형식이 필요합니다.";
-      if (TIME_PATTERN.test(location.openTime) && TIME_PATTERN.test(location.closeTime) && location.openTime > location.closeTime) errors[`${prefix}.closeTime`] = "Close는 Open보다 빠를 수 없습니다.";
+      if (!isTenMinuteTime(location.openTime)) errors[`${prefix}.openTime`] = "Open은 10분 단위 HH:MM이어야 합니다.";
+      if (!isTenMinuteTime(location.closeTime)) errors[`${prefix}.closeTime`] = "Close는 10분 단위 HH:MM이어야 합니다.";
+      if (isTenMinuteTime(location.openTime) && isTenMinuteTime(location.closeTime) && location.openTime > location.closeTime) errors[`${prefix}.closeTime`] = "Close는 Open보다 빠를 수 없습니다.";
       const stay = Number(location.stayMinutes);
-      if (!Number.isInteger(stay) || stay < 0) errors[`${prefix}.stayMinutes`] = "0 이상의 정수를 입력하세요.";
+      if (location.stayMinutes.trim() === "" || !isTenMinuteDuration(stay)) errors[`${prefix}.stayMinutes`] = "체류시간은 0 이상의 10분 배수여야 합니다.";
     });
     if (validateMatrix && hasMatrixInput && (matrix.length !== locations.length || matrix.some((row) => row.length !== locations.length))) errors.matrix = "매트릭스 크기가 장소 수와 일치하지 않습니다.";
     else if (validateMatrix && hasMatrixInput) matrix.forEach((row, rowIndex) => row.forEach((value, columnIndex) => {
@@ -128,6 +146,7 @@ export function NewJobDialog({ isOpen, dark, existingJobIds, onClose, onCreate }
     clearFeedback();
   }
   function requestPreset(preset: JobPreset) {
+    cancelMatrixRequest();
     if (locations.length > 0) setPendingPreset(preset);
     else void applyPreset(preset);
   }
@@ -141,8 +160,7 @@ export function NewJobDialog({ isOpen, dark, existingJobIds, onClose, onCreate }
       closeTime: location.closeTime,
       stayMinutes: String(location.stayMinutes),
     }));
-    const requestSequence = matrixRequestSequence.current + 1;
-    matrixRequestSequence.current = requestSequence;
+    cancelMatrixRequest();
     setPendingPreset(null);
     setLocations(nextLocations);
     setRawEditing(false);
@@ -156,7 +174,6 @@ export function NewJobDialog({ isOpen, dark, existingJobIds, onClose, onCreate }
     }
 
     setMatrix(blankMatrix(nextLocations.length));
-    setMatrixLoading(true);
     setValidation(null);
     const request: RouteInput = {
       job_id: jobId,
@@ -170,8 +187,9 @@ export function NewJobDialog({ isOpen, dark, existingJobIds, onClose, onCreate }
       })),
       start_time: "00:00",
     };
+    const { controller, requestSequence } = beginMatrixRequest();
     try {
-      const result = await fetchTravelTimeMatrix(request);
+      const result = await fetchTravelTimeMatrix(request, controller.signal);
       if (
         result.length !== nextLocations.length ||
         result.some((row) => row.length !== nextLocations.length)
@@ -183,7 +201,10 @@ export function NewJobDialog({ isOpen, dark, existingJobIds, onClose, onCreate }
       if (matrixRequestSequence.current !== requestSequence) return;
       setValidation({ valid: false, message: `${preset.name} 장소는 적용했지만 매트릭스를 가져오지 못했습니다: ${(error as Error).message}` });
     } finally {
-      if (matrixRequestSequence.current === requestSequence) setMatrixLoading(false);
+      if (matrixRequestSequence.current === requestSequence) {
+        matrixAbortController.current = null;
+        setMatrixLoading(false);
+      }
     }
   }
   function randomizeMatrix() {
@@ -196,21 +217,20 @@ export function NewJobDialog({ isOpen, dark, existingJobIds, onClose, onCreate }
     setMatrix(rows); setCsvOpen(false); clearFeedback();
   }
   async function loadMatrix() {
+    cancelMatrixRequest();
     const request = validateForm(false); if (!request) return;
     const missingIndex = locations.findIndex((location) => !location.placeId.trim());
     if (missingIndex >= 0) { setFieldErrors({ [`location.${missingIndex}.placeId`]: "tcache 조회에는 Place ID가 필요합니다." }); setValidation({ valid: false, message: "모든 장소의 Place ID를 입력하세요." }); return; }
-    const requestSequence = matrixRequestSequence.current + 1;
-    matrixRequestSequence.current = requestSequence;
-    setMatrixLoading(true);
+    const { controller, requestSequence } = beginMatrixRequest();
     try {
-      const result = await fetchTravelTimeMatrix(request);
+      const result = await fetchTravelTimeMatrix(request, controller.signal);
       if (result.length !== locations.length || result.some((row) => row.length !== locations.length)) throw new Error("tcache 매트릭스 크기가 장소 수와 일치하지 않습니다.");
       if (matrixRequestSequence.current !== requestSequence) return;
       setMatrix(matrixFromNumbers(result)); setValidation({ valid: true, message: "tcache 매트릭스를 가져왔습니다." });
     } catch (error) {
       if (matrixRequestSequence.current === requestSequence) setValidation({ valid: false, message: (error as Error).message });
     }
-    finally { if (matrixRequestSequence.current === requestSequence) setMatrixLoading(false); }
+    finally { if (matrixRequestSequence.current === requestSequence) { matrixAbortController.current = null; setMatrixLoading(false); } }
   }
   function formatRaw() {
     try { const request = parseInput(rawInput); setRawInput(JSON.stringify(request, null, 2)); setValidation({ valid: true, message: "유효함" }); }
@@ -221,13 +241,14 @@ export function NewJobDialog({ isOpen, dark, existingJobIds, onClose, onCreate }
     catch (error) { setValidation({ valid: false, message: (error as Error).message }); }
   }
   function create() { const request = parseAndValidate(); if (request) onCreate(request); }
+  function closeDialog() { cancelMatrixRequest(); onClose(); }
 
-  return <Dialog className="new-job-dialog" isOpen={isOpen} onClose={onClose} portalClassName={dark ? Classes.DARK : undefined} title="새 Job" icon="new-object" canEscapeKeyClose>
+  return <Dialog className="new-job-dialog" isOpen={isOpen} onClose={closeDialog} portalClassName={dark ? Classes.DARK : undefined} title="새 Job" icon="new-object" canEscapeKeyClose>
     <DialogBody className="new-job-dialog-body">
       <section className="new-job-section preset-section" aria-labelledby="preset-heading">
         <h2 id="preset-heading">Preset</h2>
         <div className="preset-buttons">
-          {JOB_PRESETS.map((preset) => <Button key={preset.key} disabled={matrixLoading} onClick={() => requestPreset(preset)}>{preset.name}</Button>)}
+          {JOB_PRESETS.map((preset) => <Button key={preset.key} onClick={() => requestPreset(preset)}>{preset.name}</Button>)}
         </div>
       </section>
       <section className="new-job-section" aria-labelledby="basic-info-heading">
@@ -263,7 +284,7 @@ export function NewJobDialog({ isOpen, dark, existingJobIds, onClose, onCreate }
         <div className="form-table-scroll matrix-scroll"><table className="matrix-input-table"><thead><tr><th aria-label="출발 및 도착" />{locations.map((location, index) => <th key={location.key}>{location.id || index + 1}</th>)}</tr></thead>
           <tbody>{locations.map((location, rowIndex) => <tr key={location.key}><th>{location.id || rowIndex + 1}</th>{locations.map((column, columnIndex) => { const error = fieldErrors[`matrix.${rowIndex}.${columnIndex}`]; return <td key={column.key}><input aria-label={`${location.id || rowIndex + 1}에서 ${column.id || columnIndex + 1} 이동 시간`} aria-invalid={Boolean(error)} className={`bp6-input ${error ? "field-invalid" : ""}`} type="number" min="0" step="1" disabled={rowIndex === columnIndex} value={matrix[rowIndex]?.[columnIndex] ?? ""} onChange={(event) => { const value = event.target.value; setMatrix((current) => current.map((row, currentRow) => currentRow === rowIndex ? row.map((cell, currentColumn) => currentColumn === columnIndex ? value : cell) : row)); clearFeedback(); }} /></td>; })}</tr>)}</tbody>
         </table></div>
-        <div className="section-actions matrix-actions"><Button icon="cloud-download" loading={matrixLoading} onClick={() => void loadMatrix()}>tcache에서 가져오기</Button><Button icon="random" onClick={randomizeMatrix}>랜덤 생성</Button><Button icon="th" onClick={() => setCsvOpen((open) => !open)}>CSV 붙여넣기</Button><Button icon="reset" onClick={resetMatrix}>초기화</Button>{matrixLoading && <span className={Classes.TEXT_MUTED}><Spinner size={14} /> 매트릭스 생성 중</span>}</div>
+        <div className="section-actions matrix-actions"><Button icon="cloud-download" onClick={() => void loadMatrix()}>{matrixLoading ? "다시 가져오기" : "tcache에서 가져오기"}</Button><Button icon="random" onClick={randomizeMatrix}>랜덤 생성</Button><Button icon="th" onClick={() => setCsvOpen((open) => !open)}>CSV 붙여넣기</Button><Button icon="reset" onClick={resetMatrix}>초기화</Button>{matrixLoading && <span className={Classes.TEXT_MUTED}><Spinner size={14} /> 매트릭스 생성 중</span>}</div>
         <Collapse isOpen={csvOpen}><div className="csv-editor"><TextArea aria-label="매트릭스 CSV" fill placeholder={"0,30,45\n28,0,15\n40,18,0"} value={csvInput} onChange={(event) => setCsvInput(event.target.value)} /><Button intent={Intent.PRIMARY} onClick={applyCsv}>CSV 적용</Button></div></Collapse>
       </section>
 
@@ -273,7 +294,7 @@ export function NewJobDialog({ isOpen, dark, existingJobIds, onClose, onCreate }
       </section>
       <div className="dialog-validation" aria-live="polite">{validation?.valid ? <Tag icon="tick" intent={Intent.SUCCESS} minimal>{validation.message}</Tag> : validation ? <Callout compact intent={Intent.DANGER} role="alert" title="입력 오류">{validation.message}</Callout> : null}</div>
     </DialogBody>
-    <DialogFooter actions={<><Button onClick={onClose}>취소</Button><Button icon="tick" disabled={matrixLoading} onClick={parseAndValidate}>검증</Button><Button icon="play" intent={Intent.PRIMARY} disabled={matrixLoading} onClick={create}>Job 생성</Button></>} />
+    <DialogFooter actions={<><Button onClick={closeDialog}>취소</Button><Button icon="tick" disabled={matrixLoading} onClick={parseAndValidate}>검증</Button><Button icon="play" intent={Intent.PRIMARY} disabled={matrixLoading} onClick={create}>Job 생성</Button></>} />
     <Alert cancelButtonText="취소" confirmButtonText="교체" intent={Intent.PRIMARY} isOpen={pendingPreset !== null} onCancel={() => setPendingPreset(null)} onConfirm={() => { if (pendingPreset) void applyPreset(pendingPreset); }}>
       <p>현재 입력을 {pendingPreset?.name} preset으로 교체할까요?</p>
     </Alert>

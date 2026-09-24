@@ -522,6 +522,64 @@ test("form edits directed matrix, resizes with locations, and exposes five prese
   expect(presetMatrixRequests).toBe(0);
 });
 
+test("form and Raw JSON enforce the same ten-minute input units", async ({ page }) => {
+  await page.goto("/");
+  const { dialog, editor } = await openJobDialog(page);
+  const open = dialog.getByLabel("1번 장소 Open");
+  const close = dialog.getByLabel("1번 장소 Close");
+  const stay = dialog.getByLabel("1번 장소 체류시간");
+  const validate = dialog.getByRole("button", { name: "검증" });
+
+  await expect(open).toHaveAttribute("step", "600");
+  await expect(close).toHaveAttribute("step", "600");
+  await expect(stay).toHaveAttribute("step", "10");
+
+  for (const minute of ["00", "10", "20", "30", "40", "50"]) {
+    await open.fill(`09:${minute}`);
+    await validate.click();
+    await expect(dialog.getByText("유효함", { exact: true })).toBeVisible();
+  }
+  for (const minute of ["01", "09", "11", "59"]) {
+    await open.fill(`09:${minute}`);
+    await validate.click();
+    await expect(dialog.getByRole("alert")).toContainText("10분 단위");
+  }
+
+  await open.fill("09:00");
+  await close.fill("18:25");
+  await validate.click();
+  await expect(dialog.getByRole("alert")).toContainText("10분 단위");
+  await close.fill("18:00");
+  for (const value of ["0", "10", "20"]) {
+    await stay.fill(value);
+    await validate.click();
+    await expect(dialog.getByText("유효함", { exact: true })).toBeVisible();
+  }
+  for (const value of ["1", "15", "25"]) {
+    await stay.fill(value);
+    await validate.click();
+    await expect(dialog.getByRole("alert")).toContainText("10분 배수");
+  }
+
+  const raw = JSON.parse(await editor.inputValue());
+  raw.locations[0].open_time = "09:07";
+  raw.locations[0].stay_minutes = 20;
+  await editor.fill(JSON.stringify(raw));
+  await validate.click();
+  await expect(dialog.getByRole("alert")).toContainText("10분 단위");
+
+  raw.locations[0].open_time = "09:10";
+  raw.locations[0].stay_minutes = 15;
+  await editor.fill(JSON.stringify(raw));
+  await validate.click();
+  await expect(dialog.getByRole("alert")).toContainText("10분 배수");
+
+  raw.locations[0].stay_minutes = 20;
+  await editor.fill(JSON.stringify(raw));
+  await validate.click();
+  await expect(dialog.getByText("유효함", { exact: true })).toBeVisible();
+});
+
 test("CSV and tcache matrix input update the shared form and raw JSON", async ({
   page,
 }) => {
@@ -547,6 +605,84 @@ test("CSV and tcache matrix input update the shared form and raw JSON", async ({
   await expect.poll(() => matrixRequests).toBe(1);
   await expect(dialog.getByLabel("A에서 B 이동 시간")).toHaveValue("11");
   await expect(dialog.getByLabel("B에서 A 이동 시간")).toHaveValue("21");
+});
+
+test("reloading a matrix aborts the old request and ignores its stale response", async ({
+  page,
+}) => {
+  let matrixRequests = 0;
+  let abortedMatrixRequests = 0;
+  page.on("requestfailed", (request) => {
+    if (request.url().includes("/api/integration/matrix")) {
+      abortedMatrixRequests += 1;
+    }
+  });
+  let releaseFirstResponse: (() => void) | undefined;
+  const firstResponseGate = new Promise<void>((resolve) => {
+    releaseFirstResponse = resolve;
+  });
+  await page.route("**/api/integration/matrix", async (route) => {
+    matrixRequests += 1;
+    if (matrixRequests === 1) {
+      await firstResponseGate;
+      await route.fulfill({
+        json: { travel_time_matrix: [[0, 41, 42], [51, 0, 53], [61, 62, 0]] },
+      }).catch(() => undefined);
+      return;
+    }
+    await route.fulfill({
+      json: { travel_time_matrix: [[0, 91, 92], [81, 0, 83], [71, 72, 0]] },
+    });
+  });
+  await page.goto("/");
+  const { dialog } = await openJobDialog(page);
+
+  await dialog.getByRole("button", { name: "tcache에서 가져오기" }).click();
+  await expect.poll(() => matrixRequests).toBe(1);
+  await dialog.getByRole("button", { name: "다시 가져오기" }).click();
+  await expect.poll(() => matrixRequests).toBe(2);
+  await expect.poll(() => abortedMatrixRequests).toBe(1);
+  await expect(dialog.getByLabel("A에서 B 이동 시간")).toHaveValue("91");
+
+  releaseFirstResponse?.();
+  await page.waitForTimeout(50);
+  await expect(dialog.getByLabel("A에서 B 이동 시간")).toHaveValue("91");
+});
+
+test("preset changes and dialog close abort active matrix requests", async ({
+  page,
+}) => {
+  let matrixRequests = 0;
+  let abortedMatrixRequests = 0;
+  const releaseResponses: Array<() => void> = [];
+  page.on("requestfailed", (request) => {
+    if (request.url().includes("/api/integration/matrix")) {
+      abortedMatrixRequests += 1;
+    }
+  });
+  await page.route("**/api/integration/matrix", async (route) => {
+    matrixRequests += 1;
+    await new Promise<void>((resolve) => releaseResponses.push(resolve));
+    await route.fulfill({
+      json: { travel_time_matrix: [[0, 11, 12], [21, 0, 23], [31, 32, 0]] },
+    }).catch(() => undefined);
+  });
+  await page.goto("/");
+  const { dialog } = await openJobDialog(page);
+
+  await dialog.getByRole("button", { name: "tcache에서 가져오기" }).click();
+  await expect.poll(() => matrixRequests).toBe(1);
+  await dialog.getByRole("button", { name: "Tokyo 5", exact: true }).click();
+  await expect.poll(() => abortedMatrixRequests).toBe(1);
+  releaseResponses.shift()?.();
+  await page.getByRole("button", { name: "취소", exact: true }).last().click();
+
+  await dialog.getByRole("button", { name: "tcache에서 가져오기" }).click();
+  await expect.poll(() => matrixRequests).toBe(2);
+  await dialog.getByRole("button", { name: "취소", exact: true }).click();
+  await expect.poll(() => abortedMatrixRequests).toBe(2);
+  releaseResponses.shift()?.();
+  await expect(dialog).not.toBeVisible();
 });
 
 test("duplicate ids are rejected and newest jobs sort first", async ({ page }) => {
@@ -675,14 +811,14 @@ test("reload restores recent jobs and fetches the selected timeline", async ({
               id: "A",
               place_id: "place-a",
               open_time: "00:00",
-              close_time: "23:59",
+              close_time: "23:50",
               stay_minutes: 0,
             },
             {
               id: "C",
               place_id: "place-c",
               open_time: "00:00",
-              close_time: "23:59",
+              close_time: "23:50",
               stay_minutes: 0,
             },
           ],

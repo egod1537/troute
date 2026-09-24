@@ -82,9 +82,9 @@ mod tests {
             r#"{
                 "job_id":"route-development-test",
                 "locations": [
-                    {"id":"A","place_id":"a","open_time":"00:00","close_time":"23:59","stay_minutes":0},
-                    {"id":"B","place_id":"b","open_time":"00:00","close_time":"23:59","stay_minutes":0},
-                    {"id":"C","place_id":"c","open_time":"00:00","close_time":"23:59","stay_minutes":0}
+                    {"id":"A","place_id":"a","open_time":"00:00","close_time":"23:50","stay_minutes":0},
+                    {"id":"B","place_id":"b","open_time":"00:00","close_time":"23:50","stay_minutes":0},
+                    {"id":"C","place_id":"c","open_time":"00:00","close_time":"23:50","stay_minutes":0}
                 ],
                 "start_time":"09:00"
             }"#,

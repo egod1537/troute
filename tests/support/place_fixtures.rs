@@ -87,7 +87,7 @@ pub fn build_optimize_request_from_fixture(
         message: format!("invalid default_start_time: {error}"),
     })?;
     let open_time = TimeOfDay::from_minutes(0).expect("midnight is a valid time");
-    let close_time = TimeOfDay::from_minutes(23 * 60 + 59).expect("23:59 is a valid time");
+    let close_time = TimeOfDay::from_minutes(23 * 60 + 50).expect("23:50 is a valid time");
 
     Ok(OptimizeRouteRequest {
         job_id: job_id.into(),
@@ -104,6 +104,7 @@ pub fn build_optimize_request_from_fixture(
             })
             .collect(),
         start_time,
+        travel_mode: None,
         travel_time_matrix: None,
         debug: None::<DebugOptions>,
     })

@@ -7,6 +7,7 @@ use crate::domain::{
     DomainError, Location, OptimizationProblem, RoutePlan, RoutingReference, TimeOfDay, TimeWindow,
 };
 use crate::events::{validate_job_id, JobIdError};
+use crate::routing::TravelMode;
 use crate::solver::{
     SolverCandidate, SolverCandidateMetadata, SolverDiagnostics, TIME_SLOT_MINUTES,
 };
@@ -21,6 +22,8 @@ pub struct OptimizeRouteRequest {
     pub job_id: String,
     pub locations: Vec<LocationInput>,
     pub start_time: TimeOfDay,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub travel_mode: Option<TravelMode>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub travel_time_matrix: Option<Vec<Vec<u32>>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -300,6 +303,25 @@ impl TryFrom<OptimizeRouteRequest> for OptimizationProblem {
                 return Err(RequestValidationError::DuplicateLocationId(input.id));
             }
 
+            for (field, time) in [
+                ("open_time", input.open_time),
+                ("close_time", input.close_time),
+            ] {
+                if time.minutes() % TIME_SLOT_MINUTES as u16 != 0 {
+                    return Err(RequestValidationError::TimeNotTenMinuteAligned {
+                        location_id: input.id.clone(),
+                        field,
+                        actual: time,
+                    });
+                }
+            }
+            if input.stay_minutes % TIME_SLOT_MINUTES != 0 {
+                return Err(RequestValidationError::StayMinutesNotTenMinuteMultiple {
+                    location_id: input.id.clone(),
+                    actual: input.stay_minutes,
+                });
+            }
+
             let time_window =
                 TimeWindow::new(input.open_time, input.close_time).map_err(|source| {
                     RequestValidationError::InvalidTimeWindow {
@@ -516,6 +538,16 @@ pub enum RequestValidationError {
     PlaceIdTooLong { location_id: String, maximum: usize },
     #[error("duplicate location id: {0}")]
     DuplicateLocationId(String),
+    #[error("{field} must use a 10-minute boundary for location {location_id} (actual {actual})")]
+    TimeNotTenMinuteAligned {
+        location_id: String,
+        field: &'static str,
+        actual: TimeOfDay,
+    },
+    #[error(
+        "stay_minutes must be a non-negative multiple of 10 for location {location_id} (actual {actual})"
+    )]
+    StayMinutesNotTenMinuteMultiple { location_id: String, actual: u32 },
     #[error(
         "travel_time_matrix has {actual} rows; expected {expected} for the supplied locations"
     )]
@@ -559,7 +591,7 @@ mod tests {
                     "id": id,
                     "place_id": format!("place-{id}"),
                     "open_time": "00:00",
-                    "close_time": "23:59",
+                    "close_time": "23:50",
                     "stay_minutes": 0
                 }))
                 .collect::<Vec<_>>(),
@@ -598,6 +630,82 @@ mod tests {
             error,
             RequestValidationError::DuplicateLocationId(id) if id == "A"
         ));
+    }
+
+    #[test]
+    fn location_times_and_stays_require_ten_minute_units() {
+        for minute in [0, 10, 20, 30, 40, 50] {
+            let mut request = request_with_locations(&["A", "B"]);
+            request.locations[0].open_time = TimeOfDay::from_minutes(9 * 60 + minute).unwrap();
+            request.locations[0].close_time = TimeOfDay::from_minutes(10 * 60 + minute).unwrap();
+            OptimizationProblem::try_from(request).unwrap();
+        }
+
+        for minute in [1, 9, 11, 59] {
+            for field in ["open_time", "close_time"] {
+                let mut request = request_with_locations(&["A", "B"]);
+                let value = TimeOfDay::from_minutes(9 * 60 + minute).unwrap();
+                if field == "open_time" {
+                    request.locations[0].open_time = value;
+                } else {
+                    request.locations[0].close_time = value;
+                }
+                assert!(matches!(
+                    OptimizationProblem::try_from(request),
+                    Err(RequestValidationError::TimeNotTenMinuteAligned {
+                        field: actual_field,
+                        actual,
+                        ..
+                    }) if actual_field == field && actual == value
+                ));
+            }
+        }
+
+        for stay_minutes in [0, 10, 20] {
+            let mut request = request_with_locations(&["A", "B"]);
+            request.locations[0].stay_minutes = stay_minutes;
+            OptimizationProblem::try_from(request).unwrap();
+        }
+        for stay_minutes in [1, 15, 25] {
+            let mut request = request_with_locations(&["A", "B"]);
+            request.locations[0].stay_minutes = stay_minutes;
+            assert!(matches!(
+                OptimizationProblem::try_from(request),
+                Err(RequestValidationError::StayMinutesNotTenMinuteMultiple {
+                    actual,
+                    ..
+                }) if actual == stay_minutes
+            ));
+        }
+    }
+
+    #[test]
+    fn travel_mode_is_optional_strict_and_round_trips() {
+        let omitted = request_with_locations(&["A", "B"]);
+        assert_eq!(omitted.travel_mode, None);
+        assert!(serde_json::to_value(&omitted).unwrap()["travel_mode"].is_null());
+
+        for (wire_value, expected) in [
+            ("TRANSIT", TravelMode::Transit),
+            ("DRIVING", TravelMode::Driving),
+            ("WALKING", TravelMode::Walking),
+            ("BICYCLING", TravelMode::Bicycling),
+        ] {
+            let mut value = serde_json::to_value(request_with_locations(&["A", "B"])).unwrap();
+            value["travel_mode"] = json!(wire_value);
+            let request: OptimizeRouteRequest = serde_json::from_value(value).unwrap();
+            assert_eq!(request.travel_mode, Some(expected));
+            assert_eq!(
+                serde_json::to_value(request).unwrap()["travel_mode"],
+                wire_value
+            );
+        }
+
+        for invalid in ["transit", "DRIVE", "CAR", "PUBLIC_TRANSIT", "FLYING"] {
+            let mut value = serde_json::to_value(request_with_locations(&["A", "B"])).unwrap();
+            value["travel_mode"] = json!(invalid);
+            assert!(serde_json::from_value::<OptimizeRouteRequest>(value).is_err());
+        }
     }
 
     #[test]
@@ -737,8 +845,8 @@ mod tests {
         let invalid = serde_json::from_value::<OptimizeRouteRequest>(json!({
             "job_id": "route-api-test",
             "locations": [
-                {"id":"A","place_id":"a","open_time":"00:00","close_time":"23:59","stay_minutes":0},
-                {"id":"B","place_id":"b","open_time":"00:00","close_time":"23:59","stay_minutes":0}
+                {"id":"A","place_id":"a","open_time":"00:00","close_time":"23:50","stay_minutes":0},
+                {"id":"B","place_id":"b","open_time":"00:00","close_time":"23:50","stay_minutes":0}
             ],
             "start_time": "09:00",
             "debug": {"shuffle_result_route": "true"}

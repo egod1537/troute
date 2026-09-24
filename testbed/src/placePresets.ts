@@ -83,7 +83,7 @@ function placePreset(
       name,
       placeId: place_id,
       openTime: "00:00",
-      closeTime: "23:59",
+      closeTime: "23:50",
       stayMinutes:
         index === 0 || index === fixture.locations.length - 1 ? 0 : 30,
     })),

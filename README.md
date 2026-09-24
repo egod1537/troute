@@ -145,6 +145,8 @@ required, and missing or invalid configuration fails application startup.
 | `TCACHE_BASE_URL` | none | required tcache server base URL |
 | `TCACHE_POLL_INTERVAL_MS` | `250` | positive Route Job status polling interval |
 | `TCACHE_REQUEST_TIMEOUT_MS` | `30000` | positive total timeout for each pair query |
+| `TCACHE_PAIR_CONCURRENCY` | `4` | maximum concurrent directed pair Route Jobs; 1–256 |
+| `TCACHE_MATRIX_TOTAL_TIMEOUT_MS` | `120000` | total deadline for one matrix build in milliseconds; 1–86,400,000 |
 | `TROUTE_EXACT_LIMIT` | `15` | maximum location count at which the orchestrator also runs exact bit-DP; 1–15 |
 | `TROUTE_MAX_EXACT_CLUSTER_SIZE` | `10` | requested intermediate locations per exact cluster; 1–15 (internally capped at 13 to reserve entry/exit anchors) |
 | `SOLVER_MAX_CONCURRENCY` | `4` | maximum independently running solver strategies; 1–256 |
@@ -155,8 +157,13 @@ required, and missing or invalid configuration fails application startup.
 
 The adapter creates `POST /api/route/jobs` with two Place IDs, polls the returned
 Job, reads `result.routes[0].durationSeconds`, and converts seconds to whole
-minutes by rounding up. It attempts the tcache Route Job cancel endpoint when a
-pair query times out. The deprecated `TCACHE_MATRIX_POLL_INTERVAL_MS` and
+minutes by rounding up. Directed pairs run with bounded concurrency. Each pair
+uses the earlier of its own timeout and the remaining matrix deadline. A pair
+failure or total timeout stops unscheduled work and cooperatively cancels
+in-flight tcache Jobs. Matrix errors report timeout classification, elapsed
+time, completed/total pair counts, and the failed directed pair.
+It also attempts the tcache Route Job cancel endpoint when a pair query times
+out. The deprecated `TCACHE_MATRIX_POLL_INTERVAL_MS` and
 `TCACHE_MATRIX_TIMEOUT_MS` names remain fallback aliases. The current troute v0
 domain contains
 only a wall-clock `start_time`, not a calendar date or timezone. The
@@ -208,7 +215,9 @@ logic.
 Both submission endpoints accept `application/json`. Time values are strict 24-hour
 `HH:MM` strings on both request and response; numeric minute values and forms
 such as `9:00`, `24:00`, or `09:60` are rejected. Requests must contain 2 to 500
-locations. The first location is the fixed start, the last location is the
+locations. Location `open_time` and `close_time` values must fall on a 10-minute
+boundary (`00`, `10`, `20`, `30`, `40`, or `50` minutes), and `stay_minutes`
+must be a non-negative multiple of 10. The first location is the fixed start, the last location is the
 fixed destination, and only locations between them may be reordered by the
 solver. The required `job_id` is an opaque correlation value supplied by
 Trasolve; it must be non-blank and at most 128 characters. Location IDs must be
@@ -217,6 +226,12 @@ non-blank strings of at most 512 characters when `travel_time_matrix` is
 omitted; they may be blank when a matrix is supplied because tcache is bypassed.
 Overnight windows are not supported, so `open_time` must not be later than
 `close_time`. The request body limit is 1 MiB.
+
+The optional `travel_mode` field accepts exactly `TRANSIT`, `DRIVING`,
+`WALKING`, or `BICYCLING` and defaults to `TRANSIT` when omitted. When troute
+builds the matrix, the selected value is forwarded to each tcache Route Job.
+When `travel_time_matrix` is supplied directly, routing lookup is bypassed and
+`travel_mode` is retained only as request metadata.
 
 For manual progress, SSE, and cancellation testing, a request may include the
 optional diagnostic setting below:
@@ -259,7 +274,7 @@ curl -i -X POST http://127.0.0.1:8080/optimize \
         "id": "place-1",
         "place_id": "GOOGLE_PLACE_ID_1",
         "open_time": "00:00",
-        "close_time": "23:59",
+        "close_time": "23:50",
         "stay_minutes": 0
       },
       {
@@ -267,17 +282,18 @@ curl -i -X POST http://127.0.0.1:8080/optimize \
         "place_id": "GOOGLE_PLACE_ID_2",
         "open_time": "10:00",
         "close_time": "18:00",
-        "stay_minutes": 45
+        "stay_minutes": 40
       },
       {
         "id": "place-3",
         "place_id": "GOOGLE_PLACE_ID_3",
         "open_time": "00:00",
-        "close_time": "23:59",
+        "close_time": "23:50",
         "stay_minutes": 0
       }
     ],
-    "start_time": "09:00"
+    "start_time": "09:00",
+    "travel_mode": "DRIVING"
   }'
 ```
 
@@ -1033,6 +1049,14 @@ independent brute-force oracle, compares Pareto pruning on and off, exercises
 
 ```sh
 cargo test --test algorithm_validation
+```
+
+For behavior-neutral module migrations, follow
+[`docs/refactor-migration.md`](docs/refactor-migration.md) and run the complete
+format, lint, regression, contract, and benchmark gate:
+
+```sh
+bash scripts/check_refactor_regression.sh
 ```
 
 Run the release-mode quality and performance matrix with:

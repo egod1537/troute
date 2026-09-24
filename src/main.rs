@@ -1,19 +1,27 @@
 use std::{
-    env, error::Error, net::SocketAddr, num::NonZeroU16, path::PathBuf, process::ExitCode,
-    sync::Arc, time::Duration,
+    env,
+    error::Error,
+    net::SocketAddr,
+    num::{NonZeroU16, NonZeroUsize},
+    path::PathBuf,
+    process::ExitCode,
+    sync::Arc,
+    time::Duration,
 };
 
 use tokio::net::TcpListener;
 use troute::{
     http,
     observation::JobObservationRecorder,
-    routing::PairwiseMatrixRoutingProvider,
+    providers::tcache::{TcacheRoutingConfig, TcacheTravelTimeProvider},
+    routing::{
+        PairwiseMatrixRoutingProvider, DEFAULT_MATRIX_TOTAL_TIMEOUT_MS, DEFAULT_PAIR_CONCURRENCY,
+    },
     solver::{
         MatchingStrategyConfig, SolverOrchestrator, SolverOrchestratorConfig, EXACT_MAX_LOCATIONS,
         MAX_EXACT_CLUSTER_SIZE,
     },
     storage::{FileJobStore, FileJobTimelineStore, JobStore},
-    tcache::{TcacheRoutingConfig, TcacheTravelTimeProvider},
     RouteOptimizationService,
 };
 
@@ -47,7 +55,21 @@ async fn run() -> Result<(), Box<dyn Error>> {
         TcacheRoutingConfig::from_env()
             .map_err(|error| format!("invalid tcache configuration: {error}"))?,
     )?;
-    let routing_provider = PairwiseMatrixRoutingProvider::new(travel_time_provider);
+    let pair_concurrency =
+        read_bounded_size("TCACHE_PAIR_CONCURRENCY", DEFAULT_PAIR_CONCURRENCY, 256)?;
+    let matrix_total_timeout_ms = read_bounded_size(
+        "TCACHE_MATRIX_TOTAL_TIMEOUT_MS",
+        usize::try_from(DEFAULT_MATRIX_TOTAL_TIMEOUT_MS)
+            .expect("default matrix timeout must fit usize"),
+        86_400_000,
+    )?;
+    let routing_provider = PairwiseMatrixRoutingProvider::with_limits(
+        travel_time_provider,
+        NonZeroUsize::new(pair_concurrency).expect("validated concurrency must be positive"),
+        Duration::from_millis(
+            u64::try_from(matrix_total_timeout_ms).expect("matrix timeout must fit u64"),
+        ),
+    );
     let exact_limit = read_bounded_size(
         "TROUTE_EXACT_LIMIT",
         EXACT_MAX_LOCATIONS,
@@ -88,6 +110,8 @@ async fn run() -> Result<(), Box<dyn Error>> {
     println!("Exact solver location limit: {exact_limit}");
     println!("Maximum exact cluster size: {max_cluster_size}");
     println!("Solver strategy concurrency: {max_concurrency}");
+    println!("tcache pair concurrency: {pair_concurrency}");
+    println!("tcache matrix total timeout: {matrix_total_timeout_ms} ms");
     println!("Per-strategy timeout: {strategy_timeout_ms} ms");
     let listener = TcpListener::bind(address).await?;
     let optimizer = RouteOptimizationService::new(routing_provider, solver);

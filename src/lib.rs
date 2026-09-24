@@ -15,6 +15,7 @@ mod job_pacing;
 pub mod jobs;
 pub mod matrix;
 pub mod observation;
+pub mod providers;
 mod result_debug;
 pub mod routing;
 pub mod schedule;

@@ -138,17 +138,17 @@ fn random_case(location_count: usize, seed: u64, force_infeasible: bool) -> Gene
         let open: u16 = if endpoint {
             0
         } else {
-            rng.gen_range(7 * 60..=13 * 60)
+            rng.gen_range(7 * 6..=13 * 6) * 10
         };
         let stay = if endpoint {
             0
         } else {
-            [0_u32, 1, 9, 10, 11, 20, 30][rng.gen_range(0..7)]
+            [0_u32, 10, 20, 30][rng.gen_range(0..4)]
         };
         let close: u16 = if endpoint {
-            23 * 60 + 59
+            23 * 60 + 50
         } else {
-            rng.gen_range((open + 20).min(23 * 60)..=23 * 60 + 59)
+            rng.gen_range(((open + 20).min(23 * 60 + 50)) / 10..=143) * 10
         };
         locations.push(serde_json::json!({
             "id": format!("location-{index}"),
@@ -166,7 +166,7 @@ fn random_case(location_count: usize, seed: u64, force_infeasible: bool) -> Gene
         };
         locations[blocked]["open_time"] = serde_json::json!("00:00");
         locations[blocked]["close_time"] = serde_json::json!("00:00");
-        locations[blocked]["stay_minutes"] = serde_json::json!(1);
+        locations[blocked]["stay_minutes"] = serde_json::json!(10);
     }
     let request: OptimizeRouteRequest = serde_json::from_value(serde_json::json!({
         "job_id": format!("algorithm-validation-{location_count}-{seed}"),
@@ -192,7 +192,7 @@ fn boundary_case(travel: u32, stay: u32, open: u16, close: u16) -> GeneratedCase
     let request: OptimizeRouteRequest = serde_json::from_value(serde_json::json!({
         "job_id": format!("slot-boundary-{travel}-{stay}-{open}-{close}"),
         "locations": [
-            {"id":"start","place_id":"start","open_time":"00:00","close_time":"23:59","stay_minutes":0},
+            {"id":"start","place_id":"start","open_time":"00:00","close_time":"23:50","stay_minutes":0},
             {"id":"end","place_id":"end","open_time":hhmm(open),"close_time":hhmm(close),"stay_minutes":stay}
         ],
         "start_time": "00:00"
@@ -212,7 +212,7 @@ fn all_day_case(location_count: usize, seed: u64) -> GeneratedCase {
             "id": format!("location-{index}"),
             "place_id": format!("place-{index}"),
             "open_time": "00:00",
-            "close_time": "23:59",
+            "close_time": "23:50",
             "stay_minutes": 0
         })).collect::<Vec<_>>(),
         "start_time": "00:00"
@@ -331,44 +331,43 @@ fn pruning_on_and_off_produce_the_same_seeded_optimum() {
 #[test]
 fn ten_minute_quantization_boundaries_are_conservative_and_schedulable() {
     for value in [1_u32, 9, 10, 11, 19, 20] {
-        for (travel, stay) in [(value, 0), (0, value)] {
-            let case = boundary_case(travel, stay, 0, 23 * 60 + 59);
-            let result = solve_exact(&case, TimeCostFrontierPolicy).unwrap();
-            let occupied_slots = travel.div_ceil(10) + stay.div_ceil(10);
-            assert_eq!(
-                result.metrics.start_time_slot,
-                (143 - occupied_slots) as u16
-            );
-            assert_eq!(result.metrics.finish_time_slot, 143);
-            let start = troute::domain::TimeOfDay::from_minutes(
-                result.metrics.start_time_slot * TIME_SLOT_MINUTES as u16,
-            )
-            .unwrap();
-            let schedule =
-                calculate_schedule_from(&case.problem, &case.matrix, &result.solution, start)
-                    .unwrap_or_else(|error| panic!("travel={travel}, stay={stay}: {error}"));
-            let actual_finish = schedule
-                .stops
-                .last()
-                .unwrap()
-                .departure_time
-                .unwrap()
-                .minutes();
-            assert!(
-                actual_finish <= result.metrics.finish_time_slot * TIME_SLOT_MINUTES as u16,
-                "travel={travel}, stay={stay}"
-            );
-        }
+        let travel = value;
+        let stay = 0;
+        let case = boundary_case(travel, stay, 0, 23 * 60 + 50);
+        let result = solve_exact(&case, TimeCostFrontierPolicy).unwrap();
+        let occupied_slots = travel.div_ceil(10);
+        assert_eq!(
+            result.metrics.start_time_slot,
+            (143 - occupied_slots) as u16
+        );
+        assert_eq!(result.metrics.finish_time_slot, 143);
+        let start = troute::domain::TimeOfDay::from_minutes(
+            result.metrics.start_time_slot * TIME_SLOT_MINUTES as u16,
+        )
+        .unwrap();
+        let schedule =
+            calculate_schedule_from(&case.problem, &case.matrix, &result.solution, start)
+                .unwrap_or_else(|error| panic!("travel={travel}, stay={stay}: {error}"));
+        let actual_finish = schedule
+            .stops
+            .last()
+            .unwrap()
+            .departure_time
+            .unwrap()
+            .minutes();
+        assert!(
+            actual_finish <= result.metrics.finish_time_slot * TIME_SLOT_MINUTES as u16,
+            "travel={travel}, stay={stay}"
+        );
     }
 
-    // Opening is rounded up, closing is rounded down, and slot 143 (23:50)
-    // is the final representable finish slot.
+    // API time windows are aligned, and slot 143 (23:50) is the final
+    // representable finish slot.
     for (open, close, expected_start, expected_finish) in [
-        (1, 19, 1, 1),
-        (9, 19, 1, 1),
-        (10, 19, 1, 1),
-        (11, 20, 2, 2),
-        (23 * 60 + 50, 23 * 60 + 59, 143, 143),
+        (0, 0, 0, 0),
+        (10, 10, 1, 1),
+        (20, 20, 2, 2),
+        (23 * 60 + 50, 23 * 60 + 50, 143, 143),
     ] {
         let case = boundary_case(0, 0, open, close);
         let result = solve_exact(&case, TimeCostFrontierPolicy).unwrap();
@@ -382,7 +381,7 @@ fn ten_minute_quantization_boundaries_are_conservative_and_schedulable() {
         );
     }
 
-    let impossible = boundary_case(0, 1, 23 * 60 + 50, 23 * 60 + 59);
+    let impossible = boundary_case(0, 10, 23 * 60 + 50, 23 * 60 + 50);
     assert!(matches!(
         solve_exact(&impossible, TimeCostFrontierPolicy),
         Err(SolverError::NoFeasibleRoute)

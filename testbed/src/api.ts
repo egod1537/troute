@@ -5,6 +5,8 @@ export const ROUTE_PATH = (
   import.meta.env.VITE_TROUTE_ROUTE_PATH ?? "/optimize"
 ).trim();
 
+export type TravelMode = "TRANSIT" | "DRIVING" | "WALKING" | "BICYCLING";
+
 export interface RouteInput {
   job_id: string;
   locations: {
@@ -16,6 +18,7 @@ export interface RouteInput {
     stay_minutes: number;
   }[];
   start_time: string;
+  travel_mode?: TravelMode;
   travel_time_matrix?: number[][];
   debug?: {
     min_job_duration_ms?: number;
@@ -133,6 +136,7 @@ export interface StoredJobState {
 export interface StoredJobSummary {
   job_id: string;
   status: StoredJobStatus;
+  travel_mode?: TravelMode;
   created_at: number;
   updated_at: number;
 }
@@ -197,11 +201,20 @@ const nonempty = (value: unknown): value is string =>
   typeof value === "string" && value.trim().length > 0;
 const time = (value: unknown): value is string =>
   typeof value === "string" && /^(?:[01]\d|2[0-3]):[0-5]\d$/.test(value);
+export const isTenMinuteTime = (value: unknown): value is string =>
+  time(value) && Number(value.slice(3)) % 10 === 0;
 const unsigned = (value: unknown): value is number =>
   typeof value === "number" &&
   Number.isInteger(value) &&
   value >= 0 &&
   value <= 4294967295;
+export const isTenMinuteDuration = (value: unknown): value is number =>
+  unsigned(value) && value % 10 === 0;
+const isTravelMode = (value: unknown): value is TravelMode =>
+  value === "TRANSIT" ||
+  value === "DRIVING" ||
+  value === "WALKING" ||
+  value === "BICYCLING";
 
 export function parseInput(text: string): RouteInput {
   let input: unknown;
@@ -231,6 +244,11 @@ export function parseInput(text: string): RouteInput {
   ) {
     throw new Error(
       "debug.min_job_duration_ms는 0~60000 범위의 정수여야 합니다.",
+    );
+  }
+  if (input.travel_mode !== undefined && !isTravelMode(input.travel_mode)) {
+    throw new Error(
+      "travel_mode는 TRANSIT, DRIVING, WALKING, BICYCLING 중 하나여야 합니다.",
     );
   }
   const locationCount = input.locations.length;
@@ -270,12 +288,12 @@ export function parseInput(text: string): RouteInput {
       (hasSuppliedMatrix
         ? typeof location.place_id !== "string"
         : !nonempty(location.place_id)) ||
-      !time(location.open_time) ||
-      !time(location.close_time) ||
-      !unsigned(location.stay_minutes)
+      !isTenMinuteTime(location.open_time) ||
+      !isTenMinuteTime(location.close_time) ||
+      !isTenMinuteDuration(location.stay_minutes)
     ) {
       throw new Error(
-        `locations[${index}]에는 id, ${hasSuppliedMatrix ? "문자열 place_id" : "유효한 place_id"}, HH:MM 형식의 open_time/close_time, 0 이상의 정수 stay_minutes가 필요합니다.`,
+        `locations[${index}]에는 id, ${hasSuppliedMatrix ? "문자열 place_id" : "유효한 place_id"}, 10분 단위 open_time/close_time, 0 이상의 10분 배수 stay_minutes가 필요합니다.`,
       );
     }
     if (locationIds.has(location.id)) {
@@ -340,6 +358,7 @@ export function parseRoute(response: ApiResponse): RouteResponse {
 async function request(
   path: string,
   payload?: RouteInput,
+  signal?: AbortSignal,
 ): Promise<ApiResponse> {
   const method = payload ? "POST" : "GET";
   const started = performance.now();
@@ -350,7 +369,7 @@ async function request(
       method,
       headers: payload ? { "Content-Type": "application/json" } : undefined,
       body: payload ? JSON.stringify(payload) : undefined,
-      signal: AbortSignal.timeout(30_000),
+      signal: signal ?? AbortSignal.timeout(30_000),
       cache: "no-store",
     });
     raw = await response.text();
@@ -413,11 +432,12 @@ export async function runRoute(
 
 export async function fetchTravelTimeMatrix(
   input: RouteInput,
+  signal?: AbortSignal,
 ): Promise<number[][]> {
   const response = await request("/integration/matrix", {
     ...input,
     travel_time_matrix: undefined,
-  });
+  }, signal);
   if (
     !object(response.body) ||
     !Array.isArray(response.body.travel_time_matrix) ||
