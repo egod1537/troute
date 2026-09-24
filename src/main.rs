@@ -23,7 +23,7 @@ use troute::{
         MAX_EXACT_CLUSTER_SIZE,
     },
     storage::{FileJobStore, FileJobTimelineStore, JobStore},
-    RouteOptimizationService,
+    RemediationConfig, RouteOptimizationService,
 };
 
 #[tokio::main]
@@ -52,10 +52,13 @@ async fn run() -> Result<(), Box<dyn Error>> {
         Err(env::VarError::NotPresent) => PathBuf::from(".local/troute"),
         Err(error) => return Err(error.into()),
     };
-    let travel_time_provider = TcacheTravelTimeProvider::new(
-        TcacheRoutingConfig::from_env()
-            .map_err(|error| format!("invalid tcache configuration: {error}"))?,
-    )?;
+    let tcache_config = TcacheRoutingConfig::from_env()
+        .map_err(|error| format!("invalid tcache configuration: {error}"))?;
+    // reqwest's blocking client owns a small internal runtime. Constructing it
+    // directly inside Tokio's async context panics when that runtime is
+    // dropped, so perform the one-time startup work in a blocking region.
+    let travel_time_provider =
+        tokio::task::block_in_place(|| TcacheTravelTimeProvider::new(tcache_config))?;
     let provider_resolver = RouteProviderPolicyResolver::from_env()
         .map_err(|error| format!("invalid route provider policy: {error}"))?;
     let provider_diagnostics = provider_resolver.diagnostics();
@@ -113,6 +116,20 @@ async fn run() -> Result<(), Box<dyn Error>> {
         u64::try_from(default_orchestrator.deadline_safety_margin.as_millis()).unwrap_or(u64::MAX),
     )?;
     let sa_seeds = read_u64_list("SOLVER_SA_SEEDS", &default_orchestrator.sa_seeds)?;
+    let remediation_budget_ms = read_positive_u64(
+        "TROUTE_REMEDIATION_BUDGET_MS",
+        troute::failure::DEFAULT_REMEDIATION_BUDGET_MS,
+    )?;
+    let remediation_max_remove_probes = read_bounded_size(
+        "TROUTE_REMEDIATION_MAX_REMOVE_PROBES",
+        troute::failure::DEFAULT_REMEDIATION_MAX_REMOVE_PROBES,
+        500,
+    )?;
+    let max_failure_suggestions = read_bounded_size(
+        "TROUTE_MAX_FAILURE_SUGGESTIONS",
+        troute::failure::DEFAULT_MAX_FAILURE_SUGGESTIONS,
+        100,
+    )?;
     let solver = SolverOrchestrator::new(SolverOrchestratorConfig {
         exact_limit,
         max_cluster_size,
@@ -145,8 +162,16 @@ async fn run() -> Result<(), Box<dyn Error>> {
     println!("Solver total budget: {total_budget_ms} ms");
     println!("SA chunk: {sa_chunk_ms} ms");
     println!("Deadline safety margin: {deadline_safety_ms} ms");
+    println!(
+        "Failure remediation budget: {remediation_budget_ms} ms; max remove probes: {remediation_max_remove_probes}; max suggestions: {max_failure_suggestions}"
+    );
     let listener = TcpListener::bind(address).await?;
-    let optimizer = RouteOptimizationService::new(routing_provider, solver);
+    let optimizer = RouteOptimizationService::new(routing_provider, solver)
+        .with_remediation_config(RemediationConfig {
+            budget: Duration::from_millis(remediation_budget_ms),
+            max_remove_probes: remediation_max_remove_probes,
+            max_suggestions: max_failure_suggestions,
+        });
     let app = http::router_with_storage(optimizer, Some(observation), Some(job_store));
 
     println!("troute server listening on http://{address}");

@@ -14,6 +14,10 @@ use crate::{
     api::{OptimizeRouteRequest, OptimizeRouteResponse},
     cancellation::CancellationToken,
     events::{OptimizationEventReporter, ProgressStage},
+    failure::{
+        rank_failure_suggestions, service_failure_detail, service_suggestions, FailureDetail,
+        DEFAULT_MAX_FAILURE_SUGGESTIONS,
+    },
     job_pacing::DebugJobPacer,
     routing::RoutingProvider,
     schedule::ScheduleError,
@@ -50,6 +54,18 @@ pub trait JobExecutor: Send + Sync {
     ) -> Option<crate::routing::RouteProviderPolicyDiagnostics> {
         None
     }
+
+    fn failure_suggestions(
+        &self,
+        request: &OptimizeRouteRequest,
+        error: &OptimizationServiceError,
+        _cancellation: &CancellationToken,
+    ) -> Vec<crate::failure::FailureSuggestion> {
+        rank_failure_suggestions(
+            service_suggestions(error, Some(request)),
+            DEFAULT_MAX_FAILURE_SUGGESTIONS,
+        )
+    }
 }
 
 impl<P, S> JobExecutor for RouteOptimizationService<P, S>
@@ -77,6 +93,15 @@ where
         &self,
     ) -> Option<crate::routing::RouteProviderPolicyDiagnostics> {
         RouteOptimizationService::provider_policy_diagnostics(self)
+    }
+
+    fn failure_suggestions(
+        &self,
+        request: &OptimizeRouteRequest,
+        error: &OptimizationServiceError,
+        cancellation: &CancellationToken,
+    ) -> Vec<crate::failure::FailureSuggestion> {
+        RouteOptimizationService::failure_suggestions(self, request, error, cancellation)
     }
 }
 
@@ -383,8 +408,22 @@ impl JobRunner {
         let reporter = ProgressForwarder { progress_tx };
         let executor = self.executor.clone();
         let worker_cancellation = cancellation.clone();
+        let failure_request = request.clone();
+        let analysis_request = failure_request.clone();
         let execution = tokio::task::spawn_blocking(move || {
-            executor.execute(request, &reporter, &worker_cancellation)
+            let result = executor.execute(request, &reporter, &worker_cancellation);
+            let suggestions = result
+                .as_ref()
+                .err()
+                .map(|error| {
+                    executor.failure_suggestions(&analysis_request, error, &worker_cancellation)
+                })
+                .unwrap_or_default();
+            let failure_detail = result
+                .as_ref()
+                .err()
+                .map(|error| service_failure_detail(error, Some(&analysis_request)));
+            (result, suggestions, failure_detail)
         });
 
         // The optimizer continues on the blocking pool while this async task
@@ -415,24 +454,26 @@ impl JobRunner {
         drop(progress_rx);
         let execution = execution.await;
 
-        let execution_was_cancelled =
-            matches!(&execution, Ok(Err(OptimizationServiceError::Cancelled)));
+        let execution_was_cancelled = matches!(
+            &execution,
+            Ok((Err(OptimizationServiceError::Cancelled), _, _))
+        );
         if execution_was_cancelled || !pacer.wait_until_minimum(&cancellation).await {
             self.persist_cancelled(&job_id)?;
             return Ok(());
         }
 
         match execution {
-            Ok(Ok(result)) => {
+            Ok((Ok(result), _, _)) => {
                 if self.store.save_result(&job_id, &result)? == TerminalWriteOutcome::Applied {
                     self.publish_persisted(&job_id, JobEventKind::Completed);
                 }
             }
-            Ok(Err(OptimizationServiceError::Cancelled)) => {
+            Ok((Err(OptimizationServiceError::Cancelled), _, _)) => {
                 self.persist_cancelled(&job_id)?;
             }
-            Ok(Err(error)) => {
-                let stored = stored_error(&error);
+            Ok((Err(error), suggestions, failure_detail)) => {
+                let stored = stored_error(&error, suggestions, failure_detail);
                 if self.store.save_error(&job_id, &stored)? == TerminalWriteOutcome::Applied {
                     self.publish_persisted(&job_id, JobEventKind::Failed);
                 }
@@ -442,6 +483,8 @@ impl JobRunner {
                     code: "JOB_EXECUTION_FAILED".to_owned(),
                     message: "Route optimization failed unexpectedly.".to_owned(),
                     detail: join_error.to_string(),
+                    failure_detail: None,
+                    suggestions: None,
                 };
                 if self.store.save_error(&job_id, &stored)? == TerminalWriteOutcome::Applied {
                     self.publish_persisted(&job_id, JobEventKind::Failed);
@@ -495,7 +538,11 @@ impl OptimizationEventReporter for ProgressForwarder {
     fn result(&self, _response: &OptimizeRouteResponse) {}
 }
 
-fn stored_error(error: &OptimizationServiceError) -> StoredJobError {
+fn stored_error(
+    error: &OptimizationServiceError,
+    suggestions: Vec<crate::failure::FailureSuggestion>,
+    failure_detail: Option<FailureDetail>,
+) -> StoredJobError {
     let (code, message, detail) = match error {
         OptimizationServiceError::Cancelled => (
             "JOB_CANCELLED",
@@ -525,6 +572,10 @@ fn stored_error(error: &OptimizationServiceError) -> StoredJobError {
                     "UNSUPPORTED_PROVIDER_CAPABILITY",
                     "The selected route provider does not support this travel mode.",
                 ),
+                crate::routing::RoutingError::MatrixBuild { .. } => (
+                    "ROUTING_PAIR_FAILED",
+                    "A route could not be found for one location pair.",
+                ),
                 _ => (
                     "ROUTING_UNAVAILABLE",
                     "Travel-time routing is temporarily unavailable.",
@@ -532,18 +583,34 @@ fn stored_error(error: &OptimizationServiceError) -> StoredJobError {
             };
             (code, message, source.to_string())
         }
-        OptimizationServiceError::Solver(SolverError::NoFeasibleRoute) => (
-            "NO_FEASIBLE_ROUTE",
-            "No feasible route was found.",
-            "solver found no feasible route".to_owned(),
-        ),
+        OptimizationServiceError::Solver(SolverError::NoFeasibleRoute) => match &failure_detail {
+            Some(FailureDetail::StartPolicyInfeasible { .. }) => (
+                "START_POLICY_INFEASIBLE",
+                "The selected start policy cannot produce a feasible route.",
+                "the route requires an earlier start".to_owned(),
+            ),
+            _ => (
+                "NO_FEASIBLE_ROUTE",
+                "No feasible route was found.",
+                "solver found no feasible route".to_owned(),
+            ),
+        },
         OptimizationServiceError::Schedule(
             source @ (ScheduleError::OutsideSingleDay | ScheduleError::TimeWindowViolation { .. }),
-        ) => (
-            "NO_FEASIBLE_ROUTE",
-            "No feasible route was found.",
-            source.to_string(),
-        ),
+        ) => {
+            let (code, message) = match &failure_detail {
+                Some(FailureDetail::StartPolicyInfeasible { .. }) => (
+                    "START_POLICY_INFEASIBLE",
+                    "The selected start policy cannot produce a feasible route.",
+                ),
+                Some(FailureDetail::TimeWindowViolation { .. }) => (
+                    "TIME_WINDOW_VIOLATION",
+                    "A location cannot be visited within its opening window.",
+                ),
+                _ => ("NO_FEASIBLE_ROUTE", "No feasible route was found."),
+            };
+            (code, message, source.to_string())
+        }
         OptimizationServiceError::Solver(source) => (
             "SOLVER_ERROR",
             "Route optimization failed unexpectedly.",
@@ -559,6 +626,8 @@ fn stored_error(error: &OptimizationServiceError) -> StoredJobError {
         code: code.to_owned(),
         message: message.to_owned(),
         detail,
+        failure_detail,
+        suggestions: (!suggestions.is_empty()).then_some(suggestions),
     }
 }
 

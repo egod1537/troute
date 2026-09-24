@@ -617,6 +617,23 @@ impl<P: RoutingProvider> RoutingProvider for PolicyRoutingProvider<P> {
         self.inner.travel_time_matrix(locations, &resolved)
     }
 
+    fn travel_time_matrix_until(
+        &self,
+        locations: &[Location],
+        context: &RoutingContext,
+        deadline: std::time::Instant,
+    ) -> Result<TravelTimeMatrix, RoutingError> {
+        let selection = self.provider_selection(context)?.ok_or_else(|| {
+            RoutingError::ProviderResolution("provider policy returned no selection".to_owned())
+        })?;
+        let mut resolved = context.clone();
+        resolved
+            .options
+            .insert("routeProvider".to_owned(), selection.provider.to_string());
+        self.inner
+            .travel_time_matrix_until(locations, &resolved, deadline)
+    }
+
     fn provider_selection(
         &self,
         context: &RoutingContext,

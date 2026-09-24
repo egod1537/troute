@@ -945,7 +945,7 @@ async fn legacy_optimize_reuses_debug_pacing_for_success_and_failure() {
     assert_error(
         failed,
         StatusCode::UNPROCESSABLE_ENTITY,
-        "NO_FEASIBLE_ROUTE",
+        "TIME_WINDOW_VIOLATION",
     );
     assert!(failed_started.elapsed() >= Duration::from_millis(300));
 }
@@ -1247,7 +1247,7 @@ async fn async_submit_persists_failure_and_can_cancel_a_running_job() {
     assert_eq!(submitted.status, StatusCode::ACCEPTED);
     wait_for_job_status(store.as_ref(), "async-failure", JobStatus::Failed).await;
     let failed = store.get_job("async-failure").unwrap().unwrap();
-    assert_eq!(failed.error.unwrap().code, "NO_FEASIBLE_ROUTE");
+    assert_eq!(failed.error.unwrap().code, "TIME_WINDOW_VIOLATION");
     assert!(failed.result.is_none());
 
     let cancel_directory = TestDirectory::new();
@@ -1397,11 +1397,17 @@ async fn persistent_job_failure_writes_error_and_terminal_state() {
         request.to_string(),
     )
     .await;
-    assert_error(
-        response,
-        StatusCode::UNPROCESSABLE_ENTITY,
-        "NO_FEASIBLE_ROUTE",
+    assert_eq!(response.status, StatusCode::UNPROCESSABLE_ENTITY);
+    assert_eq!(response.body["error"]["code"], "TIME_WINDOW_VIOLATION");
+    assert_eq!(
+        response.body["error"]["failure_detail"]["type"],
+        "TIME_WINDOW_VIOLATION"
     );
+    assert!(response.body["error"]["suggestions"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|suggestion| suggestion["type"] == "MOVE_LOCATION_EARLIER"));
 
     let detail = send_to(
         app,
@@ -1414,7 +1420,42 @@ async fn persistent_job_failure_writes_error_and_terminal_state() {
     assert_eq!(detail.status, StatusCode::OK);
     assert_eq!(detail.body["status"], "failed");
     assert!(detail.body["completed_at"].is_number());
-    assert_eq!(detail.body["error"]["code"], "NO_FEASIBLE_ROUTE");
+    assert_eq!(detail.body["error"]["code"], "TIME_WINDOW_VIOLATION");
+    assert_eq!(
+        detail.body["error"]["failure_detail"]["type"],
+        "TIME_WINDOW_VIOLATION"
+    );
+    assert_eq!(
+        detail.body["error"]["failure_detail"]["location_id"],
+        "place-2"
+    );
+    assert_eq!(
+        detail.body["error"]["failure_detail"]["arrival_time"],
+        "09:15"
+    );
+    assert_eq!(
+        detail.body["error"]["failure_detail"]["required_departure"],
+        "09:45"
+    );
+    assert_eq!(
+        detail.body["error"]["failure_detail"]["close_time"],
+        "09:10"
+    );
+    let suggestions = detail.body["error"]["suggestions"].as_array().unwrap();
+    assert_eq!(suggestions.len(), 3);
+    assert_eq!(suggestions[0]["type"], "REDUCE_STAY_TIME");
+    assert_eq!(suggestions[1]["type"], "MOVE_LOCATION_EARLIER");
+    assert_eq!(suggestions[1]["location_id"], "place-2");
+    assert_eq!(suggestions[1]["current_value"], "09:15");
+    assert_eq!(suggestions[1]["suggested_value"], "08:40");
+    assert!(suggestions.iter().any(|suggestion| {
+        suggestion["type"] == "REMOVE_LOCATION"
+            && suggestion["location_id"] == "place-2"
+            && suggestion["confidence"] == "heuristic"
+    }));
+    assert!(!suggestions
+        .iter()
+        .any(|suggestion| suggestion["type"] == "SPLIT_DAY"));
     assert!(temporary
         .0
         .join("jobs/route-persistent-failure/error.json")
@@ -1975,7 +2016,7 @@ async fn infeasible_schedule_has_the_documented_error() {
     assert_error(
         response,
         StatusCode::UNPROCESSABLE_ENTITY,
-        "NO_FEASIBLE_ROUTE",
+        "TIME_WINDOW_VIOLATION",
     );
 }
 

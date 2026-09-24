@@ -15,6 +15,22 @@ pub trait RoutingProvider {
         context: &RoutingContext,
     ) -> Result<TravelTimeMatrix, RoutingError>;
 
+    /// Builds a matrix without starting work after the caller's deadline.
+    /// Providers with deadline-aware I/O should override this method.
+    fn travel_time_matrix_until(
+        &self,
+        locations: &[Location],
+        context: &RoutingContext,
+        deadline: Instant,
+    ) -> Result<TravelTimeMatrix, RoutingError> {
+        if Instant::now() >= deadline {
+            return Err(RoutingError::Provider(
+                "routing deadline reached before matrix query started".to_owned(),
+            ));
+        }
+        self.travel_time_matrix(locations, context)
+    }
+
     fn provider_selection(
         &self,
         _context: &RoutingContext,
@@ -37,6 +53,15 @@ where
         context: &RoutingContext,
     ) -> Result<TravelTimeMatrix, RoutingError> {
         (**self).travel_time_matrix(locations, context)
+    }
+
+    fn travel_time_matrix_until(
+        &self,
+        locations: &[Location],
+        context: &RoutingContext,
+        deadline: Instant,
+    ) -> Result<TravelTimeMatrix, RoutingError> {
+        (**self).travel_time_matrix_until(locations, context, deadline)
     }
 
     fn provider_selection(

@@ -78,6 +78,22 @@ impl<P: TravelTimeProvider + Sync> RoutingProvider for PairwiseMatrixRoutingProv
         locations: &[Location],
         context: &RoutingContext,
     ) -> Result<TravelTimeMatrix, RoutingError> {
+        let deadline = Instant::now()
+            .checked_add(self.total_timeout)
+            .ok_or_else(|| {
+                RoutingError::Provider(
+                    "matrix total timeout exceeds the supported range".to_owned(),
+                )
+            })?;
+        self.travel_time_matrix_until(locations, context, deadline)
+    }
+
+    fn travel_time_matrix_until(
+        &self,
+        locations: &[Location],
+        context: &RoutingContext,
+        caller_deadline: Instant,
+    ) -> Result<TravelTimeMatrix, RoutingError> {
         let pairs = (0..locations.len())
             .flat_map(|from_index| {
                 (0..locations.len())
@@ -91,9 +107,10 @@ impl<P: TravelTimeProvider + Sync> RoutingProvider for PairwiseMatrixRoutingProv
         }
 
         let started = Instant::now();
-        let deadline = started.checked_add(self.total_timeout).ok_or_else(|| {
+        let own_deadline = started.checked_add(self.total_timeout).ok_or_else(|| {
             RoutingError::Provider("matrix total timeout exceeds the supported range".to_owned())
         })?;
+        let deadline = caller_deadline.min(own_deadline);
         let next_pair = AtomicUsize::new(0);
         let completed_pairs = AtomicUsize::new(0);
         let matrix_timed_out = AtomicBool::new(false);

@@ -204,10 +204,67 @@ export interface StoredJobSummary {
   updated_at: number;
 }
 
+export type FailureSuggestionType =
+  | "REDUCE_STAY_TIME"
+  | "MOVE_LOCATION_EARLIER"
+  | "MOVE_LOCATION_LATER"
+  | "START_EARLIER"
+  | "START_LATER"
+  | "CHANGE_START_POLICY"
+  | "CHANGE_START_LOCATION"
+  | "CHANGE_END_LOCATION"
+  | "REMOVE_LOCATION"
+  | "CHANGE_TRAVEL_MODE"
+  | "SPLIT_DAY"
+  | "RETRY_ROUTING";
+
+export interface FailureSuggestion {
+  type: FailureSuggestionType;
+  reason: string;
+  confidence: "exact" | "heuristic";
+  location_id?: string;
+  from_location_id?: string;
+  to_location_id?: string;
+  current_value?: unknown;
+  suggested_value?: unknown;
+  current_minutes?: number;
+  suggested_max_minutes?: number;
+  required_shift_minutes?: number;
+  suggested_latest_start?: string;
+}
+
+export interface FailureDetail {
+  type:
+    | "INVALID_REQUEST"
+    | "ROUTING_UNAVAILABLE"
+    | "ROUTING_PAIR_FAILED"
+    | "PROVIDER_RESOLUTION"
+    | "PROVIDER_NOT_CONFIGURED"
+    | "UNSUPPORTED_PROVIDER_CAPABILITY"
+    | "NO_FEASIBLE_ROUTE"
+    | "START_POLICY_INFEASIBLE"
+    | "TIME_WINDOW_VIOLATION"
+    | "OUTSIDE_SINGLE_DAY"
+    | "CANCELLED"
+    | "INTERNAL";
+  location_id?: string;
+  arrival_time?: string;
+  service_start_time?: string;
+  required_departure?: string;
+  close_time?: string;
+  stay_minutes?: number;
+  from_location_id?: string;
+  to_location_id?: string;
+  start_policy?: StartPolicy;
+  selected_start_time?: string;
+}
+
 export interface StoredJobError {
   code: string;
   message: string;
   detail: string;
+  failure_detail?: FailureDetail;
+  suggestions?: FailureSuggestion[];
 }
 
 export interface StoredJobRecord extends StoredJobState {

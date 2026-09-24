@@ -1,3 +1,6 @@
+use std::time::Instant;
+
+use rand::{rngs::StdRng, SeedableRng};
 use thiserror::Error;
 
 use crate::{
@@ -8,6 +11,10 @@ use crate::{
         NoopOptimizationEventReporter, OptimizationErrorCode, OptimizationEventReporter,
         ProgressStage,
     },
+    failure::{
+        change_travel_mode_suggestion, rank_failure_suggestions, remove_location_suggestion,
+        service_suggestions, split_day_probe_suggestion, FailureSuggestion, RemediationConfig,
+    },
     matrix::TravelTimeMatrix,
     result_debug::shuffle_solution,
     routing::{
@@ -15,7 +22,10 @@ use crate::{
         RoutingContext, RoutingError, RoutingProvider,
     },
     schedule::{calculate_schedule_from, ScheduleError},
-    solver::{RouteSolver, SolverError, SolverInput},
+    solver::{
+        DefaultObjectivePolicy, ExactBitDpSolver, GreedyInitialRoute, InitialRouteGenerator,
+        ObjectiveEvaluator, RouteSolver, SolverError, SolverInput, EXACT_MAX_LOCATIONS,
+    },
 };
 
 const ROUTING_DEPARTURE_LEAD_MINUTES: i64 = 5;
@@ -25,6 +35,7 @@ const ROUTING_DEPARTURE_LEAD_MINUTES: i64 = 5;
 pub struct RouteOptimizationService<P, S> {
     routing_provider: P,
     solver: S,
+    remediation: RemediationConfig,
 }
 
 impl<P, S> RouteOptimizationService<P, S>
@@ -36,7 +47,13 @@ where
         Self {
             routing_provider,
             solver,
+            remediation: RemediationConfig::default(),
         }
+    }
+
+    pub fn with_remediation_config(mut self, remediation: RemediationConfig) -> Self {
+        self.remediation = remediation;
+        self
     }
 
     pub fn optimize(
@@ -124,6 +141,12 @@ where
             }) {
                 Ok(result) => result,
                 Err(SolverError::Cancelled) => return Err(OptimizationServiceError::Cancelled),
+                Err(SolverError::NoFeasibleRoute) => {
+                    if let Some(schedule_error) = diagnose_input_order_schedule(&problem, &matrix) {
+                        return Err(schedule_error.into());
+                    }
+                    return Err(SolverError::NoFeasibleRoute.into());
+                }
                 Err(error) => return Err(error.into()),
             };
             let solution = solver_result.solution;
@@ -211,6 +234,216 @@ where
 
     pub fn provider_policy_diagnostics(&self) -> Option<RouteProviderPolicyDiagnostics> {
         self.routing_provider.provider_policy_diagnostics()
+    }
+
+    pub fn failure_suggestions(
+        &self,
+        request: &OptimizeRouteRequest,
+        error: &OptimizationServiceError,
+        cancellation: &CancellationToken,
+    ) -> Vec<FailureSuggestion> {
+        let mut suggestions = service_suggestions(error, Some(request));
+        if cancellation.is_cancelled() || self.remediation.budget.is_zero() {
+            return rank_failure_suggestions(suggestions, self.remediation.max_suggestions);
+        }
+        let Some(deadline) = Instant::now().checked_add(self.remediation.budget) else {
+            return rank_failure_suggestions(suggestions, self.remediation.max_suggestions);
+        };
+
+        match error {
+            OptimizationServiceError::Routing(RoutingError::MatrixBuild {
+                failed_from,
+                failed_to,
+                ..
+            }) if request.travel_time_matrix.is_none() => {
+                self.probe_alternative_modes(
+                    request,
+                    Some((failed_from, failed_to)),
+                    deadline,
+                    cancellation,
+                    &mut suggestions,
+                );
+            }
+            OptimizationServiceError::Routing(RoutingError::Provider(_))
+                if request.travel_time_matrix.is_none() =>
+            {
+                self.probe_alternative_modes(
+                    request,
+                    None,
+                    deadline,
+                    cancellation,
+                    &mut suggestions,
+                );
+            }
+            OptimizationServiceError::Solver(SolverError::NoFeasibleRoute) => {
+                self.probe_removed_locations(request, deadline, cancellation, &mut suggestions);
+            }
+            OptimizationServiceError::Schedule(
+                ScheduleError::OutsideSingleDay | ScheduleError::TimeWindowViolation { .. },
+            ) => {
+                self.probe_removed_locations(request, deadline, cancellation, &mut suggestions);
+            }
+            _ => {}
+        }
+        rank_failure_suggestions(suggestions, self.remediation.max_suggestions)
+    }
+
+    fn probe_alternative_modes(
+        &self,
+        request: &OptimizeRouteRequest,
+        failed_pair: Option<(&str, &str)>,
+        deadline: Instant,
+        cancellation: &CancellationToken,
+        suggestions: &mut Vec<FailureSuggestion>,
+    ) {
+        let current = request.travel_mode.unwrap_or_default();
+        for candidate in [
+            crate::routing::TravelMode::Transit,
+            crate::routing::TravelMode::Driving,
+            crate::routing::TravelMode::Walking,
+            crate::routing::TravelMode::Bicycling,
+        ] {
+            if candidate == current || cancellation.is_cancelled() || Instant::now() >= deadline {
+                continue;
+            }
+            let mut probe = request.clone();
+            probe.travel_mode = Some(candidate);
+            if self
+                .build_remediation_matrix_until(&probe, deadline)
+                .is_ok()
+            {
+                push_unique(
+                    suggestions,
+                    change_travel_mode_suggestion(current, candidate, failed_pair),
+                );
+            }
+        }
+    }
+
+    fn probe_removed_locations(
+        &self,
+        request: &OptimizeRouteRequest,
+        deadline: Instant,
+        cancellation: &CancellationToken,
+        suggestions: &mut Vec<FailureSuggestion>,
+    ) {
+        if request.locations.len() <= 2 || self.remediation.max_remove_probes == 0 {
+            return;
+        }
+        let Some(matrix) = self.build_remediation_matrix_until(request, deadline).ok() else {
+            return;
+        };
+        let rows = matrix.into_rows();
+        let mut first_feasible_removal = None;
+        for remove_index in
+            (1..request.locations.len() - 1).take(self.remediation.max_remove_probes)
+        {
+            if cancellation.is_cancelled() || Instant::now() >= deadline {
+                break;
+            }
+            let location_id = request.locations[remove_index].id.clone();
+            let mut probe = request.clone();
+            probe.locations.remove(remove_index);
+            probe.travel_time_matrix = Some(subset_matrix(&rows, remove_index));
+            if lightweight_feasibility_probe(probe, cancellation) {
+                push_unique(suggestions, remove_location_suggestion(&location_id));
+                first_feasible_removal.get_or_insert(location_id);
+            }
+        }
+        if let Some(location_id) = first_feasible_removal {
+            push_unique(suggestions, split_day_probe_suggestion(&location_id));
+        }
+    }
+
+    fn build_remediation_matrix_until(
+        &self,
+        request: &OptimizeRouteRequest,
+        deadline: Instant,
+    ) -> Result<TravelTimeMatrix, OptimizationServiceError> {
+        if let Some(rows) = request.travel_time_matrix.clone() {
+            return TravelTimeMatrix::new(rows)
+                .map_err(RoutingError::InvalidMatrix)
+                .map_err(Into::into);
+        }
+        let problem = OptimizationProblem::try_from(request.clone())?;
+        let mut routing_context = RoutingContext {
+            departure_time: Some(routing_departure_time()),
+            travel_mode: request.travel_mode.unwrap_or_default(),
+            ..RoutingContext::default()
+        };
+        apply_provider_request_context(
+            &mut routing_context,
+            request.country_code.as_deref(),
+            request.route_provider,
+        );
+        self.routing_provider
+            .travel_time_matrix_until(problem.locations(), &routing_context, deadline)
+            .map_err(Into::into)
+    }
+}
+
+fn diagnose_input_order_schedule(
+    problem: &OptimizationProblem,
+    matrix: &TravelTimeMatrix,
+) -> Option<ScheduleError> {
+    let solution = crate::solver::SolverSolution {
+        visit_order: (0..problem.locations().len()).collect(),
+    };
+    calculate_schedule_from(problem, matrix, &solution, problem.start_time())
+        .err()
+        .and_then(|error| {
+            matches!(error, ScheduleError::TimeWindowViolation { .. }).then_some(error)
+        })
+}
+
+fn subset_matrix(rows: &[Vec<u32>], removed: usize) -> Vec<Vec<u32>> {
+    rows.iter()
+        .enumerate()
+        .filter(|(index, _)| *index != removed)
+        .map(|(_, row)| {
+            row.iter()
+                .enumerate()
+                .filter_map(|(index, value)| (index != removed).then_some(*value))
+                .collect()
+        })
+        .collect()
+}
+
+fn lightweight_feasibility_probe(
+    request: OptimizeRouteRequest,
+    cancellation: &CancellationToken,
+) -> bool {
+    let Some(rows) = request.travel_time_matrix.clone() else {
+        return false;
+    };
+    let Ok(matrix) = TravelTimeMatrix::new(rows) else {
+        return false;
+    };
+    let Ok(problem) = OptimizationProblem::try_from(request) else {
+        return false;
+    };
+    let input = SolverInput {
+        matrix: &matrix,
+        problem: &problem,
+        cancellation,
+    };
+    if problem.locations().len() <= EXACT_MAX_LOCATIONS.min(10) {
+        return ExactBitDpSolver::default().solve(input).is_ok();
+    }
+    let Ok(solution) = GreedyInitialRoute.generate(input, &mut StdRng::seed_from_u64(0)) else {
+        return false;
+    };
+    DefaultObjectivePolicy.evaluate(input, &solution).is_ok()
+}
+
+fn push_unique(suggestions: &mut Vec<FailureSuggestion>, candidate: FailureSuggestion) {
+    let duplicate = suggestions.iter().any(|existing| {
+        existing.suggestion_type == candidate.suggestion_type
+            && existing.location_id == candidate.location_id
+            && existing.suggested_value == candidate.suggested_value
+    });
+    if !duplicate {
+        suggestions.push(candidate);
     }
 }
 
@@ -407,6 +640,29 @@ mod tests {
     impl RouteSolver for NoFeasibleSolver {
         fn solve(&self, _input: SolverInput<'_>) -> Result<SolverSolution, SolverError> {
             Err(SolverError::NoFeasibleRoute)
+        }
+    }
+
+    struct AlternativeModeRoutingProvider {
+        modes: Arc<Mutex<Vec<TravelMode>>>,
+    }
+
+    impl RoutingProvider for AlternativeModeRoutingProvider {
+        fn travel_time_matrix(
+            &self,
+            _locations: &[Location],
+            context: &RoutingContext,
+        ) -> Result<TravelTimeMatrix, RoutingError> {
+            self.modes.lock().unwrap().push(context.travel_mode);
+            if context.travel_mode == TravelMode::Walking {
+                TravelTimeMatrix::new(vec![vec![0, 10], vec![10, 0]])
+                    .map_err(RoutingError::InvalidMatrix)
+            } else {
+                Err(RoutingError::Provider(format!(
+                    "{} route unavailable",
+                    context.travel_mode.as_provider_value()
+                )))
+            }
         }
     }
 
@@ -705,6 +961,93 @@ mod tests {
                 RecordedEvent::Error(OptimizationErrorCode::NoFeasibleRoute),
             ]
         );
+    }
+
+    #[test]
+    fn routing_remediation_only_returns_modes_verified_by_a_real_query() {
+        let modes = Arc::new(Mutex::new(Vec::new()));
+        let service = RouteOptimizationService::new(
+            AlternativeModeRoutingProvider {
+                modes: Arc::clone(&modes),
+            },
+            UnusedSolver,
+        );
+        let mut request = valid_request();
+        request.travel_mode = Some(TravelMode::Transit);
+        let error = service.optimize(request.clone()).unwrap_err();
+
+        let suggestions = service.failure_suggestions(&request, &error, &CancellationToken::new());
+        let alternatives = suggestions
+            .iter()
+            .filter(|suggestion| {
+                suggestion.suggestion_type
+                    == crate::failure::FailureSuggestionType::ChangeTravelMode
+            })
+            .collect::<Vec<_>>();
+
+        assert_eq!(alternatives.len(), 1);
+        assert_eq!(
+            alternatives[0].current_value,
+            Some(serde_json::json!("TRANSIT"))
+        );
+        assert_eq!(
+            alternatives[0].suggested_value,
+            Some(serde_json::json!("WALKING"))
+        );
+        assert_eq!(
+            *modes.lock().unwrap(),
+            [
+                TravelMode::Transit,
+                TravelMode::Driving,
+                TravelMode::Walking,
+                TravelMode::Bicycling
+            ]
+        );
+    }
+
+    #[test]
+    fn removal_and_split_suggestions_require_a_successful_bounded_probe() {
+        let service =
+            RouteOptimizationService::new(DevelopmentRoutingProvider, DevelopmentRouteSolver)
+                .with_remediation_config(RemediationConfig {
+                    budget: Duration::from_millis(500),
+                    max_remove_probes: 1,
+                    max_suggestions: 3,
+                });
+        let request: OptimizeRouteRequest = serde_json::from_value(serde_json::json!({
+            "job_id": "remove-probe",
+            "start_policy": "FIXED",
+            "start_time": "09:00",
+            "locations": [
+                {"id":"A","place_id":"a","open_time":"00:00","close_time":"23:50","stay_minutes":0},
+                {"id":"blocked","place_id":"b","open_time":"10:00","close_time":"10:10","stay_minutes":20},
+                {"id":"keep","place_id":"c","open_time":"00:00","close_time":"23:50","stay_minutes":10},
+                {"id":"D","place_id":"d","open_time":"00:00","close_time":"23:50","stay_minutes":0}
+            ],
+            "travel_time_matrix": [
+                [0,10,10,10], [10,0,10,10], [10,10,0,10], [10,10,10,0]
+            ]
+        }))
+        .unwrap();
+
+        let suggestions = service.failure_suggestions(
+            &request,
+            &OptimizationServiceError::Solver(SolverError::NoFeasibleRoute),
+            &CancellationToken::new(),
+        );
+
+        assert!(suggestions.iter().any(|suggestion| {
+            suggestion.suggestion_type == crate::failure::FailureSuggestionType::RemoveLocation
+                && suggestion.location_id.as_deref() == Some("blocked")
+        }));
+        assert!(suggestions.iter().any(|suggestion| {
+            suggestion.suggestion_type == crate::failure::FailureSuggestionType::SplitDay
+                && suggestion.location_id.as_deref() == Some("blocked")
+        }));
+        assert!(!suggestions.iter().any(|suggestion| {
+            suggestion.suggestion_type == crate::failure::FailureSuggestionType::RemoveLocation
+                && suggestion.location_id.as_deref() == Some("keep")
+        }));
     }
 
     fn valid_request() -> OptimizeRouteRequest {

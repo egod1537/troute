@@ -15,6 +15,7 @@ use thiserror::Error;
 use crate::{
     api::{OptimizeRouteRequest, OptimizeRouteResponse},
     events::ProgressStage,
+    failure::{FailureDetail, FailureSuggestion},
     observation::{JobTimelineEntry, JobTimelineStore},
     routing::TravelMode,
 };
@@ -70,6 +71,10 @@ pub struct StoredJobError {
     pub code: String,
     pub message: String,
     pub detail: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub failure_detail: Option<FailureDetail>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub suggestions: Option<Vec<FailureSuggestion>>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
@@ -462,6 +467,8 @@ impl JobStore for FileJobStore {
                     code: "JOB_INTERRUPTED".to_owned(),
                     message: "Job was interrupted by troute restart".to_owned(),
                     detail: "troute restarted before the job reached a terminal state".to_owned(),
+                    failure_detail: None,
+                    suggestions: None,
                 };
                 atomic_write_json(&directory.join("error.json"), &error)?;
                 let timestamp = now_ms();
@@ -809,6 +816,8 @@ mod tests {
                     code: "TEST_ERROR".to_owned(),
                     message: "failed".to_owned(),
                     detail: "detail".to_owned(),
+                    failure_detail: None,
+                    suggestions: None,
                 },
             )
             .unwrap();
@@ -816,6 +825,20 @@ mod tests {
         assert_eq!(job.state.status, JobStatus::Failed);
         assert_eq!(job.error.unwrap().code, "TEST_ERROR");
         assert!(!temporary.0.parent().unwrap().join("job").exists());
+    }
+
+    #[test]
+    fn stored_errors_without_failure_extensions_remain_compatible() {
+        let error: StoredJobError = serde_json::from_value(serde_json::json!({
+            "code": "LEGACY_ERROR",
+            "message": "legacy failure",
+            "detail": "written before suggestions were added"
+        }))
+        .unwrap();
+
+        assert_eq!(error.code, "LEGACY_ERROR");
+        assert!(error.failure_detail.is_none());
+        assert!(error.suggestions.is_none());
     }
 
     #[test]
@@ -891,6 +914,8 @@ mod tests {
                     code: "TEST".to_owned(),
                     message: "failed".to_owned(),
                     detail: "detail".to_owned(),
+                    failure_detail: None,
+                    suggestions: None,
                 },
             )
             .unwrap();

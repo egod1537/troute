@@ -10,6 +10,7 @@ pub mod cancellation;
 pub mod development;
 pub mod domain;
 pub mod events;
+pub mod failure;
 pub mod http;
 mod job_pacing;
 pub mod jobs;
@@ -31,6 +32,10 @@ pub use api::{
 };
 pub use cancellation::CancellationToken;
 pub use events::{OptimizationErrorCode, OptimizationEventReporter, ProgressStage};
+pub use failure::{
+    rank_failure_suggestions, FailureDetail, FailureSuggestion, FailureSuggestionType,
+    RemediationConfig, SuggestionConfidence,
+};
 pub use jobs::{JobExecutor, JobRunner};
 pub use observation::{
     InMemoryJobTimelineStore, JobObservationRecorder, JobTimelineEntry, JobTimelineStore,

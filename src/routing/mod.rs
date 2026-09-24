@@ -289,6 +289,30 @@ mod tests {
     }
 
     #[test]
+    fn caller_deadline_shortens_the_pairwise_matrix_timeout() {
+        let provider = PairwiseMatrixRoutingProvider::with_limits(
+            DeadlinePairs {
+                started: AtomicUsize::new(0),
+                cancelled: AtomicUsize::new(0),
+            },
+            NonZeroUsize::new(2).unwrap(),
+            Duration::from_secs(5),
+        );
+        let started = Instant::now();
+
+        let error = provider
+            .travel_time_matrix_until(
+                &locations(),
+                &RoutingContext::default(),
+                Instant::now() + Duration::from_millis(20),
+            )
+            .unwrap_err();
+
+        assert!(started.elapsed() < Duration::from_secs(1));
+        assert!(error.to_string().contains("matrix_timeout=true"));
+    }
+
+    #[test]
     fn static_provider_validates_location_count() {
         let provider = StaticMatrixRoutingProvider::new(
             TravelTimeMatrix::new(vec![vec![0, 1], vec![2, 0]]).unwrap(),

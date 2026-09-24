@@ -9,6 +9,10 @@ use crate::{
     cancellation::CancellationToken,
     domain::OptimizationProblem,
     events::NoopOptimizationEventReporter,
+    failure::{
+        rank_failure_suggestions, service_failure_detail, service_suggestions, FailureDetail,
+        FailureSuggestion, DEFAULT_MAX_FAILURE_SUGGESTIONS,
+    },
     jobs::{JobEventData, JobEventKind, JobExecutor, JobRunner},
     observation::{
         allowlisted_headers, JobObservationRecorder, JobTimelineEntry, ObservationDirection,
@@ -96,6 +100,10 @@ struct ErrorBody {
     message: &'static str,
     #[serde(skip_serializing_if = "Option::is_none")]
     detail: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    failure_detail: Option<FailureDetail>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    suggestions: Option<Vec<FailureSuggestion>>,
 }
 
 #[derive(Debug)]
@@ -105,6 +113,8 @@ struct ApiError {
     message: &'static str,
     reason: String,
     detail: Option<String>,
+    failure_detail: Option<Box<FailureDetail>>,
+    suggestions: Vec<FailureSuggestion>,
 }
 
 impl ApiError {
@@ -120,6 +130,8 @@ impl ApiError {
             message,
             reason: reason.into(),
             detail: None,
+            failure_detail: None,
+            suggestions: Vec::new(),
         }
     }
 
@@ -155,7 +167,19 @@ impl ApiError {
     }
 
     fn from_service(error: OptimizationServiceError) -> Self {
-        match error {
+        Self::from_service_with_request(error, None)
+    }
+
+    fn from_service_with_request(
+        error: OptimizationServiceError,
+        request: Option<&OptimizeRouteRequest>,
+    ) -> Self {
+        let failure_detail = service_failure_detail(&error, request);
+        let suggestions = rank_failure_suggestions(
+            service_suggestions(&error, request),
+            DEFAULT_MAX_FAILURE_SUGGESTIONS,
+        );
+        let mut api_error = match error {
             OptimizationServiceError::Cancelled => Self::new(
                 StatusCode::CONFLICT,
                 "JOB_CANCELLED",
@@ -201,8 +225,8 @@ impl ApiError {
                 ),
                 source @ RoutingError::MatrixBuild { .. } => Self::new(
                     StatusCode::SERVICE_UNAVAILABLE,
-                    "ROUTING_UNAVAILABLE",
-                    "Travel-time routing is temporarily unavailable.",
+                    "ROUTING_PAIR_FAILED",
+                    "A route could not be found for one location pair.",
                     source.to_string(),
                 ),
                 other => Self::new(
@@ -212,21 +236,45 @@ impl ApiError {
                     other.to_string(),
                 ),
             },
-            OptimizationServiceError::Solver(SolverError::NoFeasibleRoute) => Self::new(
-                StatusCode::UNPROCESSABLE_ENTITY,
-                "NO_FEASIBLE_ROUTE",
-                "No feasible route was found.",
-                "solver found no feasible route",
-            ),
+            OptimizationServiceError::Solver(SolverError::NoFeasibleRoute) => {
+                if matches!(&failure_detail, FailureDetail::StartPolicyInfeasible { .. }) {
+                    Self::new(
+                        StatusCode::UNPROCESSABLE_ENTITY,
+                        "START_POLICY_INFEASIBLE",
+                        "The selected start policy cannot produce a feasible route.",
+                        "the route requires an earlier start",
+                    )
+                } else {
+                    Self::new(
+                        StatusCode::UNPROCESSABLE_ENTITY,
+                        "NO_FEASIBLE_ROUTE",
+                        "No feasible route was found.",
+                        "solver found no feasible route",
+                    )
+                }
+            }
             OptimizationServiceError::Schedule(
                 source @ (ScheduleError::OutsideSingleDay
                 | ScheduleError::TimeWindowViolation { .. }),
-            ) => Self::new(
-                StatusCode::UNPROCESSABLE_ENTITY,
-                "NO_FEASIBLE_ROUTE",
-                "No feasible route was found.",
-                source.to_string(),
-            ),
+            ) => {
+                let (code, message) = match &failure_detail {
+                    FailureDetail::StartPolicyInfeasible { .. } => (
+                        "START_POLICY_INFEASIBLE",
+                        "The selected start policy cannot produce a feasible route.",
+                    ),
+                    FailureDetail::TimeWindowViolation { .. } => (
+                        "TIME_WINDOW_VIOLATION",
+                        "A location cannot be visited within its opening window.",
+                    ),
+                    _ => ("NO_FEASIBLE_ROUTE", "No feasible route was found."),
+                };
+                Self::new(
+                    StatusCode::UNPROCESSABLE_ENTITY,
+                    code,
+                    message,
+                    source.to_string(),
+                )
+            }
             OptimizationServiceError::Solver(source) => Self::new(
                 StatusCode::INTERNAL_SERVER_ERROR,
                 "INTERNAL_ERROR",
@@ -239,7 +287,11 @@ impl ApiError {
                 "Route scheduling failed unexpectedly.",
                 source.to_string(),
             ),
-        }
+        };
+        api_error.detail = Some(api_error.reason.clone());
+        api_error.failure_detail = Some(Box::new(failure_detail));
+        api_error.suggestions = suggestions;
+        api_error
     }
 
     fn from_storage(error: JobStoreError) -> Self {
@@ -258,6 +310,16 @@ impl ApiError {
             ),
         }
     }
+
+    fn body(&self) -> ErrorBody {
+        ErrorBody {
+            code: self.code,
+            message: self.message,
+            detail: self.detail.clone(),
+            failure_detail: self.failure_detail.as_deref().cloned(),
+            suggestions: (!self.suggestions.is_empty()).then(|| self.suggestions.clone()),
+        }
+    }
 }
 
 impl IntoResponse for ApiError {
@@ -268,17 +330,7 @@ impl IntoResponse for ApiError {
             self.status.as_u16(),
             self.reason
         );
-        (
-            self.status,
-            Json(ErrorEnvelope {
-                error: ErrorBody {
-                    code: self.code,
-                    message: self.message,
-                    detail: self.detail,
-                },
-            }),
-        )
-            .into_response()
+        (self.status, Json(ErrorEnvelope { error: self.body() })).into_response()
     }
 }
 
@@ -456,7 +508,7 @@ async fn optimize(
         .as_ref()
         .map(|observation| observation.next_pair_id("opt"));
 
-    let result = if let Some(runner) = &state.runner {
+    let (result, persisted_error, analyzed_suggestions) = if let Some(runner) = &state.runner {
         let submission = runner
             .submit_with_completion(request.clone())
             .map_err(ApiError::from_storage)?;
@@ -498,7 +550,8 @@ async fn optimize(
                     format!("completed job disappeared: {job_id}"),
                 )
             })?;
-        legacy_result_from_job(job)
+        let persisted_error = job.error.clone();
+        (legacy_result_from_job(job), persisted_error, None)
     } else {
         record_optimize_request(
             state.observation.as_ref(),
@@ -509,8 +562,20 @@ async fn optimize(
         );
         let executor = state.executor.clone();
         let cancellation = CancellationToken::new();
-        tokio::task::spawn_blocking(move || {
-            executor.execute(request, &NoopOptimizationEventReporter, &cancellation)
+        let execution_request = request.clone();
+        let analysis_request = request.clone();
+        let result = tokio::task::spawn_blocking(move || {
+            let result = executor.execute(
+                execution_request,
+                &NoopOptimizationEventReporter,
+                &cancellation,
+            );
+            let suggestions = result
+                .as_ref()
+                .err()
+                .map(|error| executor.failure_suggestions(&analysis_request, error, &cancellation))
+                .unwrap_or_default();
+            (result, suggestions)
         })
         .await
         .map_err(|error| {
@@ -520,7 +585,9 @@ async fn optimize(
                 "Route optimization failed unexpectedly.",
                 error.to_string(),
             )
-        })?
+        })?;
+        let (result, suggestions) = result;
+        (result, None, Some(suggestions))
     };
 
     match result {
@@ -536,20 +603,46 @@ async fn optimize(
             Ok(Json(response))
         }
         Err(error) => {
-            let error = ApiError::from_service(error);
-            let body = json!({
-                "error": {
-                    "code": error.code,
-                    "message": error.message,
+            let mut error = ApiError::from_service_with_request(error, Some(&request));
+            if let Some(suggestions) = analyzed_suggestions {
+                error.suggestions = suggestions;
+            }
+            if let Some(persisted) = persisted_error {
+                match persisted.code.as_str() {
+                    "TIME_WINDOW_VIOLATION" => {
+                        error.code = "TIME_WINDOW_VIOLATION";
+                        error.message = "A location cannot be visited within its opening window.";
+                    }
+                    "START_POLICY_INFEASIBLE" => {
+                        error.code = "START_POLICY_INFEASIBLE";
+                        error.message =
+                            "The selected start policy cannot produce a feasible route.";
+                    }
+                    "ROUTING_PAIR_FAILED" => {
+                        error.code = "ROUTING_PAIR_FAILED";
+                        error.message = "A route could not be found for one location pair.";
+                    }
+                    _ => {}
                 }
-            });
+                error.detail = Some(persisted.detail);
+                if let Some(failure_detail) = persisted.failure_detail {
+                    error.failure_detail = Some(Box::new(failure_detail));
+                }
+                if let Some(suggestions) = persisted.suggestions {
+                    error.suggestions = suggestions;
+                }
+            }
+            let body = serde_json::to_value(ErrorEnvelope {
+                error: error.body(),
+            })
+            .ok();
             record_optimize_response(
                 state.observation.as_ref(),
                 &job_id,
                 pair_id.as_deref(),
                 started,
                 error.status,
-                Some(body),
+                body,
             );
             Err(error)
         }
@@ -651,12 +744,12 @@ fn legacy_result_from_job(
                 ))
             })?;
             match error.code.as_str() {
-                "NO_FEASIBLE_ROUTE" => Err(OptimizationServiceError::Solver(
-                    SolverError::NoFeasibleRoute,
-                )),
-                "ROUTING_UNAVAILABLE" => Err(OptimizationServiceError::Routing(
-                    RoutingError::Provider(error.detail),
-                )),
+                "NO_FEASIBLE_ROUTE" | "START_POLICY_INFEASIBLE" | "TIME_WINDOW_VIOLATION" => Err(
+                    OptimizationServiceError::Solver(SolverError::NoFeasibleRoute),
+                ),
+                "ROUTING_UNAVAILABLE" | "ROUTING_PAIR_FAILED" => Err(
+                    OptimizationServiceError::Routing(RoutingError::Provider(error.detail)),
+                ),
                 "ROUTE_PROVIDER_RESOLUTION_ERROR" => Err(OptimizationServiceError::Routing(
                     RoutingError::ProviderResolution(error.detail),
                 )),
@@ -1209,6 +1302,11 @@ mod tests {
             json["error"]["message"],
             "Travel-time routing is temporarily unavailable."
         );
+        assert_eq!(
+            json["error"]["failure_detail"]["type"],
+            "ROUTING_UNAVAILABLE"
+        );
+        assert_eq!(json["error"]["suggestions"][0]["type"], "RETRY_ROUTING");
     }
 
     #[tokio::test]
@@ -1231,6 +1329,19 @@ mod tests {
                 .unwrap();
         assert_eq!(json["error"]["code"], "NO_FEASIBLE_ROUTE");
         assert_eq!(json["error"]["message"], "No feasible route was found.");
+        assert_eq!(json["error"]["failure_detail"]["type"], "NO_FEASIBLE_ROUTE");
+        assert_eq!(json["error"]["suggestions"][0]["type"], "START_EARLIER");
+        assert_eq!(json["error"]["suggestions"][1]["type"], "REDUCE_STAY_TIME");
+        assert_eq!(json["error"]["suggestions"][1]["location_id"], "place-2");
+        assert_eq!(json["error"]["suggestions"][1]["current_minutes"], 600);
+        assert_eq!(
+            json["error"]["suggestions"][1]["suggested_max_minutes"],
+            540
+        );
+        assert_eq!(
+            json["error"]["suggestions"][2]["type"],
+            "CHANGE_START_POLICY"
+        );
     }
 
     fn valid_request() -> &'static str {
@@ -1249,7 +1360,7 @@ mod tests {
                     "place_id":"GOOGLE_PLACE_ID_2",
                     "open_time":"09:00",
                     "close_time":"18:00",
-                    "stay_minutes":0
+                    "stay_minutes":600
                 }
             ],
             "start_time":"09:00"

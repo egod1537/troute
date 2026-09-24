@@ -2,6 +2,7 @@ import type {
   ApiResponse,
   RouteInput,
   RouteResponse,
+  StoredJobError,
   StoredJobEvent,
   StoredJobRecord,
 } from "./api";
@@ -42,6 +43,8 @@ export interface TestbedJob {
   stage?: string;
   message?: string;
   error?: string;
+  /** Structured failure contract for rendering actionable UI controls. */
+  failure?: StoredJobError;
   request: RouteInput;
   timeline: TimelineEntry[];
   response?: ApiResponse;
@@ -75,6 +78,7 @@ export function mergeStoredJob(
     stage: record.stage ?? undefined,
     message: record.last_message ?? undefined,
     error,
+    failure: record.error ?? existing?.failure,
     request: record.request,
     timeline: existing?.timeline ?? [],
     response: existing?.response,

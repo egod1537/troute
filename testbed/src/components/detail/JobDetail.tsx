@@ -14,6 +14,7 @@ import {
 } from "@blueprintjs/core";
 import type { TestbedJob } from "../../jobs";
 import { JobSummary } from "./JobSummary";
+import { OptimizationFailurePanel } from "./OptimizationFailurePanel";
 import { SolverBenchmarkDialog } from "./SolverBenchmarkDialog";
 
 function statusIntent(status: number) {
@@ -104,11 +105,11 @@ export function JobDetail({
       <div className="job-detail-content">
         <JobSummary job={job} />
 
-        {job.error && (
-          <Callout compact intent={Intent.DANGER} role="alert" title="요청 실패">
-            {job.error}
-          </Callout>
-        )}
+        <OptimizationFailurePanel
+          failure={job.failure}
+          fallbackError={job.error}
+          request={job.request}
+        />
 
         {cancelError && (
           <Callout compact intent={Intent.WARNING} role="alert" title="Job 종료 실패">

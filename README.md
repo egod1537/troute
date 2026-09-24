@@ -159,6 +159,9 @@ required, and missing or invalid configuration fails application startup.
 | `SOLVER_DEADLINE_SAFETY_MS` | `50` | time reserved for schedule calculation and response assembly |
 | `SOLVER_STRATEGY_TIMEOUT_MS` | `30000` | per-strategy safety cap, bounded by the global deadline |
 | `SOLVER_SA_SEEDS` | `42` | deterministic SA base seed list, cycled by restart round before initializer-specific derivation |
+| `TROUTE_REMEDIATION_BUDGET_MS` | `500` | separate post-failure budget for validated alternative-mode and removal probes |
+| `TROUTE_REMEDIATION_MAX_REMOVE_PROBES` | `8` | maximum intermediate locations tested as removal candidates after one failure |
+| `TROUTE_MAX_FAILURE_SUGGESTIONS` | `3` | maximum ranked, de-duplicated remediation suggestions returned per failure |
 | `MATCHING_STRATEGY` | `auto` | Christofides benchmark/debug override: `auto`, `bitdp`, or `blossom` |
 | `MATCHING_BIT_DP_THRESHOLD` | `20` | auto-policy odd-vertex threshold, from 0 through 20 |
 
@@ -393,11 +396,62 @@ All endpoint failures use a JSON envelope rather than an HTML error page:
 ```json
 {
   "error": {
-    "code": "INVALID_REQUEST",
-    "message": "The optimize request is invalid."
+    "code": "NO_FEASIBLE_ROUTE",
+    "message": "No feasible route was found.",
+    "detail": "no feasible route",
+    "failure_detail": {
+      "type": "TIME_WINDOW_VIOLATION",
+      "location_id": "museum",
+      "arrival_time": "10:00",
+      "service_start_time": "10:00",
+      "required_departure": "11:00",
+      "close_time": "10:30",
+      "stay_minutes": 60
+    },
+    "suggestions": [
+      {
+        "type": "REDUCE_STAY_TIME",
+        "reason": "This is the maximum stay that lets the evaluated route finish service by closing time.",
+        "confidence": "exact",
+        "location_id": "museum",
+        "current_value": 60,
+        "suggested_value": 30,
+        "current_minutes": 60,
+        "suggested_max_minutes": 30
+      }
+    ]
   }
 }
 ```
+
+`failure_detail` describes the computed failure while the optional
+`suggestions` array contains independently actionable changes. Suggestion
+`type` is a stable enum suitable for UI action mapping; `confidence` is
+`exact` when the value follows from a necessary constraint and `heuristic`
+otherwise. Suggestions are omitted when the server has no calculation-backed
+recommendation.
+
+After an optimization failure, troute may spend up to
+`TROUTE_REMEDIATION_BUDGET_MS` on validation probes. A
+`CHANGE_TRAVEL_MODE` suggestion is emitted only when a real routing matrix
+query succeeds for that mode. `REMOVE_LOCATION` is emitted only when the
+reduced problem is feasible; small probes use exact bit-DP and larger probes
+use a deterministic greedy feasibility check. Probe count is capped by
+`TROUTE_REMEDIATION_MAX_REMOVE_PROBES`. `SPLIT_DAY` can be derived from a
+successful removal probe by moving the identified location to another day.
+
+Stable suggestion types are `REDUCE_STAY_TIME`, `MOVE_LOCATION_EARLIER`,
+`MOVE_LOCATION_LATER`, `START_EARLIER`, `START_LATER`,
+`CHANGE_START_POLICY`, `CHANGE_START_LOCATION`, `CHANGE_END_LOCATION`,
+`REMOVE_LOCATION`, `CHANGE_TRAVEL_MODE`, `SPLIT_DAY`, and `RETRY_ROUTING`.
+
+Suggestions are ranked deterministically before serialization. The default
+order favors start-time changes, stay reduction, location reordering, policy
+or travel-mode changes, endpoint changes, removal, and finally splitting the
+day. Within the same action class, verified/exact candidates and smaller
+minute changes rank first; routing work and unverified recovery add penalties.
+Equivalent actions and conflicting earlier/later actions are collapsed before
+the top `TROUTE_MAX_FAILURE_SUGGESTIONS` entries are returned.
 
 Malformed or invalid requests return 400, a non-JSON content type returns 415,
 and an oversized body returns 413. An infeasible route or schedule returns 422

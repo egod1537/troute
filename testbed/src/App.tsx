@@ -11,6 +11,7 @@ import {
   subscribeToStoredJob,
   type RouteInput,
   type RouteProviderPolicyDiagnostics,
+  type StoredJobError,
 } from "./api";
 import { AppHeader, type HealthState } from "./components/AppHeader";
 import { JobDetail } from "./components/detail/JobDetail";
@@ -180,6 +181,10 @@ export function App({ initialThemeMode }: AppProps) {
         route: result.route,
       });
     } catch (error) {
+      const response = error instanceof ApiError ? error.response : undefined;
+      const failure = response?.body && typeof response.body === "object"
+        ? (response.body as { error?: StoredJobError }).error
+        : undefined;
       updateActiveJob(request.job_id, {
         status: "failed",
         updatedAt: Date.now(),
@@ -187,7 +192,8 @@ export function App({ initialThemeMode }: AppProps) {
         stage: "failed",
         message: "최적화 요청 실패.",
         error: (error as Error).message,
-        response: error instanceof ApiError ? error.response : undefined,
+        failure,
+        response,
       });
     } finally {
       void getStoredTimeline(request.job_id)
@@ -207,6 +213,7 @@ export function App({ initialThemeMode }: AppProps) {
         completedAt: Date.now(),
         message: "요청에 의해 Job이 종료되었습니다.",
         error: undefined,
+        failure: undefined,
       });
       const timeline = await getStoredTimeline(jobId).catch(() => undefined);
       if (timeline) updateJob(jobId, { timeline });

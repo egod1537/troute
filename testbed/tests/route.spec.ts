@@ -744,6 +744,117 @@ test("request failure transitions the selected job to failed", async ({ page }) 
   );
 });
 
+test("structured optimization failures show a localized cause and at most three recommendations", async ({
+  page,
+}) => {
+  await page.route("**/api/fixture-route", (route) =>
+    route.fulfill({
+      status: 422,
+      json: {
+        error: {
+          code: "NO_FEASIBLE_ROUTE",
+          message: "No feasible route was found.",
+          detail: "time window exceeded",
+          failure_detail: {
+            type: "TIME_WINDOW_VIOLATION",
+            location_id: "B",
+            arrival_time: "17:40",
+            service_start_time: "17:40",
+            required_departure: "18:40",
+            close_time: "18:00",
+            stay_minutes: 60,
+          },
+          suggestions: [
+            {
+              type: "REDUCE_STAY_TIME",
+              confidence: "exact",
+              location_id: "B",
+              current_minutes: 60,
+              suggested_max_minutes: 20,
+              reason: "Reduce the stay duration.",
+            },
+            {
+              type: "MOVE_LOCATION_EARLIER",
+              confidence: "exact",
+              location_id: "B",
+              required_shift_minutes: 40,
+              reason: "Move this visit earlier.",
+            },
+            {
+              type: "START_EARLIER",
+              confidence: "exact",
+              current_value: "14:00",
+              suggested_value: "13:20",
+              required_shift_minutes: 40,
+              reason: "Start earlier.",
+            },
+            {
+              type: "SPLIT_DAY",
+              confidence: "heuristic",
+              reason: "Split the itinerary across days.",
+            },
+          ],
+        },
+      },
+    }),
+  );
+  await page.goto("/");
+
+  const { dialog, editor } = await openJobDialog(page, "route-suggestions");
+  const input = JSON.parse(await editor.inputValue());
+  input.locations[1].name = "경복궁";
+  await editor.fill(JSON.stringify(input));
+  await dialog.getByRole("button", { name: "Job 생성" }).click();
+
+  const panel = page.locator(".optimization-failure");
+  await expect(panel).toBeVisible();
+  await expect(panel).toContainText("최적화할 수 없습니다");
+  await expect(panel).toContainText(
+    "영업 종료 시각 18:00 전까지 경복궁 방문을 마칠 수 없습니다.",
+  );
+  await expect(panel.locator(".failure-suggestion-card")).toHaveCount(3);
+  await expect(panel.getByText("체류시간 줄이기", { exact: true })).toBeVisible();
+  await expect(panel.getByText("방문 순서 앞당기기", { exact: true })).toBeVisible();
+  await expect(panel.getByText("더 일찍 출발", { exact: true })).toBeVisible();
+  await expect(panel).toContainText("60분");
+  await expect(panel).toContainText("20분");
+  await expect(panel).toContainText("13:20");
+  await expect(panel).not.toContainText("exact");
+  await expect(panel.getByText("일정 나누기", { exact: true })).toHaveCount(0);
+});
+
+test("unknown failure suggestions show only their reason", async ({ page }) => {
+  await page.route("**/api/fixture-route", (route) =>
+    route.fulfill({
+      status: 422,
+      json: {
+        error: {
+          code: "NO_FEASIBLE_ROUTE",
+          message: "No feasible route was found.",
+          detail: "future constraint",
+          failure_detail: { type: "NO_FEASIBLE_ROUTE" },
+          suggestions: [
+            {
+              type: "FUTURE_CONTRACT_ACTION",
+              confidence: "heuristic",
+              reason: "새로운 제안의 설명만 표시합니다.",
+            },
+          ],
+        },
+      },
+    }),
+  );
+  await page.goto("/");
+  await createJob(page, "route-unknown-suggestion");
+
+  const card = page.locator(".failure-suggestion-card");
+  await expect(card).toContainText("새로운 제안의 설명만 표시합니다.");
+  await expect(card.getByRole("heading")).toHaveCount(0);
+  await expect(card.getByRole("button")).toHaveCount(0);
+  await expect(card).not.toContainText("FUTURE_CONTRACT_ACTION");
+  await expect(card).not.toContainText("heuristic");
+});
+
 test("malformed successful responses fail without losing inspection data", async ({
   page,
 }) => {

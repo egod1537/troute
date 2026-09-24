@@ -30,6 +30,7 @@ pub fn calculate_schedule_from(
 
     let mut current_time = start_time;
     let mut total_travel_minutes = 0_u32;
+    let mut total_wait_minutes = 0_u32;
     let mut stops = Vec::with_capacity(solution.visit_order.len());
     stops.push(ScheduledStop {
         location_index: problem.start_location_index(),
@@ -63,10 +64,27 @@ pub fn calculate_schedule_from(
         if departure_time > location.time_window().close() {
             return Err(ScheduleError::TimeWindowViolation {
                 location_id: location.id().to_owned(),
+                arrival_time,
+                service_start_time: service_start,
+                required_departure: departure_time,
+                close_time: location.time_window().close(),
+                selected_start_time: start_time,
+                total_wait_minutes_before_violation: total_wait_minutes
+                    .saturating_add(wait_minutes),
+                is_destination: to == problem.end_location_index(),
+                current_stay_minutes: location.stay_minutes(),
+                suggested_max_stay_minutes: u32::from(
+                    location
+                        .time_window()
+                        .close()
+                        .minutes()
+                        .saturating_sub(service_start.minutes()),
+                ),
             });
         }
 
         current_time = departure_time;
+        total_wait_minutes = total_wait_minutes.saturating_add(wait_minutes);
         stops.push(ScheduledStop {
             location_index: to,
             arrival_time,
@@ -137,7 +155,18 @@ pub enum ScheduleError {
     #[error("travel time total overflowed")]
     TravelTimeOverflow,
     #[error("route violates the time window for location {location_id}")]
-    TimeWindowViolation { location_id: String },
+    TimeWindowViolation {
+        location_id: String,
+        arrival_time: crate::domain::TimeOfDay,
+        service_start_time: crate::domain::TimeOfDay,
+        required_departure: crate::domain::TimeOfDay,
+        close_time: crate::domain::TimeOfDay,
+        selected_start_time: crate::domain::TimeOfDay,
+        total_wait_minutes_before_violation: u32,
+        is_destination: bool,
+        current_stay_minutes: u32,
+        suggested_max_stay_minutes: u32,
+    },
 }
 
 #[cfg(test)]
