@@ -105,6 +105,8 @@ pub fn build_optimize_request_from_fixture(
             .collect(),
         start_time,
         travel_mode: None,
+        country_code: None,
+        route_provider: None,
         travel_time_matrix: None,
         debug: None::<DebugOptions>,
     })

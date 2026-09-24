@@ -4,16 +4,19 @@ import {
   ApiError,
   cancelStoredJob,
   checkHealth,
+  getRouteProviderPolicy,
   getStoredJob,
   getStoredTimeline,
   runRoute,
   subscribeToStoredJob,
   type RouteInput,
+  type RouteProviderPolicyDiagnostics,
 } from "./api";
 import { AppHeader, type HealthState } from "./components/AppHeader";
 import { JobDetail } from "./components/detail/JobDetail";
 import { JobSidebar } from "./components/jobs/JobSidebar";
 import { NewJobDialog } from "./components/jobs/NewJobDialog";
+import { ProviderPolicyPanel } from "./components/ProviderPolicyPanel";
 import {
   mergeStoredJob,
   mergeStoredJobEvent,
@@ -31,6 +34,9 @@ export function App({ initialThemeMode }: AppProps) {
     useTheme(initialThemeMode);
   const [health, setHealth] = useState<HealthState>("checking");
   const [healthRefreshing, setHealthRefreshing] = useState(false);
+  const [providerPolicy, setProviderPolicy] =
+    useState<RouteProviderPolicyDiagnostics | null>(null);
+  const [providerPolicyError, setProviderPolicyError] = useState("");
   const [jobs, setJobs] = useState<TestbedJob[]>([]);
   const [selectedJobId, setSelectedJobId] = useState<string | null>(null);
   const [newJobOpen, setNewJobOpen] = useState(false);
@@ -59,6 +65,14 @@ export function App({ initialThemeMode }: AppProps) {
 
   useEffect(() => {
     void refreshHealth();
+    void getRouteProviderPolicy()
+      .then((policy) => {
+        setProviderPolicy(policy);
+        setProviderPolicyError("");
+      })
+      .catch((error: Error) =>
+        setProviderPolicyError(`Provider policy 조회 실패: ${error.message}`),
+      );
   }, []);
 
   useEffect(() => {
@@ -239,6 +253,11 @@ export function App({ initialThemeMode }: AppProps) {
         themeMode={themeMode}
         onRefreshHealth={() => void refreshHealth()}
         onThemeChange={selectMode}
+      />
+
+      <ProviderPolicyPanel
+        diagnostics={providerPolicy}
+        error={providerPolicyError}
       />
 
       <main className="job-workspace">

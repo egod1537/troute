@@ -7,7 +7,10 @@ use crate::domain::{
     DomainError, Location, OptimizationProblem, RoutePlan, RoutingReference, TimeOfDay, TimeWindow,
 };
 use crate::events::{validate_job_id, JobIdError};
-use crate::routing::TravelMode;
+use crate::routing::{
+    normalize_country_code, RouteProviderName, RouteProviderSelection,
+    RouteProviderSelectionSource, TravelMode,
+};
 use crate::solver::{
     SolverCandidate, SolverCandidateMetadata, SolverDiagnostics, TIME_SLOT_MINUTES,
 };
@@ -24,6 +27,19 @@ pub struct OptimizeRouteRequest {
     pub start_time: TimeOfDay,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub travel_mode: Option<TravelMode>,
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        alias = "countryCode"
+    )]
+    pub country_code: Option<String>,
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        alias = "provider",
+        alias = "routeProvider"
+    )]
+    pub route_provider: Option<RouteProviderName>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub travel_time_matrix: Option<Vec<Vec<u32>>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -61,6 +77,16 @@ pub struct OptimizeRouteResponse {
     pub solver_candidates: Option<Vec<SolverCandidateOutput>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub solver_diagnostics: Option<SolverDiagnosticsOutput>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub selected_provider: Option<RouteProviderName>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub provider_selection_reason: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub provider_selection_source: Option<RouteProviderSelectionSource>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub country_code: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mode: Option<TravelMode>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
@@ -234,6 +260,10 @@ impl TryFrom<OptimizeRouteRequest> for OptimizationProblem {
 
     fn try_from(request: OptimizeRouteRequest) -> Result<Self, Self::Error> {
         validate_job_id(&request.job_id).map_err(RequestValidationError::InvalidJobId)?;
+        if let Some(country_code) = request.country_code.as_deref() {
+            normalize_country_code(country_code)
+                .map_err(RequestValidationError::InvalidCountryCode)?;
+        }
         if let Some(actual) = request
             .debug
             .as_ref()
@@ -400,6 +430,26 @@ impl OptimizeRouteResponse {
                 global_best_updates: diagnostics.global_best_updates,
                 termination_reason: diagnostics.termination_reason.clone(),
             }),
+            selected_provider: None,
+            provider_selection_reason: None,
+            provider_selection_source: None,
+            country_code: None,
+            mode: None,
+        }
+    }
+
+    pub(crate) fn set_provider_metadata(
+        &mut self,
+        selection: Option<&RouteProviderSelection>,
+        country_code: Option<String>,
+        mode: TravelMode,
+    ) {
+        if let Some(selection) = selection {
+            self.selected_provider = Some(selection.provider);
+            self.provider_selection_reason = Some(selection.reason.clone());
+            self.provider_selection_source = Some(selection.source);
+            self.country_code = country_code;
+            self.mode = Some(mode);
         }
     }
 }
@@ -543,6 +593,8 @@ impl From<&SolverCandidateMetadata> for SolverCandidateMetadataOutput {
 pub enum RequestValidationError {
     #[error(transparent)]
     InvalidJobId(JobIdError),
+    #[error("invalid country_code: {0}")]
+    InvalidCountryCode(String),
     #[error("debug.min_job_duration_ms must not exceed {maximum} milliseconds (actual {actual})")]
     DebugJobDurationTooLong { maximum: u64, actual: u64 },
     #[error(

@@ -4,7 +4,7 @@ use thiserror::Error;
 
 use crate::{cancellation::CancellationToken, domain::Location, matrix::TravelTimeMatrix};
 
-use super::RoutingContext;
+use super::{RouteProviderPolicyDiagnostics, RouteProviderSelection, RoutingContext};
 
 /// Supplies a complete directed matrix independently of the solver.
 /// Providers with a native matrix API should implement this trait directly.
@@ -14,6 +14,17 @@ pub trait RoutingProvider {
         locations: &[Location],
         context: &RoutingContext,
     ) -> Result<TravelTimeMatrix, RoutingError>;
+
+    fn provider_selection(
+        &self,
+        _context: &RoutingContext,
+    ) -> Result<Option<RouteProviderSelection>, RoutingError> {
+        Ok(None)
+    }
+
+    fn provider_policy_diagnostics(&self) -> Option<RouteProviderPolicyDiagnostics> {
+        None
+    }
 }
 
 impl<T> RoutingProvider for Box<T>
@@ -26,6 +37,17 @@ where
         context: &RoutingContext,
     ) -> Result<TravelTimeMatrix, RoutingError> {
         (**self).travel_time_matrix(locations, context)
+    }
+
+    fn provider_selection(
+        &self,
+        context: &RoutingContext,
+    ) -> Result<Option<RouteProviderSelection>, RoutingError> {
+        (**self).provider_selection(context)
+    }
+
+    fn provider_policy_diagnostics(&self) -> Option<RouteProviderPolicyDiagnostics> {
+        (**self).provider_policy_diagnostics()
     }
 }
 
@@ -82,6 +104,14 @@ pub struct TravelTime {
 pub enum RoutingError {
     #[error("routing provider failed: {0}")]
     Provider(String),
+    #[error("route provider resolution failed: {0}")]
+    ProviderResolution(String),
+    #[error("request-level route provider override is disabled")]
+    ProviderOverrideDisabled,
+    #[error("route provider {provider} is not configured: {reason}")]
+    ProviderNotConfigured { provider: String, reason: String },
+    #[error("route provider {provider} does not support mode {mode}")]
+    UnsupportedProviderCapability { provider: String, mode: String },
     #[error(
         "routing matrix failed: matrix_timeout={matrix_timeout}; elapsed_ms={elapsed_ms}; completed_pairs={completed_pairs}/{total_pairs}; failed_pair={failed_from} -> {failed_to}; cause={source}"
     )]

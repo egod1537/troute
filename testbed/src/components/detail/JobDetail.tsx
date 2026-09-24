@@ -132,6 +132,28 @@ export function JobDetail({
                 <strong>{job.route.total_travel_minutes}분</strong>
               </div>
             </div>
+            {job.route.selected_provider && (
+              <div
+                className="provider-selection-metadata"
+                title={job.route.provider_selection_reason}
+              >
+                <Tag icon="route" intent={Intent.PRIMARY} minimal>
+                  {job.route.selected_provider}
+                </Tag>
+                {job.route.provider_selection_source && (
+                  <Tag minimal>{job.route.provider_selection_source}</Tag>
+                )}
+                {job.route.country_code && (
+                  <Tag minimal>{job.route.country_code}</Tag>
+                )}
+                {job.route.mode && <Tag minimal>{job.route.mode}</Tag>}
+                {job.route.provider_selection_reason && (
+                  <span className={Classes.TEXT_MUTED}>
+                    {job.route.provider_selection_reason}
+                  </span>
+                )}
+              </div>
+            )}
             <div className="table-scroll">
               <table
                 className={`${Classes.HTML_TABLE} ${Classes.HTML_TABLE_BORDERED} ${Classes.HTML_TABLE_STRIPED}`}

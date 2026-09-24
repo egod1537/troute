@@ -23,9 +23,10 @@ use troute::{
         JobObservationRecorder, JobTimelineEntry, JobTimelineStore, ObservationDirection,
         ObservationPeer,
     },
+    routing::{PolicyRoutingProvider, RouteProviderPolicyResolver, RouteProviderRegistry},
     solver::{RouteSolver, SolverError, SolverInput, SolverSolution},
     storage::{FileJobStore, FileJobTimelineStore, JobStatus, JobStore},
-    RouteOptimizationService,
+    ProgressStage, RouteOptimizationService,
 };
 
 #[derive(Clone)]
@@ -156,6 +157,21 @@ fn app() -> Router {
     ))
 }
 
+fn app_with_provider_policy() -> Router {
+    let resolver = RouteProviderPolicyResolver::from_config_sources(
+        "auto",
+        None,
+        None,
+        false,
+        RouteProviderRegistry::default(),
+    )
+    .unwrap();
+    http::router(RouteOptimizationService::new(
+        PolicyRoutingProvider::new(DevelopmentRoutingProvider, resolver),
+        DevelopmentRouteSolver,
+    ))
+}
+
 fn app_with_observation() -> (Router, JobObservationRecorder) {
     let observation = JobObservationRecorder::in_memory();
     let app = http::router_with_observation(
@@ -270,6 +286,23 @@ async fn wait_for_job_status(store: &dyn JobStore, job_id: &str, expected: JobSt
     .unwrap();
 }
 
+async fn wait_for_job_stage(store: &dyn JobStore, job_id: &str, expected: ProgressStage) {
+    tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            if store
+                .get_job(job_id)
+                .unwrap()
+                .is_some_and(|job| job.state.stage == Some(expected))
+            {
+                break;
+            }
+            sleep(Duration::from_millis(1)).await;
+        }
+    })
+    .await
+    .unwrap();
+}
+
 async fn send(method: Method, path: &str, content_type: Option<&str>, body: String) -> Response {
     send_to(app(), method, path, content_type, body).await
 }
@@ -359,6 +392,61 @@ async fn health_remains_available() {
     let response = send(Method::GET, "/health", None, String::new()).await;
     assert_eq!(response.status, StatusCode::OK);
     assert_eq!(response.body, json!({ "status": "ok" }));
+}
+
+#[tokio::test]
+async fn provider_policy_diagnostics_expose_effective_server_policy() {
+    let response = send_request_to(
+        app_with_provider_policy(),
+        Request::builder()
+            .method(Method::GET)
+            .uri("/route/providers/policy")
+            .body(Body::empty())
+            .unwrap(),
+    )
+    .await;
+    assert_eq!(response.status, StatusCode::OK);
+    let body = response.body;
+
+    assert_eq!(body["routeProviderMode"], "auto");
+    assert_eq!(body["overrideEnabled"], false);
+    assert_eq!(
+        body["policy"]["countries"]["JP"]["modes"]["TRANSIT"],
+        "ekispert"
+    );
+    assert_eq!(
+        body["policy"]["countries"]["KR"]["modes"]["DRIVING"],
+        "kakao-mobility"
+    );
+    assert!(body["providers"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|entry| { entry["provider"] == "navitime" && entry["available"] == true }));
+}
+
+#[tokio::test]
+async fn routed_response_contains_provider_selection_metadata() {
+    let mut request = valid_request();
+    request["country_code"] = json!(" jp ");
+    request["travel_mode"] = json!("TRANSIT");
+    let response = send_request_to(
+        app_with_provider_policy(),
+        Request::builder()
+            .method(Method::POST)
+            .uri("/optimize")
+            .header(header::CONTENT_TYPE, "application/json")
+            .body(Body::from(request.to_string()))
+            .unwrap(),
+    )
+    .await;
+    assert_eq!(response.status, StatusCode::OK);
+    let body = response.body;
+
+    assert_eq!(body["selected_provider"], "ekispert");
+    assert_eq!(body["provider_selection_source"], "country-mode");
+    assert_eq!(body["country_code"], "JP");
+    assert_eq!(body["mode"], "TRANSIT");
 }
 
 #[tokio::test]
@@ -485,6 +573,7 @@ async fn async_submit_returns_202_before_solver_and_persists_state_transitions()
     assert_eq!(submitted.body.as_object().unwrap().len(), 3);
 
     wait_for_solver_starts(&solver.started, 1).await;
+    wait_for_job_stage(store.as_ref(), "async-state-flow", ProgressStage::Solving).await;
     let running = send_to(
         app.clone(),
         Method::GET,

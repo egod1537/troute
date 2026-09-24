@@ -1,3 +1,4 @@
+import type { TravelMode } from "./api";
 import seoul5 from "../../tests/fixtures/places/seoul_5_places.json";
 import tokyo10 from "../../tests/fixtures/places/tokyo_10_places.json";
 import tokyo3 from "../../tests/fixtures/places/tokyo_3_places.json";
@@ -16,6 +17,8 @@ export interface JobPreset {
   key: "tokyo-3" | "tokyo-5" | "tokyo-10" | "seoul-5" | "synthetic-8";
   name: string;
   kind: "places" | "synthetic";
+  countryCode?: string;
+  travelMode?: TravelMode;
   locations: JobPresetLocation[];
   travelTimeMatrix?: number[][];
 }
@@ -77,6 +80,8 @@ function placePreset(
     key,
     name: fixture.name.replace(" Places", ""),
     kind: "places",
+    countryCode: key.startsWith("tokyo") ? "JP" : "KR",
+    travelMode: "WALKING",
     travelTimeMatrix: estimatedWalkingMatrix(fixture.locations),
     locations: fixture.locations.map(({ id, name, place_id }, index) => ({
       id,

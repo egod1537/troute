@@ -6,6 +6,13 @@ export const ROUTE_PATH = (
 ).trim();
 
 export type TravelMode = "TRANSIT" | "DRIVING" | "WALKING" | "BICYCLING";
+export type RouteProviderName =
+  | "google"
+  | "kakao-mobility"
+  | "kakao-maps"
+  | "ekispert"
+  | "navitime"
+  | "otp";
 
 export interface RouteInput {
   job_id: string;
@@ -19,6 +26,8 @@ export interface RouteInput {
   }[];
   start_time: string;
   travel_mode?: TravelMode;
+  country_code?: string;
+  route_provider?: RouteProviderName;
   travel_time_matrix?: number[][];
   debug?: {
     min_job_duration_ms?: number;
@@ -33,8 +42,42 @@ export interface RouteResponse {
     departure_time?: string;
   }[];
   total_travel_minutes: number;
+  selected_provider?: RouteProviderName;
+  provider_selection_reason?: string;
+  provider_selection_source?: string;
+  country_code?: string;
+  mode?: TravelMode;
   solver_candidates?: SolverCandidate[];
   solver_diagnostics?: SolverDiagnostics;
+}
+
+export interface RouteProviderPolicyDiagnostics {
+  routeProviderMode: string;
+  overrideEnabled: boolean;
+  policy: {
+    countries: Record<
+      string,
+      {
+        modes?: Partial<Record<TravelMode, RouteProviderName>>;
+        defaultProvider?: RouteProviderName;
+      }
+    >;
+    modeDefaults?: Partial<Record<TravelMode, RouteProviderName>>;
+    defaultProvider?: RouteProviderName;
+  };
+  providers: {
+    provider: RouteProviderName;
+    available: boolean;
+    reason?: string;
+    capabilities: TravelMode[];
+  }[];
+  routes: {
+    country?: string;
+    mode?: TravelMode;
+    provider: RouteProviderName;
+    available: boolean;
+    reason?: string;
+  }[];
 }
 
 export interface SolverDiagnostics {
@@ -227,6 +270,13 @@ const isTravelMode = (value: unknown): value is TravelMode =>
   value === "DRIVING" ||
   value === "WALKING" ||
   value === "BICYCLING";
+const isRouteProviderName = (value: unknown): value is RouteProviderName =>
+  value === "google" ||
+  value === "kakao-mobility" ||
+  value === "kakao-maps" ||
+  value === "ekispert" ||
+  value === "navitime" ||
+  value === "otp";
 
 export function parseInput(text: string): RouteInput {
   let input: unknown;
@@ -261,6 +311,21 @@ export function parseInput(text: string): RouteInput {
   if (input.travel_mode !== undefined && !isTravelMode(input.travel_mode)) {
     throw new Error(
       "travel_mode는 TRANSIT, DRIVING, WALKING, BICYCLING 중 하나여야 합니다.",
+    );
+  }
+  if (
+    input.country_code !== undefined &&
+    (typeof input.country_code !== "string" ||
+      !/^[A-Za-z]{2}$/.test(input.country_code.trim()))
+  ) {
+    throw new Error("country_code는 ISO 3166-1 alpha-2 형식이어야 합니다.");
+  }
+  if (
+    input.route_provider !== undefined &&
+    !isRouteProviderName(input.route_provider)
+  ) {
+    throw new Error(
+      "route_provider는 google, kakao-mobility, kakao-maps, ekispert, navitime, otp 중 하나여야 합니다.",
     );
   }
   const locationCount = input.locations.length;
@@ -445,6 +510,12 @@ export async function checkHealth(): Promise<ApiResponse> {
     );
   }
   return response;
+}
+
+export function getRouteProviderPolicy(
+  signal?: AbortSignal,
+): Promise<RouteProviderPolicyDiagnostics> {
+  return integrationJson("/route/providers/policy", signal);
 }
 
 export async function runRoute(

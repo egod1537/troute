@@ -212,6 +212,7 @@ fn creates_polls_and_decodes_a_pair_route() {
         options: [
             ("languageCode".to_owned(), "ko".to_owned()),
             ("regionCode".to_owned(), "KR".to_owned()),
+            ("routeProvider".to_owned(), "kakao-maps".to_owned()),
             (
                 "unsupported".to_owned(),
                 "secret-internal-option".to_owned(),
@@ -230,6 +231,7 @@ fn creates_polls_and_decodes_a_pair_route() {
     assert!(requests[0].contains(r#""departureTime":"2026-09-23T00:00:00Z""#));
     assert!(requests[0].contains(r#""languageCode":"ko""#));
     assert!(requests[0].contains(r#""regionCode":"KR""#));
+    assert!(requests[0].contains(r#""provider":"kakao-maps""#));
     assert!(!requests[0].contains("unsupported"));
     assert!(!requests[0].contains("secret-internal-option"));
     assert!(requests[4].starts_with("GET /api/route/jobs/route-1/result "));
@@ -325,6 +327,48 @@ fn maps_failed_cancelled_and_unknown_jobs_to_routing_errors() {
     )
     .unwrap_err();
     assert!(error.to_string().contains("unknown status paused"));
+}
+
+#[test]
+fn preserves_tcache_provider_configuration_error_types() {
+    let _guard = TCACHE_TEST_LOCK
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    for (code, expected_capability_error) in [
+        ("PROVIDER_NOT_CONFIGURED", false),
+        ("UNSUPPORTED_PROVIDER_CAPABILITY", true),
+    ] {
+        let server = MockServer::start(vec![
+            spec(202, r#"{"jobId":"route-provider-error"}"#),
+            spec(
+                200,
+                format!(
+                    r#"{{"status":"failed","error":{{"code":"{code}","message":"provider setup failed"}}}}"#
+                ),
+            ),
+        ]);
+        let context = RoutingContext {
+            travel_mode: crate::routing::TravelMode::Transit,
+            options: [("routeProvider".to_owned(), "ekispert".to_owned())]
+                .into_iter()
+                .collect(),
+            ..RoutingContext::default()
+        };
+        let error = travel_time(&provider(&server, Duration::from_secs(1)), &context).unwrap_err();
+        if expected_capability_error {
+            assert!(matches!(
+                error,
+                RoutingError::UnsupportedProviderCapability { ref provider, ref mode }
+                    if provider == "ekispert" && mode == "TRANSIT"
+            ));
+        } else {
+            assert!(matches!(
+                error,
+                RoutingError::ProviderNotConfigured { ref provider, ref reason }
+                    if provider == "ekispert" && reason == "provider setup failed"
+            ));
+        }
+    }
 }
 
 #[test]

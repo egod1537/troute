@@ -44,6 +44,12 @@ pub trait JobExecutor: Send + Sync {
             ),
         ))
     }
+
+    fn provider_policy_diagnostics(
+        &self,
+    ) -> Option<crate::routing::RouteProviderPolicyDiagnostics> {
+        None
+    }
 }
 
 impl<P, S> JobExecutor for RouteOptimizationService<P, S>
@@ -65,6 +71,12 @@ where
         request: OptimizeRouteRequest,
     ) -> Result<crate::matrix::TravelTimeMatrix, OptimizationServiceError> {
         RouteOptimizationService::build_travel_time_matrix(self, request)
+    }
+
+    fn provider_policy_diagnostics(
+        &self,
+    ) -> Option<crate::routing::RouteProviderPolicyDiagnostics> {
+        RouteOptimizationService::provider_policy_diagnostics(self)
     }
 }
 
@@ -495,11 +507,31 @@ fn stored_error(error: &OptimizationServiceError) -> StoredJobError {
             "The optimize request is invalid.",
             source.to_string(),
         ),
-        OptimizationServiceError::Routing(source) => (
-            "ROUTING_UNAVAILABLE",
-            "Travel-time routing is temporarily unavailable.",
-            source.to_string(),
-        ),
+        OptimizationServiceError::Routing(source) => {
+            let (code, message) = match source {
+                crate::routing::RoutingError::ProviderResolution(_) => (
+                    "ROUTE_PROVIDER_RESOLUTION_ERROR",
+                    "No route provider could be selected.",
+                ),
+                crate::routing::RoutingError::ProviderOverrideDisabled => (
+                    "PROVIDER_OVERRIDE_DISABLED",
+                    "Request-level route provider override is disabled.",
+                ),
+                crate::routing::RoutingError::ProviderNotConfigured { .. } => (
+                    "PROVIDER_NOT_CONFIGURED",
+                    "The selected route provider is not configured.",
+                ),
+                crate::routing::RoutingError::UnsupportedProviderCapability { .. } => (
+                    "UNSUPPORTED_PROVIDER_CAPABILITY",
+                    "The selected route provider does not support this travel mode.",
+                ),
+                _ => (
+                    "ROUTING_UNAVAILABLE",
+                    "Travel-time routing is temporarily unavailable.",
+                ),
+            };
+            (code, message, source.to_string())
+        }
         OptimizationServiceError::Solver(SolverError::NoFeasibleRoute) => (
             "NO_FEASIBLE_ROUTE",
             "No feasible route was found.",

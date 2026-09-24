@@ -147,6 +147,10 @@ required, and missing or invalid configuration fails application startup.
 | `TCACHE_REQUEST_TIMEOUT_MS` | `30000` | positive total timeout for each pair query |
 | `TCACHE_PAIR_CONCURRENCY` | `4` | maximum concurrent directed pair Route Jobs; 1–256 |
 | `TCACHE_MATRIX_TOTAL_TIMEOUT_MS` | `120000` | total deadline for one matrix build in milliseconds; 1–86,400,000 |
+| `ROUTE_PROVIDER` | `auto` | `auto` applies policy resolution; a provider name globally forces every routed request |
+| `ROUTE_PROVIDER_POLICY_JSON` | built-in policy | country × mode policy JSON, parsed and validated at startup |
+| `ROUTE_PROVIDER_OVERRIDE_ENABLED` | `false` | permits request-level `route_provider` only while `ROUTE_PROVIDER=auto` |
+| `JAPAN_TRANSIT_PROVIDER` | none | deprecated compatibility fallback used only when JSON does not define JP + TRANSIT |
 | `TROUTE_EXACT_LIMIT` | `15` | maximum location count at which the orchestrator also runs exact bit-DP; 1–15 |
 | `TROUTE_MAX_EXACT_CLUSTER_SIZE` | `10` | requested intermediate locations per exact cluster; 1–15 (internally capped at 13 to reserve entry/exit anchors) |
 | `SOLVER_MAX_CONCURRENCY` | `4` | maximum independently running solver strategies; 1–256 |
@@ -157,6 +161,32 @@ required, and missing or invalid configuration fails application startup.
 | `SOLVER_SA_SEEDS` | `42` | deterministic SA base seed list, cycled by restart round before initializer-specific derivation |
 | `MATCHING_STRATEGY` | `auto` | Christofides benchmark/debug override: `auto`, `bitdp`, or `blossom` |
 | `MATCHING_BIT_DP_THRESHOLD` | `20` | auto-policy odd-vertex threshold, from 0 through 20 |
+
+Provider resolution uses this order: a non-`auto` `ROUTE_PROVIDER` global
+force; otherwise an enabled request `route_provider` override, country + mode,
+country default, mode default, and global default. The built-in policy selects
+Google for JP driving/walking/bicycling, Ekispert for JP transit, Kakao Mobility
+for KR driving, Kakao Maps for the other KR modes, and Google globally. For
+example:
+
+```sh
+ROUTE_PROVIDER_POLICY_JSON='{"countries":{"JP":{"modes":{"TRANSIT":"ekispert"}}},"modeDefaults":{"TRANSIT":"google"},"defaultProvider":"google"}'
+```
+
+Country keys are normalized to uppercase and must be ISO 3166-1 alpha-2 codes.
+Modes and provider names are strict. Invalid JSON, unknown values, unavailable
+providers, and unsupported provider capabilities fail explicitly; selection
+never silently falls back after a policy match. Registered provider names are
+`google`, `kakao-mobility`, `kakao-maps`, `ekispert`, `navitime`, and `otp`.
+`JAPAN_TRANSIT_PROVIDER` is deprecated and only fills a missing JP transit rule;
+an explicit JSON rule takes precedence.
+
+`GET /api/route/providers/policy` returns the effective policy, provider
+capabilities, availability, and flattened country/mode routes without secrets.
+The Route Testbed renders that response directly. Selected provider, selection
+source/reason, normalized country, and mode are returned with routed Job results.
+Only the selected provider is forwarded to tcache; the policy itself is not part
+of downstream cache identity.
 
 The adapter creates `POST /api/route/jobs` with two Place IDs, polls the returned
 Job, reads `result.routes[0].durationSeconds`, and converts seconds to whole
@@ -235,6 +265,11 @@ The optional `travel_mode` field accepts exactly `TRANSIT`, `DRIVING`,
 builds the matrix, the selected value is forwarded to each tcache Route Job.
 When `travel_time_matrix` is supplied directly, routing lookup is bypassed and
 `travel_mode` is retained only as request metadata.
+
+The optional `country_code` is trimmed, uppercased, and validated as ISO
+3166-1 alpha-2. The optional `route_provider` accepts a registered provider name
+and is honored only when request overrides are enabled and global force mode is
+not active. A global force always wins over a request override.
 
 For manual progress, SSE, and cancellation testing, a request may include the
 optional diagnostic setting below:

@@ -23,7 +23,9 @@ impl Default for RoutingContext {
     }
 }
 
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Deserialize, Serialize)]
+#[derive(
+    Debug, Clone, Copy, Default, PartialEq, Eq, PartialOrd, Ord, Hash, Deserialize, Serialize,
+)]
 #[serde(rename_all = "SCREAMING_SNAKE_CASE")]
 pub enum TravelMode {
     #[default]

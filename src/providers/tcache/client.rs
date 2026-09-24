@@ -11,7 +11,10 @@ use serde::de::DeserializeOwned;
 
 use crate::{domain::Location, routing::RoutingError};
 
-use super::{config::TcacheRoutingConfig, travel_time::ErrorEnvelope};
+use super::{
+    config::TcacheRoutingConfig,
+    travel_time::{ErrorEnvelope, TcacheErrorBody},
+};
 
 const MAX_ERROR_BODY_CHARACTERS: usize = 2_048;
 
@@ -90,9 +93,16 @@ fn decode_response<T: DeserializeOwned>(
         ))
     })?;
     if !status.is_success() {
-        let detail = serde_json::from_str::<ErrorEnvelope>(&body)
+        let parsed = serde_json::from_str::<ErrorEnvelope>(&body).ok();
+        if let Some(error) = parsed
+            .as_ref()
+            .and_then(|envelope| provider_configuration_error(&envelope.error, None, None))
+        {
+            return Err(error);
+        }
+        let detail = parsed
             .map(|envelope| format!("{}: {}", envelope.error.code, envelope.error.message))
-            .unwrap_or_else(|_| truncate(&body));
+            .unwrap_or_else(|| truncate(&body));
         return Err(RoutingError::Provider(format!(
             "tcache request to {endpoint}{}{} failed with HTTP {}: {detail}",
             pair_context(from, to),
@@ -107,6 +117,29 @@ fn decode_response<T: DeserializeOwned>(
             job_context(job_id)
         ))
     })
+}
+
+pub(super) fn provider_configuration_error(
+    error: &TcacheErrorBody,
+    provider: Option<&str>,
+    mode: Option<&str>,
+) -> Option<RoutingError> {
+    if error.code.eq_ignore_ascii_case("PROVIDER_NOT_CONFIGURED") {
+        return Some(RoutingError::ProviderNotConfigured {
+            provider: provider.unwrap_or("selected").to_owned(),
+            reason: error.message.clone(),
+        });
+    }
+    if error
+        .code
+        .eq_ignore_ascii_case("UNSUPPORTED_PROVIDER_CAPABILITY")
+    {
+        return Some(RoutingError::UnsupportedProviderCapability {
+            provider: provider.unwrap_or("selected").to_owned(),
+            mode: mode.unwrap_or("selected").to_owned(),
+        });
+    }
+    None
 }
 
 pub(super) fn timeout_error(from: &Location, to: &Location, job_id: Option<&str>) -> RoutingError {

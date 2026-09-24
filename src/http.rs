@@ -14,7 +14,7 @@ use crate::{
         allowlisted_headers, JobObservationRecorder, JobTimelineEntry, ObservationDirection,
         ObservationHeaders, ObservationPeer,
     },
-    routing::{RoutingError, RoutingProvider},
+    routing::{RouteProviderPolicyDiagnostics, RoutingError, RoutingProvider},
     schedule::ScheduleError,
     service::{OptimizationServiceError, RouteOptimizationService},
     solver::{RouteSolver, SolverError},
@@ -174,6 +174,30 @@ impl ApiError {
                     "ROUTING_UNAVAILABLE",
                     "Travel-time routing is temporarily unavailable.",
                     reason,
+                ),
+                RoutingError::ProviderResolution(reason) => Self::new(
+                    StatusCode::SERVICE_UNAVAILABLE,
+                    "ROUTE_PROVIDER_RESOLUTION_ERROR",
+                    "No route provider could be selected.",
+                    reason,
+                ),
+                RoutingError::ProviderOverrideDisabled => Self::new(
+                    StatusCode::BAD_REQUEST,
+                    "PROVIDER_OVERRIDE_DISABLED",
+                    "Request-level route provider override is disabled.",
+                    "ROUTE_PROVIDER_OVERRIDE_ENABLED is false",
+                ),
+                source @ RoutingError::ProviderNotConfigured { .. } => Self::new(
+                    StatusCode::SERVICE_UNAVAILABLE,
+                    "PROVIDER_NOT_CONFIGURED",
+                    "The selected route provider is not configured.",
+                    source.to_string(),
+                ),
+                source @ RoutingError::UnsupportedProviderCapability { .. } => Self::new(
+                    StatusCode::BAD_REQUEST,
+                    "UNSUPPORTED_PROVIDER_CAPABILITY",
+                    "The selected route provider does not support this travel mode.",
+                    source.to_string(),
                 ),
                 source @ RoutingError::MatrixBuild { .. } => Self::new(
                     StatusCode::SERVICE_UNAVAILABLE,
@@ -336,6 +360,7 @@ where
         .map(|store| JobRunner::new(executor.clone(), store.clone(), max_concurrent_jobs));
     Router::new()
         .route("/health", get(health))
+        .route("/route/providers/policy", get(provider_policy))
         .route("/optimize", post(optimize))
         .route("/integration/jobs", get(list_jobs).post(submit_job))
         .route("/integration/matrix", post(build_matrix))
@@ -370,6 +395,23 @@ fn max_concurrent_jobs_from_env() -> Option<usize> {
 
 async fn health() -> Json<HealthResponse> {
     Json(HealthResponse { status: "ok" })
+}
+
+async fn provider_policy(
+    State(state): State<AppState>,
+) -> Result<Json<RouteProviderPolicyDiagnostics>, ApiError> {
+    state
+        .executor
+        .provider_policy_diagnostics()
+        .map(Json)
+        .ok_or_else(|| {
+            ApiError::new(
+                StatusCode::NOT_FOUND,
+                "PROVIDER_POLICY_UNAVAILABLE",
+                "Route provider policy diagnostics are unavailable.",
+                "the configured routing provider has no policy resolver",
+            )
+        })
 }
 
 async fn build_matrix(
@@ -614,6 +656,24 @@ fn legacy_result_from_job(
                 )),
                 "ROUTING_UNAVAILABLE" => Err(OptimizationServiceError::Routing(
                     RoutingError::Provider(error.detail),
+                )),
+                "ROUTE_PROVIDER_RESOLUTION_ERROR" => Err(OptimizationServiceError::Routing(
+                    RoutingError::ProviderResolution(error.detail),
+                )),
+                "PROVIDER_OVERRIDE_DISABLED" => Err(OptimizationServiceError::Routing(
+                    RoutingError::ProviderOverrideDisabled,
+                )),
+                "PROVIDER_NOT_CONFIGURED" => Err(OptimizationServiceError::Routing(
+                    RoutingError::ProviderNotConfigured {
+                        provider: "selected".to_owned(),
+                        reason: error.detail,
+                    },
+                )),
+                "UNSUPPORTED_PROVIDER_CAPABILITY" => Err(OptimizationServiceError::Routing(
+                    RoutingError::UnsupportedProviderCapability {
+                        provider: "selected".to_owned(),
+                        mode: error.detail,
+                    },
                 )),
                 _ => Err(OptimizationServiceError::Solver(SolverError::Failed(
                     error.detail,

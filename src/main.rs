@@ -15,7 +15,8 @@ use troute::{
     observation::JobObservationRecorder,
     providers::tcache::{TcacheRoutingConfig, TcacheTravelTimeProvider},
     routing::{
-        PairwiseMatrixRoutingProvider, DEFAULT_MATRIX_TOTAL_TIMEOUT_MS, DEFAULT_PAIR_CONCURRENCY,
+        PairwiseMatrixRoutingProvider, PolicyRoutingProvider, RouteProviderPolicyResolver,
+        DEFAULT_MATRIX_TOTAL_TIMEOUT_MS, DEFAULT_PAIR_CONCURRENCY,
     },
     solver::{
         MatchingStrategyConfig, SolverOrchestrator, SolverOrchestratorConfig, EXACT_MAX_LOCATIONS,
@@ -55,6 +56,12 @@ async fn run() -> Result<(), Box<dyn Error>> {
         TcacheRoutingConfig::from_env()
             .map_err(|error| format!("invalid tcache configuration: {error}"))?,
     )?;
+    let provider_resolver = RouteProviderPolicyResolver::from_env()
+        .map_err(|error| format!("invalid route provider policy: {error}"))?;
+    let provider_diagnostics = provider_resolver.diagnostics();
+    if env::var("JAPAN_TRANSIT_PROVIDER").is_ok() {
+        eprintln!("warning: JAPAN_TRANSIT_PROVIDER is deprecated; use ROUTE_PROVIDER_POLICY_JSON");
+    }
     let pair_concurrency =
         read_bounded_size("TCACHE_PAIR_CONCURRENCY", DEFAULT_PAIR_CONCURRENCY, 256)?;
     let matrix_total_timeout_ms = read_bounded_size(
@@ -63,12 +70,15 @@ async fn run() -> Result<(), Box<dyn Error>> {
             .expect("default matrix timeout must fit usize"),
         86_400_000,
     )?;
-    let routing_provider = PairwiseMatrixRoutingProvider::with_limits(
-        travel_time_provider,
-        NonZeroUsize::new(pair_concurrency).expect("validated concurrency must be positive"),
-        Duration::from_millis(
-            u64::try_from(matrix_total_timeout_ms).expect("matrix timeout must fit u64"),
+    let routing_provider = PolicyRoutingProvider::new(
+        PairwiseMatrixRoutingProvider::with_limits(
+            travel_time_provider,
+            NonZeroUsize::new(pair_concurrency).expect("validated concurrency must be positive"),
+            Duration::from_millis(
+                u64::try_from(matrix_total_timeout_ms).expect("matrix timeout must fit u64"),
+            ),
         ),
+        provider_resolver,
     );
     let exact_limit = read_bounded_size(
         "TROUTE_EXACT_LIMIT",
@@ -127,6 +137,10 @@ async fn run() -> Result<(), Box<dyn Error>> {
     println!("Solver strategy concurrency: {max_concurrency}");
     println!("tcache pair concurrency: {pair_concurrency}");
     println!("tcache matrix total timeout: {matrix_total_timeout_ms} ms");
+    println!(
+        "Route provider mode: {} (request override enabled: {})",
+        provider_diagnostics.route_provider_mode, provider_diagnostics.override_enabled
+    );
     println!("Per-strategy timeout: {strategy_timeout_ms} ms");
     println!("Solver total budget: {total_budget_ms} ms");
     println!("SA chunk: {sa_chunk_ms} ms");

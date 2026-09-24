@@ -14,6 +14,28 @@ test("health-only shell preserves header controls and job-centric layout", async
     healthCalls += 1;
     await route.fulfill({ json: { status: "ok" } });
   });
+  await page.route("**/api/route/providers/policy", (route) =>
+    route.fulfill({
+      json: {
+        routeProviderMode: "auto",
+        overrideEnabled: false,
+        policy: {
+          countries: { JP: { modes: { TRANSIT: "ekispert" } } },
+          defaultProvider: "google",
+        },
+        providers: [],
+        routes: [
+          {
+            country: "JP",
+            mode: "TRANSIT",
+            provider: "ekispert",
+            available: true,
+          },
+          { provider: "google", available: true },
+        ],
+      },
+    }),
+  );
 
   await page.goto("/");
   const icon = page.locator(".navbar-brand .troute-icon");
@@ -37,6 +59,11 @@ test("health-only shell preserves header controls and job-centric layout", async
   expect(faviconSvg).toContain('stroke="#2D72D2"');
   expect(faviconSvg).not.toContain("currentColor");
   await expect(page.getByText("troute 테스트베드")).toBeVisible();
+  const policy = page.locator(".provider-policy-panel");
+  await expect(policy.getByRole("heading", { name: "Provider Policy" })).toBeVisible();
+  await expect(policy.getByRole("cell", { name: "JP" })).toBeVisible();
+  await expect(policy.getByRole("cell", { name: "TRANSIT" })).toBeVisible();
+  await expect(policy.getByRole("cell", { name: "ekispert" })).toBeVisible();
   await expect(page.getByLabel("API 정상")).toBeVisible();
   await expect(page.getByLabel("commit 알 수 없음")).toContainText(
     "commit 알 수 없음",

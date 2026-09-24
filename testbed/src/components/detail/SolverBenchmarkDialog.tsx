@@ -414,7 +414,7 @@ function SimulatedAnnealingDetail({ item, candidates }: { item: StrategyNavigati
         <h3>Run Timeline</h3>
         <div className="benchmark-table-scroll"><table className={`${Classes.HTML_TABLE} ${Classes.HTML_TABLE_BORDERED} ${Classes.HTML_TABLE_STRIPED}`} aria-label={`${item.label} Run Timeline`}>
           <thead><tr><th>Run</th><th>Initializer</th><th>Seed</th><th>Time</th><th>Initial</th><th>Final</th><th>Best Updated</th></tr></thead>
-          <tbody>{timeline.map((run) => <tr key={run.strategy}><td>{saRunNumber(run.strategy)}</td><td>{run.metadata.initial_strategy ?? "—"}</td><td>{run.metadata.seed?.toLocaleString() ?? "—"}</td><td>{run.elapsed_ms} ms</td><td>{run.metadata.initial_score?.toLocaleString() ?? "—"}</td><td>{run.metadata.final_score?.toLocaleString() ?? "—"}</td><td>{run.metadata.improved_global_best ? "Yes" : "No"}</td></tr>)}</tbody>
+          <tbody>{timeline.map((run) => <tr key={run.strategy}><td>{saRunNumber(run.strategy)}</td><td>{run.metadata.initial_strategy ? run.metadata.initial_strategy.replace(/\b\w/g, (letter) => letter.toUpperCase()) : "—"}</td><td>{run.metadata.seed?.toLocaleString() ?? "—"}</td><td>{run.elapsed_ms} ms</td><td>{run.metadata.initial_score?.toLocaleString() ?? "—"}</td><td>{run.metadata.final_score?.toLocaleString() ?? "—"}</td><td>{run.metadata.improved_global_best ? "Yes" : "No"}</td></tr>)}</tbody>
         </table></div>
       </section>
       <section><h3>Feasibility</h3><Callout intent={bestFeasible ? Intent.SUCCESS : Intent.DANGER} icon={bestFeasible ? "tick-circle" : "error"} title={`Best Feasible Solution: ${bestFeasible ? "Yes" : "No"}`}>{bestFeasible ? "최종 결과는 탐색 중 발견한 best feasible solution입니다." : "탐색에서 feasible solution을 찾지 못했습니다."}</Callout></section>

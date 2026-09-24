@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { Alert, Button, Callout, Classes, Collapse, Dialog, DialogBody, DialogFooter, Intent, Spinner, Tag, TextArea } from "@blueprintjs/core";
-import { fetchTravelTimeMatrix, isTenMinuteDuration, isTenMinuteTime, parseInput, type RouteInput } from "../../api";
+import { fetchTravelTimeMatrix, isTenMinuteDuration, isTenMinuteTime, parseInput, type RouteInput, type RouteProviderName, type TravelMode } from "../../api";
 import { JOB_PRESETS, type JobPreset } from "../../placePresets";
 import { createSample } from "../../sample";
 
@@ -28,6 +28,9 @@ function completeMatrix(matrix: string[][], size: number): number[][] | undefine
 
 export function NewJobDialog({ isOpen, dark, existingJobIds, onClose, onCreate }: NewJobDialogProps) {
   const [jobId, setJobId] = useState("");
+  const [countryCode, setCountryCode] = useState("");
+  const [travelMode, setTravelMode] = useState<TravelMode>("TRANSIT");
+  const [routeProvider, setRouteProvider] = useState<RouteProviderName | "">("");
   const [locations, setLocations] = useState<FormLocation[]>([]);
   const [matrix, setMatrix] = useState<string[][]>([]);
   const [validation, setValidation] = useState<ValidationResult | null>(null);
@@ -61,6 +64,9 @@ export function NewJobDialog({ isOpen, dark, existingJobIds, onClose, onCreate }
   function loadRequest(request: RouteInput) {
     cancelMatrixRequest();
     setJobId(request.job_id);
+    setCountryCode(request.country_code ?? "");
+    setTravelMode(request.travel_mode ?? "TRANSIT");
+    setRouteProvider(request.route_provider ?? "");
     setLocations(request.locations.map(locationFromRequest));
     setMatrix(request.travel_time_matrix ? matrixFromNumbers(request.travel_time_matrix) : blankMatrix(request.locations.length));
     setRawInput(JSON.stringify(request, null, 2));
@@ -80,10 +86,13 @@ export function NewJobDialog({ isOpen, dark, existingJobIds, onClose, onCreate }
       locations: locations.map((location) => ({ id: location.id.trim(), name: location.name.trim() || undefined, place_id: location.placeId.trim(), open_time: location.openTime, close_time: location.closeTime, stay_minutes: Number(location.stayMinutes) })),
       // Midnight is the contract's minimum earliest-start bound. The solver still selects the latest feasible start.
       start_time: "00:00",
+      country_code: countryCode.trim().toUpperCase() || undefined,
+      travel_mode: travelMode,
+      route_provider: routeProvider || undefined,
       travel_time_matrix: suppliedMatrix,
       debug: { min_job_duration_ms: 4_000 },
     };
-  }, [jobId, locations, matrix]);
+  }, [jobId, countryCode, travelMode, routeProvider, locations, matrix]);
   useEffect(() => { if (!rawEditing) setRawInput(JSON.stringify(formRequest, null, 2)); }, [formRequest, rawEditing]);
 
   function clearFeedback() {
@@ -99,6 +108,9 @@ export function NewJobDialog({ isOpen, dark, existingJobIds, onClose, onCreate }
     const suppliedMatrix = validateMatrix ? completeMatrix(matrix, locations.length) : undefined;
     const hasMatrixInput = matrix.some((row, rowIndex) => row.some((value, columnIndex) => rowIndex !== columnIndex && value.trim() !== ""));
     if (!jobId.trim()) errors.jobId = "Job ID를 입력하세요.";
+    if (countryCode.trim() && !/^[A-Za-z]{2}$/.test(countryCode.trim())) errors.countryCode = "국가 코드는 ISO alpha-2 두 글자여야 합니다.";
+    if (!["TRANSIT", "DRIVING", "WALKING", "BICYCLING"].includes(travelMode)) errors.travelMode = "지원되는 이동수단을 입력하세요.";
+    if (routeProvider && !["google", "kakao-mobility", "kakao-maps", "ekispert", "navitime", "otp"].includes(routeProvider)) errors.routeProvider = "등록된 provider 이름을 입력하세요.";
     if (existingJobIds.has(jobId.trim())) errors.jobId = `job_id "${jobId.trim()}"가 이 세션에 이미 존재합니다.`;
     if (locations.length < 2) errors.locations = "장소가 최소 2개 필요합니다.";
     const ids = new Set<string>();
@@ -162,6 +174,9 @@ export function NewJobDialog({ isOpen, dark, existingJobIds, onClose, onCreate }
     }));
     cancelMatrixRequest();
     setPendingPreset(null);
+    setCountryCode(preset.countryCode ?? "");
+    setTravelMode(preset.travelMode ?? "WALKING");
+    setRouteProvider("");
     setLocations(nextLocations);
     setRawEditing(false);
     setFieldErrors({});
@@ -186,6 +201,8 @@ export function NewJobDialog({ isOpen, dark, existingJobIds, onClose, onCreate }
         stay_minutes: Number(location.stayMinutes),
       })),
       start_time: "00:00",
+      country_code: preset.countryCode,
+      travel_mode: preset.travelMode ?? "WALKING",
     };
     const { controller, requestSequence } = beginMatrixRequest();
     try {
@@ -255,6 +272,9 @@ export function NewJobDialog({ isOpen, dark, existingJobIds, onClose, onCreate }
         <h2 id="basic-info-heading">기본 정보</h2>
         <div className="basic-info-grid">
           <label><span>Job ID</span><input className={`bp6-input ${fieldErrors.jobId ? "field-invalid" : ""}`} aria-invalid={Boolean(fieldErrors.jobId)} value={jobId} onChange={(event) => { setJobId(event.target.value); clearFeedback(); }} />{fieldErrors.jobId && <small>{fieldErrors.jobId}</small>}</label>
+          <label><span>Country</span><input className={`bp6-input ${fieldErrors.countryCode ? "field-invalid" : ""}`} aria-invalid={Boolean(fieldErrors.countryCode)} placeholder="JP" maxLength={2} value={countryCode} onChange={(event) => { setCountryCode(event.target.value); clearFeedback(); }} />{fieldErrors.countryCode && <small>{fieldErrors.countryCode}</small>}</label>
+          <label><span>Mode</span><input className={`bp6-input ${fieldErrors.travelMode ? "field-invalid" : ""}`} aria-invalid={Boolean(fieldErrors.travelMode)} placeholder="TRANSIT" value={travelMode} onChange={(event) => { setTravelMode(event.target.value.toUpperCase() as TravelMode); clearFeedback(); }} />{fieldErrors.travelMode && <small>{fieldErrors.travelMode}</small>}</label>
+          <label><span>Provider override</span><input className={`bp6-input ${fieldErrors.routeProvider ? "field-invalid" : ""}`} aria-invalid={Boolean(fieldErrors.routeProvider)} placeholder="Policy (optional)" value={routeProvider} onChange={(event) => { setRouteProvider(event.target.value.toLowerCase() as RouteProviderName | ""); clearFeedback(); }} />{fieldErrors.routeProvider && <small>{fieldErrors.routeProvider}</small>}</label>
           <div className="readonly-fact"><span>시간 단위</span><strong>10분</strong></div>
         </div>
       </section>

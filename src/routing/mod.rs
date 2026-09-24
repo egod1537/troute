@@ -1,10 +1,12 @@
 mod context;
 mod matrix_builder;
+mod provider_policy;
 mod static_matrix;
 mod traits;
 
 pub use context::*;
 pub use matrix_builder::*;
+pub use provider_policy::*;
 pub use static_matrix::*;
 pub use traits::*;
 

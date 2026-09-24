@@ -14,6 +14,8 @@ pub(super) struct RouteRequest<'a> {
     pub(super) mode: &'static str,
     pub(super) departure_time: String,
     #[serde(skip_serializing_if = "Option::is_none")]
+    pub(super) provider: Option<&'a str>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub(super) language_code: Option<&'a str>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(super) region_code: Option<&'a str>,

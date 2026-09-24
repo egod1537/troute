@@ -10,7 +10,10 @@ use crate::{
     },
     matrix::TravelTimeMatrix,
     result_debug::shuffle_solution,
-    routing::{RoutingContext, RoutingError, RoutingProvider},
+    routing::{
+        normalize_country_code, RouteProviderPolicyDiagnostics, RouteProviderSelection,
+        RoutingContext, RoutingError, RoutingProvider,
+    },
     schedule::{calculate_schedule_from, ScheduleError},
     solver::{RouteSolver, SolverError, SolverInput},
 };
@@ -64,7 +67,14 @@ where
             });
             let supplied_matrix = request.travel_time_matrix.clone();
             let travel_mode = request.travel_mode.unwrap_or_default();
+            let requested_country = request.country_code.clone();
+            let requested_provider = request.route_provider;
             let problem = OptimizationProblem::try_from(request)?;
+            let country_code = requested_country
+                .as_deref()
+                .map(normalize_country_code)
+                .transpose()
+                .expect("request validation normalizes country codes");
             reporter.progress(
                 ProgressStage::Accepted,
                 0,
@@ -81,15 +91,23 @@ where
                 }),
             );
             check_cancelled(cancellation)?;
+            let mut provider_selection: Option<RouteProviderSelection> = None;
             let matrix = match supplied_matrix {
                 Some(rows) => TravelTimeMatrix::new(rows)
                     .expect("request validation guarantees a non-empty square matrix"),
                 None => {
-                    let routing_context = RoutingContext {
+                    let mut routing_context = RoutingContext {
                         departure_time: Some(chrono::Utc::now()),
                         travel_mode,
                         ..RoutingContext::default()
                     };
+                    apply_provider_request_context(
+                        &mut routing_context,
+                        country_code.as_deref(),
+                        requested_provider,
+                    );
+                    provider_selection =
+                        self.routing_provider.provider_selection(&routing_context)?;
                     self.routing_provider
                         .travel_time_matrix(problem.locations(), &routing_context)?
                 }
@@ -142,11 +160,12 @@ where
                 None => normal_plan,
             };
             check_cancelled(cancellation)?;
-            let response = OptimizeRouteResponse::from_plan(
+            let mut response = OptimizeRouteResponse::from_plan(
                 plan,
                 &problem,
                 solver_result.diagnostics.as_ref(),
             );
+            response.set_provider_metadata(provider_selection.as_ref(), country_code, travel_mode);
             check_cancelled(cancellation)?;
             reporter.result(&response);
             check_cancelled(cancellation)?;
@@ -170,15 +189,43 @@ where
         request: OptimizeRouteRequest,
     ) -> Result<crate::matrix::TravelTimeMatrix, OptimizationServiceError> {
         let travel_mode = request.travel_mode.unwrap_or_default();
+        let requested_country = request.country_code.clone();
+        let requested_provider = request.route_provider;
         let problem = OptimizationProblem::try_from(request)?;
-        let routing_context = RoutingContext {
+        let mut routing_context = RoutingContext {
             departure_time: Some(chrono::Utc::now()),
             travel_mode,
             ..RoutingContext::default()
         };
+        apply_provider_request_context(
+            &mut routing_context,
+            requested_country.as_deref(),
+            requested_provider,
+        );
         self.routing_provider
             .travel_time_matrix(problem.locations(), &routing_context)
             .map_err(Into::into)
+    }
+
+    pub fn provider_policy_diagnostics(&self) -> Option<RouteProviderPolicyDiagnostics> {
+        self.routing_provider.provider_policy_diagnostics()
+    }
+}
+
+fn apply_provider_request_context(
+    context: &mut RoutingContext,
+    country_code: Option<&str>,
+    provider: Option<crate::routing::RouteProviderName>,
+) {
+    if let Some(country_code) = country_code {
+        context
+            .options
+            .insert("countryCode".to_owned(), country_code.to_owned());
+    }
+    if let Some(provider) = provider {
+        context
+            .options
+            .insert("routeProviderOverride".to_owned(), provider.to_string());
     }
 }
 

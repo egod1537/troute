@@ -9,7 +9,10 @@ use crate::{
 };
 
 use super::{
-    client::{cancelled_error, pair_context, timeout_error, TcacheTravelTimeProvider},
+    client::{
+        cancelled_error, pair_context, provider_configuration_error, timeout_error,
+        TcacheTravelTimeProvider,
+    },
     travel_time::{
         extract_travel_time, CreateJobResponse, JobStatusResponse, RouteLocation, RouteRequest,
         RouteResultEnvelope,
@@ -40,6 +43,7 @@ impl TcacheTravelTimeProvider {
                 .departure_time
                 .unwrap_or_else(Utc::now)
                 .to_rfc3339_opts(SecondsFormat::Secs, true),
+            provider: context.options.get("routeProvider").map(String::as_str),
             language_code: context.options.get("languageCode").map(String::as_str),
             region_code: context.options.get("regionCode").map(String::as_str),
             routing_preference: context.options.get("routingPreference").map(String::as_str),
@@ -99,6 +103,15 @@ impl TcacheTravelTimeProvider {
             match status.status.as_str() {
                 "completed" => break,
                 "failed" | "cancelled" => {
+                    if let Some(error) = status.error.as_ref().and_then(|error| {
+                        provider_configuration_error(
+                            error,
+                            context.options.get("routeProvider").map(String::as_str),
+                            Some(context.travel_mode.as_provider_value()),
+                        )
+                    }) {
+                        return Err(error);
+                    }
                     let detail = status
                         .error
                         .map(|error| format!("{}: {}", error.code, error.message))
