@@ -1,4 +1,4 @@
-use crate::domain::TimeOfDay;
+use crate::domain::{StartPolicy, TimeOfDay};
 
 use super::super::{
     evaluate_solution, DefaultObjectivePolicy, ObjectivePolicy, RouteSolver, SolutionMetrics,
@@ -47,9 +47,18 @@ impl<O: ObjectivePolicy, F: FrontierPolicy> ExactBitDpSolver<O, F> {
             return Err(SolverError::NoFeasibleRoute);
         }
 
+        let mut low = earliest_slot as u16;
+        if matches!(
+            input.problem.start_policy(),
+            StartPolicy::Fixed | StartPolicy::Earliest
+        ) {
+            return self
+                .search_at_start(&input, low)?
+                .ok_or(SolverError::NoFeasibleRoute);
+        }
+
         // Feasibility is monotone: an earlier departure can wait and reproduce
         // any later feasible route. Binary search avoids up to 144 full DPs.
-        let mut low = earliest_slot as u16;
         let mut high = (slots_per_day() - 1) as u16;
         if !self.is_feasible_at_start(&input, low)? {
             return Err(SolverError::NoFeasibleRoute);
@@ -163,8 +172,8 @@ impl<O: ObjectivePolicy, F: FrontierPolicy> ExactBitDpSolver<O, F> {
         let terminal_ids = &frontiers[index(full_mask, end, location_count)];
         let best = terminal_ids.iter().copied().min_by(|&left, &right| {
             self.objective.compare(
-                &metrics(start_time_slot, &arena[left]),
-                &metrics(start_time_slot, &arena[right]),
+                &metrics(input.problem.start_policy(), start_time_slot, &arena[left]),
+                &metrics(input.problem.start_policy(), start_time_slot, &arena[right]),
             )
         });
         let Some(best_id) = best else {
@@ -180,7 +189,11 @@ impl<O: ObjectivePolicy, F: FrontierPolicy> ExactBitDpSolver<O, F> {
         visit_order.reverse();
         Ok(Some(ExactSolveResult {
             solution: SolverSolution { visit_order },
-            metrics: metrics(start_time_slot, &arena[best_id]),
+            metrics: metrics(
+                input.problem.start_policy(),
+                start_time_slot,
+                &arena[best_id],
+            ),
             stats: ExactSolverStats {
                 generated_states: arena.len(),
                 frontier_states: frontiers.iter().map(Vec::len).sum(),
@@ -282,13 +295,17 @@ impl<O: ObjectivePolicy, F: FrontierPolicy> RouteSolver for ExactBitDpSolver<O, 
         solution: &SolverSolution,
     ) -> Result<TimeOfDay, SolverError> {
         let selected = evaluate_solution(&self.objective, input, solution)?;
-        TimeOfDay::from_minutes(selected.start_time_slot * TIME_SLOT_MINUTES as u16)
-            .map_err(|error| SolverError::Failed(error.to_string()))
+        super::super::selected_start_time(input.problem, &selected)
     }
 }
 
-fn metrics(start_time_slot: u16, state: &ParetoState) -> SolutionMetrics {
+fn metrics(
+    start_policy: StartPolicy,
+    start_time_slot: u16,
+    state: &ParetoState,
+) -> SolutionMetrics {
     SolutionMetrics {
+        start_policy,
         start_time_slot,
         finish_time_slot: state.time_slot,
         travel_minutes: state.travel_minutes,

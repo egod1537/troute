@@ -201,6 +201,7 @@ mod tests {
     #[test]
     fn stable_tie_break_keeps_registration_order() {
         let metrics = SolutionMetrics {
+            start_policy: crate::domain::StartPolicy::Latest,
             start_time_slot: 10,
             finish_time_slot: 20,
             travel_minutes: 30,
@@ -240,6 +241,7 @@ mod tests {
             candidate(
                 "more_wait",
                 SolutionMetrics {
+                    start_policy: crate::domain::StartPolicy::Latest,
                     start_time_slot: 20,
                     finish_time_slot: 30,
                     travel_minutes: 10,
@@ -250,6 +252,7 @@ mod tests {
             candidate(
                 "less_travel",
                 SolutionMetrics {
+                    start_policy: crate::domain::StartPolicy::Latest,
                     start_time_slot: 20,
                     finish_time_slot: 30,
                     travel_minutes: 9,
@@ -260,6 +263,7 @@ mod tests {
             candidate(
                 "earlier_start",
                 SolutionMetrics {
+                    start_policy: crate::domain::StartPolicy::Latest,
                     start_time_slot: 19,
                     finish_time_slot: 20,
                     travel_minutes: 1,
@@ -273,6 +277,32 @@ mod tests {
         assert_eq!(candidates[0].strategy, "less_travel");
         assert_eq!(candidates[1].strategy, "more_wait");
         assert_eq!(candidates[2].strategy, "earlier_start");
+    }
+
+    #[test]
+    fn selector_applies_earliest_and_fixed_start_policies() {
+        let evaluator = DefaultObjectivePolicy;
+        let metrics = |policy, start_time_slot, finish_time_slot| SolutionMetrics {
+            start_policy: policy,
+            start_time_slot,
+            finish_time_slot,
+            travel_minutes: 10,
+            wait_minutes: 0,
+            score: 10,
+        };
+
+        assert!(evaluator
+            .compare(
+                &metrics(crate::domain::StartPolicy::Earliest, 10, 30),
+                &metrics(crate::domain::StartPolicy::Earliest, 11, 20),
+            )
+            .is_lt());
+        assert!(evaluator
+            .compare(
+                &metrics(crate::domain::StartPolicy::Fixed, 10, 20),
+                &metrics(crate::domain::StartPolicy::Fixed, 10, 21),
+            )
+            .is_lt());
     }
 
     #[test]

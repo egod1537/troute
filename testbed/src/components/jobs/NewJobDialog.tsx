@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { Alert, Button, Callout, Classes, Collapse, Dialog, DialogBody, DialogFooter, Intent, Spinner, Tag, TextArea } from "@blueprintjs/core";
-import { fetchTravelTimeMatrix, isTenMinuteDuration, isTenMinuteTime, parseInput, type RouteInput, type RouteProviderName, type TravelMode } from "../../api";
+import { fetchTravelTimeMatrix, isTenMinuteDuration, isTenMinuteTime, parseInput, type RouteInput, type RouteProviderName, type StartPolicy, type TravelMode } from "../../api";
 import { JOB_PRESETS, type JobPreset } from "../../placePresets";
 import { createSample } from "../../sample";
 
@@ -31,6 +31,8 @@ export function NewJobDialog({ isOpen, dark, existingJobIds, onClose, onCreate }
   const [countryCode, setCountryCode] = useState("");
   const [travelMode, setTravelMode] = useState<TravelMode>("TRANSIT");
   const [routeProvider, setRouteProvider] = useState<RouteProviderName | "">("");
+  const [startPolicy, setStartPolicy] = useState<StartPolicy>("LATEST");
+  const [startTime, setStartTime] = useState("00:00");
   const [locations, setLocations] = useState<FormLocation[]>([]);
   const [matrix, setMatrix] = useState<string[][]>([]);
   const [validation, setValidation] = useState<ValidationResult | null>(null);
@@ -67,6 +69,8 @@ export function NewJobDialog({ isOpen, dark, existingJobIds, onClose, onCreate }
     setCountryCode(request.country_code ?? "");
     setTravelMode(request.travel_mode ?? "TRANSIT");
     setRouteProvider(request.route_provider ?? "");
+    setStartPolicy(request.start_policy ?? "LATEST");
+    setStartTime(request.start_time ?? "00:00");
     setLocations(request.locations.map(locationFromRequest));
     setMatrix(request.travel_time_matrix ? matrixFromNumbers(request.travel_time_matrix) : blankMatrix(request.locations.length));
     setRawInput(JSON.stringify(request, null, 2));
@@ -84,15 +88,15 @@ export function NewJobDialog({ isOpen, dark, existingJobIds, onClose, onCreate }
     return {
       job_id: jobId,
       locations: locations.map((location) => ({ id: location.id.trim(), name: location.name.trim() || undefined, place_id: location.placeId.trim(), open_time: location.openTime, close_time: location.closeTime, stay_minutes: Number(location.stayMinutes) })),
-      // Midnight is the contract's minimum earliest-start bound. The solver still selects the latest feasible start.
-      start_time: "00:00",
+      start_policy: startPolicy,
+      start_time: startTime || undefined,
       country_code: countryCode.trim().toUpperCase() || undefined,
       travel_mode: travelMode,
       route_provider: routeProvider || undefined,
       travel_time_matrix: suppliedMatrix,
       debug: { min_job_duration_ms: 4_000 },
     };
-  }, [jobId, countryCode, travelMode, routeProvider, locations, matrix]);
+  }, [jobId, countryCode, travelMode, routeProvider, startPolicy, startTime, locations, matrix]);
   useEffect(() => { if (!rawEditing) setRawInput(JSON.stringify(formRequest, null, 2)); }, [formRequest, rawEditing]);
 
   function clearFeedback() {
@@ -111,6 +115,8 @@ export function NewJobDialog({ isOpen, dark, existingJobIds, onClose, onCreate }
     if (countryCode.trim() && !/^[A-Za-z]{2}$/.test(countryCode.trim())) errors.countryCode = "국가 코드는 ISO alpha-2 두 글자여야 합니다.";
     if (!["TRANSIT", "DRIVING", "WALKING", "BICYCLING"].includes(travelMode)) errors.travelMode = "지원되는 이동수단을 입력하세요.";
     if (routeProvider && !["google", "kakao-mobility", "kakao-maps", "ekispert", "navitime", "otp"].includes(routeProvider)) errors.routeProvider = "등록된 provider 이름을 입력하세요.";
+    if (!["FIXED", "EARLIEST", "LATEST"].includes(startPolicy)) errors.startPolicy = "FIXED, EARLIEST, LATEST 중 하나를 입력하세요.";
+    if (!/^(?:[01]\d|2[0-3]):[0-5]\d$/.test(startTime)) errors.startTime = "시작 시각은 HH:MM이어야 합니다.";
     if (existingJobIds.has(jobId.trim())) errors.jobId = `job_id "${jobId.trim()}"가 이 세션에 이미 존재합니다.`;
     if (locations.length < 2) errors.locations = "장소가 최소 2개 필요합니다.";
     const ids = new Set<string>();
@@ -200,7 +206,8 @@ export function NewJobDialog({ isOpen, dark, existingJobIds, onClose, onCreate }
         close_time: location.closeTime,
         stay_minutes: Number(location.stayMinutes),
       })),
-      start_time: "00:00",
+      start_policy: startPolicy,
+      start_time: startTime,
       country_code: preset.countryCode,
       travel_mode: preset.travelMode ?? "WALKING",
     };
@@ -275,6 +282,8 @@ export function NewJobDialog({ isOpen, dark, existingJobIds, onClose, onCreate }
           <label><span>Country</span><input className={`bp6-input ${fieldErrors.countryCode ? "field-invalid" : ""}`} aria-invalid={Boolean(fieldErrors.countryCode)} placeholder="JP" maxLength={2} value={countryCode} onChange={(event) => { setCountryCode(event.target.value); clearFeedback(); }} />{fieldErrors.countryCode && <small>{fieldErrors.countryCode}</small>}</label>
           <label><span>Mode</span><input className={`bp6-input ${fieldErrors.travelMode ? "field-invalid" : ""}`} aria-invalid={Boolean(fieldErrors.travelMode)} placeholder="TRANSIT" value={travelMode} onChange={(event) => { setTravelMode(event.target.value.toUpperCase() as TravelMode); clearFeedback(); }} />{fieldErrors.travelMode && <small>{fieldErrors.travelMode}</small>}</label>
           <label><span>Provider override</span><input className={`bp6-input ${fieldErrors.routeProvider ? "field-invalid" : ""}`} aria-invalid={Boolean(fieldErrors.routeProvider)} placeholder="Policy (optional)" value={routeProvider} onChange={(event) => { setRouteProvider(event.target.value.toLowerCase() as RouteProviderName | ""); clearFeedback(); }} />{fieldErrors.routeProvider && <small>{fieldErrors.routeProvider}</small>}</label>
+          <label><span>Start policy</span><input className={`bp6-input ${fieldErrors.startPolicy ? "field-invalid" : ""}`} aria-invalid={Boolean(fieldErrors.startPolicy)} value={startPolicy} onChange={(event) => { setStartPolicy(event.target.value.toUpperCase() as StartPolicy); clearFeedback(); }} />{fieldErrors.startPolicy && <small>{fieldErrors.startPolicy}</small>}</label>
+          <label><span>Start time / lower bound</span><input className={`bp6-input ${fieldErrors.startTime ? "field-invalid" : ""}`} aria-invalid={Boolean(fieldErrors.startTime)} type="time" step="60" value={startTime} onChange={(event) => { setStartTime(event.target.value); clearFeedback(); }} />{fieldErrors.startTime && <small>{fieldErrors.startTime}</small>}</label>
           <div className="readonly-fact"><span>시간 단위</span><strong>10분</strong></div>
         </div>
       </section>

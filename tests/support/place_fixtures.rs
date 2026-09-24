@@ -103,7 +103,8 @@ pub fn build_optimize_request_from_fixture(
                 stay_minutes: 0,
             })
             .collect(),
-        start_time,
+        start_policy: None,
+        start_time: Some(start_time),
         travel_mode: None,
         country_code: None,
         route_provider: None,

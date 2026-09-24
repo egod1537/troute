@@ -858,6 +858,7 @@ fn independent_evaluate(
         }
         if feasible {
             return Some(SolutionMetrics {
+                start_policy: case.problem.start_policy(),
                 start_time_slot: start as u16,
                 finish_time_slot: slot as u16,
                 travel_minutes: travel_total,

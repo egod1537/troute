@@ -57,6 +57,10 @@ function scoreValue(candidate: SolverCandidate, field: "latest_start" | "finish_
   return candidate.objective_score?.[field] ?? "—";
 }
 
+function selectedStart(candidate: SolverCandidate) {
+  return candidate.objective_score?.start_time ?? scoreValue(candidate, "latest_start");
+}
+
 function minuteValue(candidate: SolverCandidate, field: "travel_minutes" | "wait_minutes") {
   const value = candidate.objective_score?.[field];
   return value === undefined ? "—" : `${value}분`;
@@ -73,7 +77,7 @@ function CandidateFacts({ candidate }: { candidate: SolverCandidate }) {
     ["Feasible", candidate.feasible ? "Yes" : "No"],
     ["Selected", candidate.best ? "Yes · ★ Best" : "No"],
     ["Runtime", `${candidate.elapsed_ms} ms`],
-    ["Latest Start", scoreValue(candidate, "latest_start")],
+    ["Selected Start", selectedStart(candidate)],
     ["Finish", scoreValue(candidate, "finish_time")],
     ["Travel", minuteValue(candidate, "travel_minutes")],
     ["Wait", minuteValue(candidate, "wait_minutes")],
@@ -108,7 +112,7 @@ function ExactBitDpDetail({ candidates, locationCount }: { candidates: SolverCan
     ["Feasible", candidate.feasible ? "Yes" : "No"],
     ["Selected", candidate.best ? "Yes · ★ Best" : "No"],
     ["Runtime", `${candidate.elapsed_ms} ms`],
-    ["Latest Start", scoreValue(candidate, "latest_start")],
+    ["Selected Start", selectedStart(candidate)],
     ["Finish", scoreValue(candidate, "finish_time")],
     ["Travel", minuteValue(candidate, "travel_minutes")],
     ["Wait", minuteValue(candidate, "wait_minutes")],
@@ -122,7 +126,7 @@ function ExactBitDpDetail({ candidates, locationCount }: { candidates: SolverCan
     ["Time Slot Size", "10 min"],
   ];
   const objective = [
-    ["Latest Start", scoreValue(candidate, "latest_start")],
+    ["Selected Start", selectedStart(candidate)],
     ["Finish", scoreValue(candidate, "finish_time")],
     ["Travel", minuteValue(candidate, "travel_minutes")],
     ["Wait", minuteValue(candidate, "wait_minutes")],
@@ -159,7 +163,7 @@ function ClusteredDetail({ candidates }: { candidates: SolverCandidate[] }) {
     ["Feasible", candidate.feasible ? "Yes" : "No"],
     ["Selected", candidate.best ? "Yes · ★ Best" : "No"],
     ["Runtime", `${candidate.elapsed_ms} ms`],
-    ["Latest Start", scoreValue(candidate, "latest_start")],
+    ["Selected Start", selectedStart(candidate)],
     ["Finish", scoreValue(candidate, "finish_time")],
     ["Travel", minuteValue(candidate, "travel_minutes")],
     ["Wait", minuteValue(candidate, "wait_minutes")],
@@ -232,7 +236,7 @@ function MstDoubleTreeDetail({ candidates }: { candidates: SolverCandidate[] }) 
     ["Feasible", candidate.feasible ? "Yes" : "No"],
     ["Selected", candidate.best ? "Yes · ★ Best" : "No"],
     ["Runtime", `${candidate.elapsed_ms} ms`],
-    ["Latest Start", scoreValue(candidate, "latest_start")],
+    ["Selected Start", selectedStart(candidate)],
     ["Finish", scoreValue(candidate, "finish_time")],
     ["Travel", minuteValue(candidate, "travel_minutes")],
     ["Wait", minuteValue(candidate, "wait_minutes")],
@@ -245,7 +249,7 @@ function MstDoubleTreeDetail({ candidates }: { candidates: SolverCandidate[] }) 
   const evaluation = [
     ["Travel", minuteValue(candidate, "travel_minutes")],
     ["Wait", minuteValue(candidate, "wait_minutes")],
-    ["Latest Start", scoreValue(candidate, "latest_start")],
+    ["Selected Start", selectedStart(candidate)],
     ["Finish", scoreValue(candidate, "finish_time")],
     ["Feasible", candidate.feasible ? "Yes" : "No"],
   ];
@@ -292,7 +296,7 @@ function ChristofidesDetail({ candidates }: { candidates: SolverCandidate[] }) {
     ["Feasible", candidate.feasible ? "Yes" : "No"],
     ["Selected", candidate.best ? "Yes · ★ Best" : "No"],
     ["Runtime", `${candidate.elapsed_ms} ms`],
-    ["Latest Start", scoreValue(candidate, "latest_start")],
+    ["Selected Start", selectedStart(candidate)],
     ["Finish", scoreValue(candidate, "finish_time")],
     ["Travel", minuteValue(candidate, "travel_minutes")],
     ["Wait", minuteValue(candidate, "wait_minutes")],
@@ -309,7 +313,7 @@ function ChristofidesDetail({ candidates }: { candidates: SolverCandidate[] }) {
   const evaluation = [
     ["Travel", minuteValue(candidate, "travel_minutes")],
     ["Wait", minuteValue(candidate, "wait_minutes")],
-    ["Latest Start", scoreValue(candidate, "latest_start")],
+    ["Selected Start", selectedStart(candidate)],
     ["Finish", scoreValue(candidate, "finish_time")],
     ["Feasible", candidate.feasible ? "Yes" : "No"],
   ];
@@ -363,7 +367,7 @@ function SimulatedAnnealingDetail({ item, candidates }: { item: StrategyNavigati
     ["Feasible", candidate.feasible ? "Yes" : "No"],
     ["Selected", candidate.best ? "Yes · ★ Best" : "No"],
     ["Runtime", `${candidate.elapsed_ms} ms`],
-    ["Latest Start", scoreValue(candidate, "latest_start")],
+    ["Selected Start", selectedStart(candidate)],
     ["Finish", scoreValue(candidate, "finish_time")],
     ["Travel", minuteValue(candidate, "travel_minutes")],
     ["Wait", minuteValue(candidate, "wait_minutes")],
@@ -445,12 +449,12 @@ function Overview({ candidates, diagnostics }: { candidates: SolverCandidate[]; 
       </dl>}
       <div className="benchmark-table-scroll">
         <table className={`${Classes.HTML_TABLE} ${Classes.HTML_TABLE_BORDERED} ${Classes.HTML_TABLE_STRIPED}`}>
-          <thead><tr><th>Strategy</th><th>Feasible</th><th>Latest Start</th><th>Finish</th><th>Travel</th><th>Wait</th><th>Runtime</th></tr></thead>
+          <thead><tr><th>Strategy</th><th>Feasible</th><th>Selected Start</th><th>Finish</th><th>Travel</th><th>Wait</th><th>Runtime</th></tr></thead>
           <tbody>
             {candidates.map((candidate) => <tr key={candidate.strategy}>
               <td>{candidate.strategy} {candidate.best && <Tag intent={Intent.PRIMARY} minimal>★ Best</Tag>}</td>
               <td>{candidate.feasible ? "Yes" : "No"}</td>
-              <td>{scoreValue(candidate, "latest_start")}</td>
+              <td>{selectedStart(candidate)}</td>
               <td>{scoreValue(candidate, "finish_time")}</td>
               <td>{minuteValue(candidate, "travel_minutes")}</td>
               <td>{minuteValue(candidate, "wait_minutes")}</td>

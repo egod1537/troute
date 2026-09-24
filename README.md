@@ -197,13 +197,12 @@ in-flight tcache Jobs. Matrix errors report timeout classification, elapsed
 time, completed/total pair counts, and the failed directed pair.
 It also attempts the tcache Route Job cancel endpoint when a pair query times
 out. The deprecated `TCACHE_MATRIX_POLL_INTERVAL_MS` and
-`TCACHE_MATRIX_TIMEOUT_MS` names remain fallback aliases. The current troute v0
-domain contains
-only a wall-clock `start_time`, not a calendar date or timezone. The
-`RoutingProvider` boundary accepts a `RoutingContext` containing departure
+`TCACHE_MATRIX_TIMEOUT_MS` names remain fallback aliases. The current troute
+domain contains a wall-clock `start_time` and `start_policy`, but not a calendar
+date or timezone. The `RoutingProvider` boundary accepts a `RoutingContext` containing departure
 instant, travel mode, timezone, and extensible routing options. The service
-currently supplies the current UTC instant as each pair's `departureTime`;
-adding a dated optimization request can refine this later without exposing
+currently supplies the current UTC instant plus a five-minute routing lead as
+each pair's `departureTime`; adding a dated optimization request can refine this later without exposing
 tcache HTTP details to the solver.
 
 ### Real Place ID test fixtures
@@ -330,6 +329,7 @@ curl -i -X POST http://127.0.0.1:8080/optimize \
         "stay_minutes": 0
       }
     ],
+    "start_policy": "LATEST",
     "start_time": "09:00",
     "travel_mode": "DRIVING"
   }'
@@ -346,25 +346,41 @@ brevity):
     {
       "location_id": "place-1",
       "order": 0,
-      "arrival_time": "16:50",
-      "departure_time": "16:50"
+      "arrival_time": "17:00",
+      "service_start_time": "17:00",
+      "departure_time": "17:00",
+      "wait_minutes": 0,
+      "stay_minutes": 0
     },
     {
       "location_id": "place-2",
       "order": 1,
-      "arrival_time": "17:05",
-      "departure_time": "17:50"
+      "arrival_time": "17:15",
+      "service_start_time": "17:15",
+      "departure_time": "17:55",
+      "wait_minutes": 0,
+      "stay_minutes": 40
     },
     {
       "location_id": "place-3",
       "order": 2,
-      "arrival_time": "18:05",
-      "departure_time": "18:05"
+      "arrival_time": "18:10",
+      "service_start_time": "18:10",
+      "departure_time": "18:10",
+      "wait_minutes": 0,
+      "stay_minutes": 0
     }
   ],
-  "total_travel_minutes": 30
+  "total_travel_minutes": 30,
+  "start_policy": "LATEST",
+  "selected_start_time": "17:00"
 }
 ```
+
+`start_policy` accepts `FIXED`, `EARLIEST`, or `LATEST`. `FIXED` requires
+`start_time`; for `EARLIEST` and `LATEST`, an omitted `start_time` defaults to
+`00:00`, while a supplied value is the lower bound. For compatibility, omitting
+`start_policy` retains the previous `LATEST` behavior.
 
 For `[A, B, C, D]`, `A` and `D` remain fixed while the solver may return an
 intermediate order such as `[A, C, B, D]`. The start location's stay duration
@@ -403,8 +419,9 @@ enforces `SOLVER_MAX_CONCURRENCY` for baselines, while the global deadline and
 
 Every route is converted to the same `SolverCandidate` and evaluated by the
 shared `ObjectiveEvaluator`. `CandidateSelector` ranks feasible routes first,
-then latest start, earliest finish, least directed travel, and least waiting,
-in that order. Registration order is the deterministic final tie-break. If no
+then applies the requested start policy (`FIXED`, earliest start, or latest
+start), followed by earliest finish, least directed travel, and least waiting.
+Registration order is the deterministic final tie-break. If no
 feasible candidate remains, the orchestrator returns `NoFeasibleRoute`.
 Successful API responses include `solver_candidates` with the selected `Best`
 candidate, every individual strategy result, elapsed time, objective fields,

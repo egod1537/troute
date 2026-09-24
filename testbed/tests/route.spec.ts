@@ -299,7 +299,7 @@ test("job is inserted and selected before the request completes, then succeeds",
   await expect(row).toHaveAttribute("data-status", "completed");
   await expect(row).toContainText("완료");
   await expect(page.getByLabel("방문 순서")).toHaveText("A → B → C");
-  await expect(page.getByRole("table").first()).toContainText("09:25");
+  await expect(page.locator(".route-summary").getByRole("table")).toContainText("09:25");
   await page.getByRole("button", { name: "알고리즘 비교" }).click();
   const benchmark = page.getByRole("dialog", { name: "Solver Benchmark" });
   await expect(benchmark.getByRole("heading", { name: "Overview" })).toBeVisible();
@@ -760,7 +760,7 @@ test("malformed successful responses fail without losing inspection data", async
   await expect(page.getByLabel("Raw API 응답")).toContainText(
     "incorrect shape",
   );
-  await expect(page.getByRole("table")).toHaveCount(0);
+  await expect(page.locator(".route-summary").getByRole("table")).toHaveCount(0);
 });
 
 test("reload restores recent jobs and fetches the selected timeline", async ({

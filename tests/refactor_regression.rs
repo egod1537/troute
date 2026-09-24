@@ -58,6 +58,7 @@ fn input<'a>(
 
 fn expected_metrics() -> SolutionMetrics {
     SolutionMetrics {
+        start_policy: troute::domain::StartPolicy::Latest,
         start_time_slot: 139,
         finish_time_slot: 143,
         travel_minutes: 40,
@@ -205,8 +206,10 @@ fn caller_matrix_bypass_and_api_response_contract_are_stable() {
         keys(&json),
         BTreeSet::from([
             "route",
+            "selected_start_time",
             "solver_candidates",
             "solver_diagnostics",
+            "start_policy",
             "total_travel_minutes"
         ])
     );
@@ -222,11 +225,27 @@ fn caller_matrix_bypass_and_api_response_contract_are_stable() {
     );
     assert_eq!(
         keys(&json["route"][0]),
-        BTreeSet::from(["arrival_time", "departure_time", "location_id", "order"])
+        BTreeSet::from([
+            "arrival_time",
+            "departure_time",
+            "location_id",
+            "order",
+            "service_start_time",
+            "stay_minutes",
+            "wait_minutes"
+        ])
     );
     assert_eq!(
         keys(&json["route"][4]),
-        BTreeSet::from(["arrival_time", "departure_time", "location_id", "order"])
+        BTreeSet::from([
+            "arrival_time",
+            "departure_time",
+            "location_id",
+            "order",
+            "service_start_time",
+            "stay_minutes",
+            "wait_minutes"
+        ])
     );
 
     let candidates = json["solver_candidates"].as_array().unwrap();
@@ -259,6 +278,7 @@ fn caller_matrix_bypass_and_api_response_contract_are_stable() {
         BTreeSet::from([
             "finish_time",
             "latest_start",
+            "start_time",
             "travel_minutes",
             "wait_minutes"
         ])

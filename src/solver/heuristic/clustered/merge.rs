@@ -1,5 +1,5 @@
 use crate::{
-    domain::{Location, OptimizationProblem, TimeOfDay, TimeWindow},
+    domain::{Location, OptimizationProblem, StartPolicy, TimeOfDay, TimeWindow},
     matrix::TravelTimeMatrix,
     solver::{
         Cluster, ExactBitDpSolver, FrontierPolicy, ObjectivePolicy, SolverError, SolverInput,
@@ -37,10 +37,11 @@ pub(super) fn solve_cluster<O: ObjectivePolicy, F: FrontierPolicy>(
             .map(|&member| input.problem.locations()[member].clone()),
     );
     locations.push(dummy);
-    let subproblem = OptimizationProblem::new(
+    let subproblem = OptimizationProblem::with_start_policy(
         locations,
         TimeOfDay::from_minutes(start_slot * TIME_SLOT_MINUTES as u16)
             .map_err(|error| SolverError::Failed(error.to_string()))?,
+        StartPolicy::Latest,
     );
 
     let dummy_index = cluster.members.len() + 1;

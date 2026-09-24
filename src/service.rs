@@ -18,6 +18,8 @@ use crate::{
     solver::{RouteSolver, SolverError, SolverInput},
 };
 
+const ROUTING_DEPARTURE_LEAD_MINUTES: i64 = 5;
+
 /// Coordinates the provider -> solver -> schedule pipeline without coupling
 /// any of those components to an HTTP framework.
 pub struct RouteOptimizationService<P, S> {
@@ -97,7 +99,7 @@ where
                     .expect("request validation guarantees a non-empty square matrix"),
                 None => {
                     let mut routing_context = RoutingContext {
-                        departure_time: Some(chrono::Utc::now()),
+                        departure_time: Some(routing_departure_time()),
                         travel_mode,
                         ..RoutingContext::default()
                     };
@@ -193,7 +195,7 @@ where
         let requested_provider = request.route_provider;
         let problem = OptimizationProblem::try_from(request)?;
         let mut routing_context = RoutingContext {
-            departure_time: Some(chrono::Utc::now()),
+            departure_time: Some(routing_departure_time()),
             travel_mode,
             ..RoutingContext::default()
         };
@@ -210,6 +212,10 @@ where
     pub fn provider_policy_diagnostics(&self) -> Option<RouteProviderPolicyDiagnostics> {
         self.routing_provider.provider_policy_diagnostics()
     }
+}
+
+fn routing_departure_time() -> chrono::DateTime<chrono::Utc> {
+    chrono::Utc::now() + chrono::Duration::minutes(ROUTING_DEPARTURE_LEAD_MINUTES)
 }
 
 fn apply_provider_request_context(
@@ -437,6 +443,64 @@ mod tests {
             "23:30"
         );
         assert_eq!(response.route[1].arrival_time.to_string(), "23:45");
+    }
+
+    #[test]
+    fn exact_solver_honors_all_start_policies() {
+        let service =
+            RouteOptimizationService::new(DevelopmentRoutingProvider, ExactBitDpSolver::default());
+
+        let mut fixed = serde_json::to_value(valid_request()).unwrap();
+        fixed["start_policy"] = serde_json::json!("FIXED");
+        fixed["start_time"] = serde_json::json!("09:05");
+        let fixed = service
+            .optimize(serde_json::from_value(fixed).unwrap())
+            .unwrap();
+        assert_eq!(fixed.selected_start_time.unwrap().to_string(), "09:05");
+        assert_eq!(fixed.route[0].departure_time.unwrap().to_string(), "09:05");
+
+        let mut earliest = serde_json::to_value(valid_request()).unwrap();
+        earliest["start_policy"] = serde_json::json!("EARLIEST");
+        earliest.as_object_mut().unwrap().remove("start_time");
+        let earliest = service
+            .optimize(serde_json::from_value(earliest).unwrap())
+            .unwrap();
+        assert_eq!(earliest.selected_start_time.unwrap().to_string(), "00:00");
+
+        let mut latest = serde_json::to_value(valid_request()).unwrap();
+        latest["start_policy"] = serde_json::json!("LATEST");
+        latest.as_object_mut().unwrap().remove("start_time");
+        let latest = service
+            .optimize(serde_json::from_value(latest).unwrap())
+            .unwrap();
+        assert_eq!(latest.selected_start_time.unwrap().to_string(), "23:30");
+    }
+
+    #[test]
+    fn best_candidate_objective_matches_the_returned_schedule() {
+        let solver = SolverOrchestrator::new(SolverOrchestratorConfig::default()).unwrap();
+        let service = RouteOptimizationService::new(DevelopmentRoutingProvider, solver);
+        let response = service.optimize(valid_request()).unwrap();
+        let last_departure = response.route.last().unwrap().departure_time.unwrap();
+        let total_wait: u32 = response
+            .route
+            .iter()
+            .map(|stop| stop.wait_minutes.unwrap())
+            .sum();
+        let best = response
+            .solver_candidates
+            .as_ref()
+            .unwrap()
+            .iter()
+            .find(|candidate| candidate.best)
+            .unwrap();
+        let score = best.objective_score.unwrap();
+
+        assert_eq!(best.route, ["A", "B"]);
+        assert_eq!(score.start_time, response.selected_start_time);
+        assert_eq!(score.finish_time, last_departure);
+        assert_eq!(score.travel_minutes, response.total_travel_minutes);
+        assert_eq!(score.wait_minutes, total_wait);
     }
 
     #[test]

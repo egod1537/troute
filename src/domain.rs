@@ -5,6 +5,16 @@ use thiserror::Error;
 
 const MINUTES_PER_DAY: u32 = 24 * 60;
 
+/// Controls how the itinerary departure time participates in optimization.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, Default)]
+#[serde(rename_all = "SCREAMING_SNAKE_CASE")]
+pub enum StartPolicy {
+    Fixed,
+    Earliest,
+    #[default]
+    Latest,
+}
+
 /// A local wall-clock time in the single-day v0 model.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct TimeOfDay(u16);
@@ -156,14 +166,25 @@ impl Location {
 pub struct OptimizationProblem {
     locations: Vec<Location>,
     start_time: TimeOfDay,
+    start_policy: StartPolicy,
 }
 
 impl OptimizationProblem {
+    #[cfg(test)]
     pub(crate) fn new(locations: Vec<Location>, start_time: TimeOfDay) -> Self {
+        Self::with_start_policy(locations, start_time, StartPolicy::Latest)
+    }
+
+    pub(crate) fn with_start_policy(
+        locations: Vec<Location>,
+        start_time: TimeOfDay,
+        start_policy: StartPolicy,
+    ) -> Self {
         debug_assert!(!locations.is_empty());
         Self {
             locations,
             start_time,
+            start_policy,
         }
     }
 
@@ -202,13 +223,20 @@ impl OptimizationProblem {
     pub fn start_time(&self) -> TimeOfDay {
         self.start_time
     }
+
+    pub fn start_policy(&self) -> StartPolicy {
+        self.start_policy
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ScheduledStop {
     pub location_index: usize,
     pub arrival_time: TimeOfDay,
+    pub service_start_time: TimeOfDay,
     pub departure_time: Option<TimeOfDay>,
+    pub wait_minutes: u32,
+    pub stay_minutes: u32,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

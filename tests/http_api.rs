@@ -1820,6 +1820,9 @@ async fn valid_optimize_request_uses_the_service_pipeline() {
     assert_eq!(response.body["route"][0]["arrival_time"], "09:00");
     assert_eq!(response.body["route"][1]["location_id"], "place-2");
     assert_eq!(response.body["route"][1]["arrival_time"], "09:15");
+    assert_eq!(response.body["route"][1]["service_start_time"], "09:15");
+    assert_eq!(response.body["route"][1]["wait_minutes"], 0);
+    assert_eq!(response.body["route"][1]["stay_minutes"], 30);
     assert_eq!(response.body["route"][1]["departure_time"], "09:45");
     assert_eq!(response.body["route"][2]["location_id"], "place-3");
     assert_eq!(response.body["route"][2]["arrival_time"], "10:00");

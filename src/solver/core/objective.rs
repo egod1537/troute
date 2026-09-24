@@ -1,10 +1,13 @@
 use std::cmp::Ordering;
 
+use crate::domain::StartPolicy;
+
 use super::{SolverError, SolverInput, SolverSolution};
 
 /// Values exposed to replaceable objective policies.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct SolutionMetrics {
+    pub start_policy: StartPolicy,
     pub start_time_slot: u16,
     pub finish_time_slot: u16,
     pub travel_minutes: u32,

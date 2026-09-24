@@ -1,6 +1,6 @@
 use std::cmp::Ordering;
 
-use crate::domain::OptimizationProblem;
+use crate::domain::{OptimizationProblem, StartPolicy};
 
 pub mod core;
 pub use core::*;
@@ -39,9 +39,13 @@ impl ObjectivePolicy for DefaultObjectivePolicy {
     }
 
     fn compare(&self, left: &SolutionMetrics, right: &SolutionMetrics) -> Ordering {
-        right
-            .start_time_slot
-            .cmp(&left.start_time_slot)
+        debug_assert_eq!(left.start_policy, right.start_policy);
+        let start_order = match left.start_policy {
+            StartPolicy::Fixed => Ordering::Equal,
+            StartPolicy::Earliest => left.start_time_slot.cmp(&right.start_time_slot),
+            StartPolicy::Latest => right.start_time_slot.cmp(&left.start_time_slot),
+        };
+        start_order
             .then_with(|| left.finish_time_slot.cmp(&right.finish_time_slot))
             .then_with(|| left.travel_minutes.cmp(&right.travel_minutes))
             .then_with(|| left.wait_minutes.cmp(&right.wait_minutes))
@@ -71,11 +75,19 @@ pub fn evaluate_solution(
             Err(SolverError::NoFeasibleRoute)
         };
     }
-    let mut low = earliest as u16;
-    let mut high = (slots_per_day() - 1) as u16;
+    let low = earliest as u16;
     if simulate_solution(objective, &input, solution, low).is_none() {
         return Err(SolverError::NoFeasibleRoute);
     }
+    if matches!(
+        input.problem.start_policy(),
+        StartPolicy::Fixed | StartPolicy::Earliest
+    ) {
+        return simulate_solution(objective, &input, solution, low)
+            .ok_or(SolverError::NoFeasibleRoute);
+    }
+    let mut low = low;
+    let mut high = (slots_per_day() - 1) as u16;
     while low < high {
         let middle = low + (high - low).div_ceil(2);
         if simulate_solution(objective, &input, solution, middle).is_some() {
@@ -85,6 +97,22 @@ pub fn evaluate_solution(
         }
     }
     simulate_solution(objective, &input, solution, low).ok_or(SolverError::NoFeasibleRoute)
+}
+
+/// Converts slot-based metrics into the departure time exposed by the API.
+/// Fixed and earliest policies retain the exact requested minute.
+pub fn selected_start_time(
+    problem: &OptimizationProblem,
+    metrics: &SolutionMetrics,
+) -> Result<crate::domain::TimeOfDay, SolverError> {
+    if matches!(
+        problem.start_policy(),
+        StartPolicy::Fixed | StartPolicy::Earliest
+    ) {
+        return Ok(problem.start_time());
+    }
+    crate::domain::TimeOfDay::from_minutes(metrics.start_time_slot * TIME_SLOT_MINUTES as u16)
+        .map_err(|error| SolverError::Failed(error.to_string()))
 }
 
 fn validate_visit_order(
@@ -140,6 +168,7 @@ fn simulate_solution(
         time_slot = finish;
     }
     Some(SolutionMetrics {
+        start_policy: input.problem.start_policy(),
         start_time_slot: start,
         finish_time_slot: time_slot as u16,
         travel_minutes,

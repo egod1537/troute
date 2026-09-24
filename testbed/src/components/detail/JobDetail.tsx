@@ -132,14 +132,16 @@ export function JobDetail({
                 <strong>{job.route.total_travel_minutes}분</strong>
               </div>
             </div>
-            {job.route.selected_provider && (
+            {(job.route.selected_provider || job.route.start_policy || job.route.selected_start_time) && (
               <div
                 className="provider-selection-metadata"
                 title={job.route.provider_selection_reason}
               >
-                <Tag icon="route" intent={Intent.PRIMARY} minimal>
-                  {job.route.selected_provider}
-                </Tag>
+                {job.route.selected_provider && (
+                  <Tag icon="route" intent={Intent.PRIMARY} minimal>
+                    {job.route.selected_provider}
+                  </Tag>
+                )}
                 {job.route.provider_selection_source && (
                   <Tag minimal>{job.route.provider_selection_source}</Tag>
                 )}
@@ -147,6 +149,12 @@ export function JobDetail({
                   <Tag minimal>{job.route.country_code}</Tag>
                 )}
                 {job.route.mode && <Tag minimal>{job.route.mode}</Tag>}
+                {job.route.start_policy && (
+                  <Tag minimal>{job.route.start_policy}</Tag>
+                )}
+                {job.route.selected_start_time && (
+                  <Tag icon="time" minimal>{job.route.selected_start_time}</Tag>
+                )}
                 {job.route.provider_selection_reason && (
                   <span className={Classes.TEXT_MUTED}>
                     {job.route.provider_selection_reason}
@@ -163,7 +171,10 @@ export function JobDetail({
                     <th>순서</th>
                     <th>위치</th>
                     <th>도착</th>
+                    <th>서비스 시작</th>
                     <th>출발</th>
+                    <th>대기(분)</th>
+                    <th>체류(분)</th>
                   </tr>
                 </thead>
                 <tbody>
@@ -172,7 +183,10 @@ export function JobDetail({
                       <td>{stop.order}</td>
                       <td>{stop.location_id}</td>
                       <td>{stop.arrival_time}</td>
+                      <td>{stop.service_start_time ?? "—"}</td>
                       <td>{stop.departure_time ?? "—"}</td>
+                      <td>{stop.wait_minutes ?? "—"}</td>
+                      <td>{stop.stay_minutes ?? "—"}</td>
                     </tr>
                   ))}
                 </tbody>

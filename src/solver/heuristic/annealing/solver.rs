@@ -8,7 +8,6 @@ use crate::{
         evaluate_solution, evaluate_solution_with_penalties, ClusteredMstGreedyInitialRoute,
         ClusteredSolver, DefaultObjectivePolicy, InitialRouteGenerator, ObjectivePolicy,
         RandomInitialRoute, RouteSolver, SolutionMetrics, SolverError, SolverInput, SolverSolution,
-        TIME_SLOT_MINUTES,
     },
 };
 
@@ -328,8 +327,7 @@ impl<I: InitialRouteStrategy, N: NeighborhoodStrategy, O: ObjectivePolicy> Route
         solution: &SolverSolution,
     ) -> Result<TimeOfDay, SolverError> {
         let metrics = evaluate_solution(&self.objective, input, solution)?;
-        TimeOfDay::from_minutes(metrics.start_time_slot * TIME_SLOT_MINUTES as u16)
-            .map_err(|error| SolverError::Failed(error.to_string()))
+        crate::solver::selected_start_time(input.problem, &metrics)
     }
 }
 

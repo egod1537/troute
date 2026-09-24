@@ -6,6 +6,7 @@ export const ROUTE_PATH = (
 ).trim();
 
 export type TravelMode = "TRANSIT" | "DRIVING" | "WALKING" | "BICYCLING";
+export type StartPolicy = "FIXED" | "EARLIEST" | "LATEST";
 export type RouteProviderName =
   | "google"
   | "kakao-mobility"
@@ -24,7 +25,8 @@ export interface RouteInput {
     close_time: string;
     stay_minutes: number;
   }[];
-  start_time: string;
+  start_policy?: StartPolicy;
+  start_time?: string;
   travel_mode?: TravelMode;
   country_code?: string;
   route_provider?: RouteProviderName;
@@ -39,9 +41,14 @@ export interface RouteResponse {
     order: number;
     location_id: string;
     arrival_time: string;
+    service_start_time?: string;
     departure_time?: string;
+    wait_minutes?: number;
+    stay_minutes?: number;
   }[];
   total_travel_minutes: number;
+  start_policy?: StartPolicy;
+  selected_start_time?: string;
   selected_provider?: RouteProviderName;
   provider_selection_reason?: string;
   provider_selection_source?: string;
@@ -97,6 +104,7 @@ export interface SolverCandidate {
   feasible: boolean;
   objective_score?: {
     latest_start: string;
+    start_time?: string;
     finish_time: string;
     travel_minutes: number;
     wait_minutes: number;
@@ -277,6 +285,8 @@ const isRouteProviderName = (value: unknown): value is RouteProviderName =>
   value === "ekispert" ||
   value === "navitime" ||
   value === "otp";
+const isStartPolicy = (value: unknown): value is StartPolicy =>
+  value === "FIXED" || value === "EARLIEST" || value === "LATEST";
 
 export function parseInput(text: string): RouteInput {
   let input: unknown;
@@ -290,12 +300,20 @@ export function parseInput(text: string): RouteInput {
     !nonempty(input.job_id) ||
     [...input.job_id].length > 128 ||
     !Array.isArray(input.locations) ||
-    input.locations.length < 2 ||
-    !time(input.start_time)
+    input.locations.length < 2
   ) {
     throw new Error(
-      "요청에는 job_id(1~128자), start와 destination을 포함한 2개 이상의 locations, start_time(HH:MM)이 필요합니다.",
+      "요청에는 job_id(1~128자)와 start/destination을 포함한 2개 이상의 locations가 필요합니다.",
     );
+  }
+  if (input.start_policy !== undefined && !isStartPolicy(input.start_policy)) {
+    throw new Error("start_policy는 FIXED, EARLIEST, LATEST 중 하나여야 합니다.");
+  }
+  if (input.start_time !== undefined && !time(input.start_time)) {
+    throw new Error("start_time은 HH:MM 형식이어야 합니다.");
+  }
+  if (input.start_policy === "FIXED" && !time(input.start_time)) {
+    throw new Error("FIXED start_policy에는 start_time(HH:MM)이 필요합니다.");
   }
   if (
     input.debug !== undefined &&
@@ -401,11 +419,23 @@ export function parseRoute(response: ApiResponse): RouteResponse {
         unsigned(stop.order) &&
         nonempty(stop.location_id) &&
         time(stop.arrival_time) &&
-        (stop.departure_time === undefined || time(stop.departure_time)),
+        (stop.service_start_time === undefined || time(stop.service_start_time)) &&
+        (stop.departure_time === undefined || time(stop.departure_time)) &&
+        (stop.wait_minutes === undefined || unsigned(stop.wait_minutes)) &&
+        (stop.stay_minutes === undefined || unsigned(stop.stay_minutes)),
     )
   ) {
     throw new ApiError(
       "경로 응답 형식 오류: route 항목과 total_travel_minutes가 필요합니다.",
+      response,
+    );
+  }
+  if (
+    (data.start_policy !== undefined && !isStartPolicy(data.start_policy)) ||
+    (data.selected_start_time !== undefined && !time(data.selected_start_time))
+  ) {
+    throw new ApiError(
+      "경로 응답 형식 오류: start policy 진단값이 올바르지 않습니다.",
       response,
     );
   }

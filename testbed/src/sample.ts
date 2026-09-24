@@ -32,6 +32,7 @@ export function createSample(): RouteInput {
         stay_minutes: 40,
       },
     ],
+    start_policy: "LATEST",
     start_time: "00:00",
     travel_time_matrix: [
       [0, 30, 45],

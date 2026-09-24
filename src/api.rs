@@ -4,7 +4,8 @@ use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
 use crate::domain::{
-    DomainError, Location, OptimizationProblem, RoutePlan, RoutingReference, TimeOfDay, TimeWindow,
+    DomainError, Location, OptimizationProblem, RoutePlan, RoutingReference, StartPolicy,
+    TimeOfDay, TimeWindow,
 };
 use crate::events::{validate_job_id, JobIdError};
 use crate::routing::{
@@ -24,7 +25,10 @@ pub const MAX_DEBUG_JOB_DURATION_MS: u64 = 60_000;
 pub struct OptimizeRouteRequest {
     pub job_id: String,
     pub locations: Vec<LocationInput>,
-    pub start_time: TimeOfDay,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub start_policy: Option<StartPolicy>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub start_time: Option<TimeOfDay>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub travel_mode: Option<TravelMode>,
     #[serde(
@@ -74,6 +78,10 @@ pub struct OptimizeRouteResponse {
     pub route: Vec<RouteStopOutput>,
     pub total_travel_minutes: u32,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub start_policy: Option<StartPolicy>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub selected_start_time: Option<TimeOfDay>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub solver_candidates: Option<Vec<SolverCandidateOutput>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub solver_diagnostics: Option<SolverDiagnosticsOutput>,
@@ -114,7 +122,11 @@ pub struct SolverCandidateOutput {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize)]
 pub struct ObjectiveScoreOutput {
+    /// Compatibility alias retained for existing clients. It contains the
+    /// selected start for all start policies.
     pub latest_start: TimeOfDay,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub start_time: Option<TimeOfDay>,
     pub finish_time: TimeOfDay,
     pub travel_minutes: u32,
     pub wait_minutes: u32,
@@ -251,8 +263,14 @@ pub struct RouteStopOutput {
     pub location_id: String,
     pub order: usize,
     pub arrival_time: TimeOfDay,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub service_start_time: Option<TimeOfDay>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub departure_time: Option<TimeOfDay>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub wait_minutes: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub stay_minutes: Option<u32>,
 }
 
 impl TryFrom<OptimizeRouteRequest> for OptimizationProblem {
@@ -287,6 +305,14 @@ impl TryFrom<OptimizeRouteRequest> for OptimizationProblem {
                 actual: request.locations.len(),
             });
         }
+        let start_policy = request.start_policy.unwrap_or_default();
+        let start_time = match (start_policy, request.start_time) {
+            (StartPolicy::Fixed, None) => {
+                return Err(RequestValidationError::FixedStartTimeRequired)
+            }
+            (_, Some(start_time)) => start_time,
+            (_, None) => TimeOfDay::from_minutes(0).expect("midnight is a valid time"),
+        };
         let has_supplied_matrix = request.travel_time_matrix.is_some();
         if let Some(matrix) = request.travel_time_matrix.as_ref() {
             if matrix.len() != request.locations.len() {
@@ -383,7 +409,11 @@ impl TryFrom<OptimizeRouteRequest> for OptimizationProblem {
             ));
         }
 
-        Ok(OptimizationProblem::new(locations, request.start_time))
+        Ok(OptimizationProblem::with_start_policy(
+            locations,
+            start_time,
+            start_policy,
+        ))
     }
 }
 
@@ -393,7 +423,13 @@ impl OptimizeRouteResponse {
         problem: &OptimizationProblem,
         diagnostics: Option<&SolverDiagnostics>,
     ) -> Self {
-        let route = plan
+        let schedule_objective = ScheduleObjective::from_plan(&plan);
+        let best_route: Vec<String> = plan
+            .stops
+            .iter()
+            .map(|stop| problem.locations()[stop.location_index].id().to_owned())
+            .collect();
+        let route: Vec<RouteStopOutput> = plan
             .stops
             .into_iter()
             .enumerate()
@@ -401,22 +437,34 @@ impl OptimizeRouteResponse {
                 location_id: problem.locations()[stop.location_index].id().to_owned(),
                 order,
                 arrival_time: stop.arrival_time,
+                service_start_time: Some(stop.service_start_time),
                 departure_time: stop.departure_time,
+                wait_minutes: Some(stop.wait_minutes),
+                stay_minutes: Some(stop.stay_minutes),
             })
             .collect();
+
+        let selected_start_time = route.first().and_then(|stop| stop.departure_time);
 
         Self {
             route,
             total_travel_minutes: plan.total_travel_minutes,
+            start_policy: Some(problem.start_policy()),
+            selected_start_time,
             solver_candidates: diagnostics.map(|diagnostics| {
+                let mut best_emitted = false;
                 diagnostics
                     .candidates
                     .iter()
                     .map(|candidate| {
+                        let best =
+                            !best_emitted && candidate.strategy == diagnostics.selected_strategy;
+                        best_emitted |= best;
                         SolverCandidateOutput::from_candidate(
                             candidate,
-                            candidate.strategy == diagnostics.selected_strategy,
+                            best,
                             problem,
+                            best.then_some((&best_route, schedule_objective)),
                         )
                     })
                     .collect()
@@ -459,38 +507,51 @@ impl SolverCandidateOutput {
         candidate: &SolverCandidate,
         best: bool,
         problem: &OptimizationProblem,
+        selected_schedule: Option<(&[String], Option<ScheduleObjective>)>,
     ) -> Self {
-        let route = candidate
-            .route
-            .as_ref()
-            .map(|solution| {
-                solution
-                    .visit_order
-                    .iter()
-                    .map(|&index| {
-                        problem
-                            .locations()
-                            .get(index)
-                            .map(|location| location.id().to_owned())
-                            .unwrap_or_else(|| format!("#{index}"))
-                    })
-                    .collect()
+        let route = selected_schedule
+            .map(|(route, _)| route.to_vec())
+            .or_else(|| {
+                candidate.route.as_ref().map(|solution| {
+                    solution
+                        .visit_order
+                        .iter()
+                        .map(|&index| {
+                            problem
+                                .locations()
+                                .get(index)
+                                .map(|location| location.id().to_owned())
+                                .unwrap_or_else(|| format!("#{index}"))
+                        })
+                        .collect()
+                })
             })
             .unwrap_or_default();
-        let objective_score = candidate.objective_score.and_then(|score| {
-            Some(ObjectiveScoreOutput {
-                latest_start: TimeOfDay::from_minutes(
-                    score.start_time_slot * TIME_SLOT_MINUTES as u16,
-                )
-                .ok()?,
-                finish_time: TimeOfDay::from_minutes(
-                    score.finish_time_slot * TIME_SLOT_MINUTES as u16,
-                )
-                .ok()?,
-                travel_minutes: score.travel_minutes,
-                wait_minutes: score.wait_minutes,
-            })
-        });
+        let objective_score = selected_schedule
+            .and_then(|(_, objective)| objective)
+            .map(ObjectiveScoreOutput::from_schedule)
+            .or_else(|| {
+                candidate.objective_score.and_then(|score| {
+                    Some(ObjectiveScoreOutput {
+                        latest_start: TimeOfDay::from_minutes(
+                            score.start_time_slot * TIME_SLOT_MINUTES as u16,
+                        )
+                        .ok()?,
+                        start_time: Some(
+                            TimeOfDay::from_minutes(
+                                score.start_time_slot * TIME_SLOT_MINUTES as u16,
+                            )
+                            .ok()?,
+                        ),
+                        finish_time: TimeOfDay::from_minutes(
+                            score.finish_time_slot * TIME_SLOT_MINUTES as u16,
+                        )
+                        .ok()?,
+                        travel_minutes: score.travel_minutes,
+                        wait_minutes: score.wait_minutes,
+                    })
+                })
+            });
         Self {
             strategy: candidate.strategy.clone(),
             best,
@@ -499,6 +560,37 @@ impl SolverCandidateOutput {
             objective_score,
             elapsed_ms: u64::try_from(candidate.elapsed.as_millis()).unwrap_or(u64::MAX),
             metadata: SolverCandidateMetadataOutput::from(&candidate.metadata),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy)]
+struct ScheduleObjective {
+    start_time: TimeOfDay,
+    finish_time: TimeOfDay,
+    travel_minutes: u32,
+    wait_minutes: u32,
+}
+
+impl ScheduleObjective {
+    fn from_plan(plan: &RoutePlan) -> Option<Self> {
+        Some(Self {
+            start_time: plan.stops.first()?.departure_time?,
+            finish_time: plan.stops.last()?.departure_time?,
+            travel_minutes: plan.total_travel_minutes,
+            wait_minutes: plan.stops.iter().map(|stop| stop.wait_minutes).sum(),
+        })
+    }
+}
+
+impl ObjectiveScoreOutput {
+    fn from_schedule(objective: ScheduleObjective) -> Self {
+        Self {
+            latest_start: objective.start_time,
+            start_time: Some(objective.start_time),
+            finish_time: objective.finish_time,
+            travel_minutes: objective.travel_minutes,
+            wait_minutes: objective.wait_minutes,
         }
     }
 }
@@ -595,6 +687,8 @@ pub enum RequestValidationError {
     InvalidJobId(JobIdError),
     #[error("invalid country_code: {0}")]
     InvalidCountryCode(String),
+    #[error("start_time is required when start_policy is FIXED")]
+    FixedStartTimeRequired,
     #[error("debug.min_job_duration_ms must not exceed {maximum} milliseconds (actual {actual})")]
     DebugJobDurationTooLong { maximum: u64, actual: u64 },
     #[error(
@@ -698,6 +792,32 @@ mod tests {
         assert_eq!(problem.start_location().id(), "A");
         assert_eq!(problem.end_location().id(), "B");
         assert!(problem.intermediate_locations().is_empty());
+    }
+
+    #[test]
+    fn fixed_policy_requires_start_time_and_other_policies_default_to_midnight() {
+        let mut fixed = serde_json::to_value(request_with_locations(&["A", "B"])).unwrap();
+        fixed["start_policy"] = json!("FIXED");
+        fixed.as_object_mut().unwrap().remove("start_time");
+        let error = OptimizationProblem::try_from(
+            serde_json::from_value::<OptimizeRouteRequest>(fixed).unwrap(),
+        )
+        .unwrap_err();
+        assert!(matches!(
+            error,
+            RequestValidationError::FixedStartTimeRequired
+        ));
+
+        for policy in ["EARLIEST", "LATEST"] {
+            let mut value = serde_json::to_value(request_with_locations(&["A", "B"])).unwrap();
+            value["start_policy"] = json!(policy);
+            value.as_object_mut().unwrap().remove("start_time");
+            let problem = OptimizationProblem::try_from(
+                serde_json::from_value::<OptimizeRouteRequest>(value).unwrap(),
+            )
+            .unwrap();
+            assert_eq!(problem.start_time().to_string(), "00:00");
+        }
     }
 
     #[test]
@@ -826,6 +946,7 @@ mod tests {
                 }),
                 feasible: true,
                 objective_score: Some(SolutionMetrics {
+                    start_policy: StartPolicy::Latest,
                     start_time_slot: 60,
                     finish_time_slot: 61,
                     travel_minutes: 10,
@@ -854,12 +975,18 @@ mod tests {
                     ScheduledStop {
                         location_index: 0,
                         arrival_time: TimeOfDay::from_minutes(600).unwrap(),
+                        service_start_time: TimeOfDay::from_minutes(600).unwrap(),
                         departure_time: Some(TimeOfDay::from_minutes(600).unwrap()),
+                        wait_minutes: 0,
+                        stay_minutes: 0,
                     },
                     ScheduledStop {
                         location_index: 1,
                         arrival_time: TimeOfDay::from_minutes(610).unwrap(),
+                        service_start_time: TimeOfDay::from_minutes(610).unwrap(),
                         departure_time: None,
+                        wait_minutes: 0,
+                        stay_minutes: 0,
                     },
                 ],
                 total_travel_minutes: 10,

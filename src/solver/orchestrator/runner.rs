@@ -16,7 +16,7 @@ use crate::{
     solver::{
         DefaultObjectivePolicy, ObjectiveEvaluator, RouteSolver, SolverCandidate,
         SolverCandidateMetadata, SolverDiagnostics, SolverError, SolverInput, SolverRunResult,
-        SolverSolution, TIME_SLOT_MINUTES,
+        SolverSolution,
     },
 };
 
@@ -529,8 +529,7 @@ impl<E: ObjectiveEvaluator> RouteSolver for SolverOrchestrator<E> {
         solution: &SolverSolution,
     ) -> Result<TimeOfDay, SolverError> {
         let metrics = self.evaluator.evaluate(input, solution)?;
-        TimeOfDay::from_minutes(metrics.start_time_slot * TIME_SLOT_MINUTES as u16)
-            .map_err(|error| SolverError::Failed(error.to_string()))
+        crate::solver::selected_start_time(input.problem, &metrics)
     }
 }
 

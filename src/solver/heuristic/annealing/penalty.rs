@@ -160,6 +160,12 @@ pub fn evaluate_solution_with_penalties(
         .map(|metrics| metrics.score)
         .unwrap_or_else(|| objective.score(travel_minutes, wait_minutes));
     let start_reward_minutes = candidate_metrics
+        .filter(|_| {
+            matches!(
+                input.problem.start_policy(),
+                crate::domain::StartPolicy::Latest
+            )
+        })
         .map(|metrics| {
             u32::from(metrics.start_time_slot)
                 .saturating_sub(earliest_slot)

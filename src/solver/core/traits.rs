@@ -6,6 +6,7 @@ use crate::{
 
 use super::{SolverError, SolverRunResult};
 
+#[derive(Clone, Copy)]
 pub struct SolverInput<'a> {
     pub matrix: &'a TravelTimeMatrix,
     pub problem: &'a OptimizationProblem,

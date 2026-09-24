@@ -94,6 +94,7 @@ fn independently_simulate(
         slot = finish;
     }
     Some(SolutionMetrics {
+        start_policy: case.problem.start_policy(),
         start_time_slot: start,
         finish_time_slot: slot as u16,
         travel_minutes,

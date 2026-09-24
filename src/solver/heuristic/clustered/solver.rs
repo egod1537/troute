@@ -3,7 +3,7 @@ use crate::domain::TimeOfDay;
 use crate::solver::{
     evaluate_solution, minutes_to_slot_ceil, transition_time, DefaultObjectivePolicy,
     ExactBitDpSolver, FrontierPolicy, ObjectivePolicy, RouteSolver, SolutionMetrics, SolverError,
-    SolverInput, SolverSolution, TimeCostFrontierPolicy, TIME_SLOT_MINUTES,
+    SolverInput, SolverSolution, TimeCostFrontierPolicy,
 };
 
 use super::{
@@ -302,7 +302,6 @@ impl<
         solution: &SolverSolution,
     ) -> Result<TimeOfDay, SolverError> {
         let metrics = evaluate_solution(&self.exact.objective, input, solution)?;
-        TimeOfDay::from_minutes(metrics.start_time_slot * TIME_SLOT_MINUTES as u16)
-            .map_err(|error| SolverError::Failed(error.to_string()))
+        crate::solver::selected_start_time(input.problem, &metrics)
     }
 }
