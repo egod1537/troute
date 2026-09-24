@@ -59,6 +59,19 @@ pub struct OptimizeRouteResponse {
     pub total_travel_minutes: u32,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub solver_candidates: Option<Vec<SolverCandidateOutput>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub solver_diagnostics: Option<SolverDiagnosticsOutput>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
+pub struct SolverDiagnosticsOutput {
+    pub total_budget_ms: u64,
+    pub total_elapsed_ms: u64,
+    pub baseline_elapsed_ms: u64,
+    pub sa_elapsed_ms: u64,
+    pub sa_run_count: u64,
+    pub global_best_updates: u64,
+    pub termination_reason: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
@@ -173,6 +186,8 @@ pub struct SolverCandidateMetadataOutput {
     pub improved_moves: Option<u64>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub seed: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub improved_global_best: Option<bool>,
     pub timed_out: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub error: Option<String>,
@@ -376,6 +391,15 @@ impl OptimizeRouteResponse {
                     })
                     .collect()
             }),
+            solver_diagnostics: diagnostics.map(|diagnostics| SolverDiagnosticsOutput {
+                total_budget_ms: diagnostics.total_budget_ms,
+                total_elapsed_ms: diagnostics.total_elapsed_ms,
+                baseline_elapsed_ms: diagnostics.baseline_elapsed_ms,
+                sa_elapsed_ms: diagnostics.sa_elapsed_ms,
+                sa_run_count: diagnostics.sa_run_count,
+                global_best_updates: diagnostics.global_best_updates,
+                termination_reason: diagnostics.termination_reason.clone(),
+            }),
         }
     }
 }
@@ -508,6 +532,7 @@ impl From<&SolverCandidateMetadata> for SolverCandidateMetadataOutput {
             accepted_moves: metadata.accepted_moves,
             improved_moves: metadata.improved_moves,
             seed: metadata.seed,
+            improved_global_best: metadata.improved_global_best,
             timed_out: metadata.timed_out,
             error: metadata.error.clone(),
         }
@@ -763,6 +788,13 @@ mod tests {
                     ..SolverCandidateMetadata::default()
                 },
             }],
+            total_budget_ms: 30_000,
+            total_elapsed_ms: 7,
+            baseline_elapsed_ms: 7,
+            sa_elapsed_ms: 0,
+            sa_run_count: 0,
+            global_best_updates: 1,
+            termination_reason: "exact_optimum".to_owned(),
         };
         let response = OptimizeRouteResponse::from_plan(
             RoutePlan {

@@ -251,6 +251,7 @@ export function JobDetail({
       </Dialog>
       <SolverBenchmarkDialog
         candidates={job.route?.solver_candidates ?? []}
+        diagnostics={job.route?.solver_diagnostics}
         locationCount={job.request.locations.length}
         dark={dark}
         isOpen={benchmarkOpen}

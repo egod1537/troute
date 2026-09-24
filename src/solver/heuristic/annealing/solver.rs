@@ -24,6 +24,26 @@ pub trait InitialRouteStrategy: Send + Sync {
     ) -> Result<SolverSolution, SolverError>;
 }
 
+/// Uses an already evaluated route as the starting point for another anytime
+/// improvement chunk.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FixedInitialRoute {
+    pub solution: SolverSolution,
+}
+
+impl InitialRouteStrategy for FixedInitialRoute {
+    fn initial_solution(
+        &self,
+        input: SolverInput<'_>,
+        _rng: &mut dyn RngCore,
+    ) -> Result<SolverSolution, SolverError> {
+        if input.cancellation.is_cancelled() {
+            return Err(SolverError::Cancelled);
+        }
+        Ok(self.solution.clone())
+    }
+}
+
 impl<T: InitialRouteGenerator> InitialRouteStrategy for T {
     fn initial_solution(
         &self,
@@ -178,13 +198,15 @@ impl<I: InitialRouteStrategy, N: NeighborhoodStrategy, O: ObjectivePolicy>
         let mut accepted_worse_moves = 0_u64;
         let mut infeasible_candidates = 0_u64;
         let mut accepted_infeasible_moves = 0_u64;
+        let mut interrupted = false;
 
         while optional_limit_allows(config.iteration_limit, iterations)
             && optional_duration_allows(time_limit, started.elapsed())
             && temperature >= config.minimum_temperature
         {
             if input.cancellation.is_cancelled() {
-                return Err(SolverError::Cancelled);
+                interrupted = true;
+                break;
             }
             let Some((candidate, movement)) = self
                 .neighborhood_strategy
@@ -200,7 +222,7 @@ impl<I: InitialRouteStrategy, N: NeighborhoodStrategy, O: ObjectivePolicy>
             let candidate = SolverSolution {
                 visit_order: candidate,
             };
-            let candidate_evaluation = evaluate_solution_with_penalties(
+            let candidate_evaluation = match evaluate_solution_with_penalties(
                 &self.objective,
                 SolverInput {
                     matrix: input.matrix,
@@ -209,7 +231,14 @@ impl<I: InitialRouteStrategy, N: NeighborhoodStrategy, O: ObjectivePolicy>
                 },
                 &candidate,
                 config.penalties,
-            )?;
+            ) {
+                Ok(evaluation) => evaluation,
+                Err(SolverError::Cancelled) => {
+                    interrupted = true;
+                    break;
+                }
+                Err(error) => return Err(error),
+            };
             if !candidate_evaluation.feasible {
                 infeasible_candidates += 1;
             }
@@ -248,15 +277,19 @@ impl<I: InitialRouteStrategy, N: NeighborhoodStrategy, O: ObjectivePolicy>
         let Some((solution, metrics)) = best_feasible else {
             return Err(SolverError::NoFeasibleRoute);
         };
-        let verified = evaluate_solution(
-            &self.objective,
-            SolverInput {
-                matrix: input.matrix,
-                problem: input.problem,
-                cancellation: input.cancellation,
-            },
-            &solution,
-        )?;
+        let verified = if interrupted || input.cancellation.is_cancelled() {
+            metrics
+        } else {
+            evaluate_solution(
+                &self.objective,
+                SolverInput {
+                    matrix: input.matrix,
+                    problem: input.problem,
+                    cancellation: input.cancellation,
+                },
+                &solution,
+            )?
+        };
         debug_assert_eq!(verified, metrics);
         Ok(SimulatedAnnealingResult {
             initial_solution,

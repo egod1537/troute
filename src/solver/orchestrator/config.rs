@@ -7,6 +7,9 @@ use crate::solver::{
 
 const DEFAULT_MAX_CONCURRENCY: usize = 4;
 const DEFAULT_STRATEGY_TIMEOUT: Duration = Duration::from_secs(30);
+const DEFAULT_TOTAL_BUDGET: Duration = Duration::from_secs(30);
+const DEFAULT_SA_CHUNK: Duration = Duration::from_millis(250);
+const DEFAULT_DEADLINE_SAFETY_MARGIN: Duration = Duration::from_millis(50);
 
 /// Configuration shared by all strategies in one orchestration run.
 #[derive(Debug, Clone, PartialEq)]
@@ -15,6 +18,9 @@ pub struct SolverOrchestratorConfig {
     pub max_cluster_size: usize,
     pub max_concurrency: usize,
     pub strategy_timeout: Duration,
+    pub total_budget: Duration,
+    pub sa_chunk: Duration,
+    pub deadline_safety_margin: Duration,
     pub sa_config: SimulatedAnnealingConfig,
     pub sa_seeds: Vec<u64>,
     pub matching: MatchingStrategyConfig,
@@ -27,6 +33,9 @@ impl Default for SolverOrchestratorConfig {
             max_cluster_size: DEFAULT_MAX_EXACT_CLUSTER_SIZE,
             max_concurrency: DEFAULT_MAX_CONCURRENCY,
             strategy_timeout: DEFAULT_STRATEGY_TIMEOUT,
+            total_budget: DEFAULT_TOTAL_BUDGET,
+            sa_chunk: DEFAULT_SA_CHUNK,
+            deadline_safety_margin: DEFAULT_DEADLINE_SAFETY_MARGIN,
             sa_config: SimulatedAnnealingConfig::default(),
             sa_seeds: vec![42],
             matching: MatchingStrategyConfig::default(),
@@ -50,6 +59,21 @@ impl SolverOrchestratorConfig {
         if self.strategy_timeout.is_zero() {
             return Err(SolverError::InvalidConfiguration(
                 "orchestrator strategy_timeout must be positive".to_owned(),
+            ));
+        }
+        if self.total_budget.is_zero() {
+            return Err(SolverError::InvalidConfiguration(
+                "orchestrator total_budget must be positive".to_owned(),
+            ));
+        }
+        if self.sa_chunk.is_zero() {
+            return Err(SolverError::InvalidConfiguration(
+                "orchestrator sa_chunk must be positive".to_owned(),
+            ));
+        }
+        if self.deadline_safety_margin >= self.total_budget {
+            return Err(SolverError::InvalidConfiguration(
+                "orchestrator deadline_safety_margin must be below total_budget".to_owned(),
             ));
         }
         if self.sa_seeds.is_empty() {

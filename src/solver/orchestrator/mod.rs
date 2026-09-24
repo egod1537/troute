@@ -4,6 +4,7 @@ mod runner;
 mod selector;
 
 pub use config::*;
+pub use diagnostics::SaInitializer;
 pub use runner::*;
 pub use selector::*;
 
@@ -128,6 +129,9 @@ mod tests {
         SolverOrchestratorConfig {
             max_concurrency: 2,
             strategy_timeout: Duration::from_secs(2),
+            total_budget: Duration::from_millis(75),
+            sa_chunk: Duration::from_millis(10),
+            deadline_safety_margin: Duration::from_millis(2),
             sa_config: SimulatedAnnealingConfig {
                 iteration_limit: Some(50),
                 seed: Some(42),
@@ -357,7 +361,7 @@ mod tests {
     }
 
     #[test]
-    fn built_ins_include_exact_and_deterministic_sa_multistart() {
+    fn exact_success_terminates_before_baselines_and_sa() {
         let mut config = test_config();
         config.sa_seeds = vec![7, 11];
         let solver = SolverOrchestrator::new(config).unwrap();
@@ -367,145 +371,10 @@ mod tests {
         let first = solver
             .solve_detailed(input(&problem, &matrix, &cancellation))
             .unwrap();
-        let second = solver
-            .solve_detailed(input(&problem, &matrix, &cancellation))
-            .unwrap();
-
-        assert!(first
-            .candidates
-            .iter()
-            .any(|candidate| candidate.strategy == "exact_bit_dp"));
-        assert_eq!(
-            first
-                .candidates
-                .iter()
-                .filter(|candidate| candidate.strategy.starts_with("sa_"))
-                .count(),
-            8
-        );
-        let first_sa: Vec<_> = first
-            .candidates
-            .iter()
-            .filter(|candidate| candidate.strategy.starts_with("sa_"))
-            .map(|candidate| {
-                (
-                    candidate.strategy.clone(),
-                    candidate.route.clone(),
-                    candidate.objective_score,
-                )
-            })
-            .collect();
-        let second_sa: Vec<_> = second
-            .candidates
-            .iter()
-            .filter(|candidate| candidate.strategy.starts_with("sa_"))
-            .map(|candidate| {
-                (
-                    candidate.strategy.clone(),
-                    candidate.route.clone(),
-                    candidate.objective_score,
-                )
-            })
-            .collect();
-        assert_eq!(first_sa, second_sa);
-        for candidate in first
-            .candidates
-            .iter()
-            .filter(|candidate| candidate.strategy.starts_with("sa_"))
-        {
-            let metadata = &candidate.metadata;
-            assert!(metadata.initial_strategy.is_some());
-            assert_eq!(metadata.initial_route.as_ref().unwrap().len(), 5);
-            assert_eq!(
-                metadata.final_route.as_ref().unwrap(),
-                &candidate
-                    .route
-                    .as_ref()
-                    .unwrap()
-                    .visit_order
-                    .iter()
-                    .map(|&index| problem.locations()[index].id().to_owned())
-                    .collect::<Vec<_>>()
-            );
-            assert_eq!(
-                metadata.final_score,
-                candidate.objective_score.map(|score| score.score)
-            );
-            assert!(metadata.initial_temperature.is_some());
-            assert!(metadata.final_temperature.is_some());
-            assert_eq!(metadata.cooling_rate.as_deref(), Some("0.995"));
-            assert_eq!(
-                metadata.swap_move_count.unwrap()
-                    + metadata.relocate_move_count.unwrap()
-                    + metadata.two_opt_move_count.unwrap(),
-                metadata.iteration_count.unwrap()
-            );
-            assert_eq!(metadata.best_feasible, Some(true));
-        }
-
-        let mst = first
-            .candidates
-            .iter()
-            .find(|candidate| candidate.strategy == "mst_double_tree")
-            .unwrap();
-        assert_eq!(
-            mst.metadata.symmetric_distance_strategy.as_deref(),
-            Some("average_bidirectional")
-        );
-        assert_eq!(mst.metadata.mst_edge_count, Some(4));
-        assert_eq!(mst.metadata.mst_edges.as_ref().unwrap().len(), 4);
-        assert_eq!(mst.metadata.euler_tour.as_ref().unwrap().len(), 9);
-        assert_eq!(
-            mst.metadata.shortcut_route.as_ref().unwrap(),
-            &mst.route
-                .as_ref()
-                .unwrap()
-                .visit_order
-                .iter()
-                .map(|&index| problem.locations()[index].id().to_owned())
-                .collect::<Vec<_>>()
-        );
-
-        let christofides = first
-            .candidates
-            .iter()
-            .find(|candidate| candidate.strategy == "christofides")
-            .unwrap();
-        assert_eq!(christofides.metadata.mst_edge_count, Some(4));
-        assert_eq!(
-            christofides.metadata.matching_strategy.as_deref(),
-            Some("bit_dp")
-        );
-        assert_eq!(
-            christofides.metadata.odd_vertex_count,
-            christofides.metadata.odd_vertices.as_ref().map(Vec::len)
-        );
-        assert_eq!(
-            christofides.metadata.matching_pairs.as_ref().unwrap().len() * 2,
-            christofides.metadata.odd_vertex_count.unwrap()
-        );
-        assert_eq!(
-            christofides.metadata.shortcut_route.as_ref().unwrap(),
-            &christofides
-                .route
-                .as_ref()
-                .unwrap()
-                .visit_order
-                .iter()
-                .map(|&index| problem.locations()[index].id().to_owned())
-                .collect::<Vec<_>>()
-        );
-
-        let exact = first
-            .candidates
-            .iter()
-            .find(|candidate| candidate.strategy == "exact_bit_dp")
-            .unwrap()
-            .objective_score
-            .unwrap();
-        let selected = first.candidates[0].objective_score.unwrap();
-        assert!(!DefaultObjectivePolicy.compare(&exact, &selected).is_gt());
-        assert!(!DefaultObjectivePolicy.compare(&selected, &exact).is_gt());
+        assert_eq!(first.selected_strategy, "exact_bit_dp");
+        assert_eq!(first.candidates.len(), 1);
+        assert_eq!(first.sa_run_count, 0);
+        assert_eq!(first.termination_reason, "exact_optimum");
     }
 
     #[test]
@@ -523,5 +392,138 @@ mod tests {
             .candidates
             .iter()
             .any(|candidate| candidate.strategy == "exact_bit_dp"));
+    }
+
+    #[test]
+    fn large_problem_runs_all_initializers_then_warm_starts_until_deadline() {
+        let mut config = test_config();
+        config.exact_limit = 3;
+        config.total_budget = Duration::from_millis(60);
+        config.sa_chunk = Duration::from_millis(4);
+        config.deadline_safety_margin = Duration::from_millis(2);
+        config.sa_config.iteration_limit = Some(25);
+        let solver = SolverOrchestrator::new(config).unwrap();
+        let problem = problem(6);
+        let matrix = matrix(6);
+        let cancellation = CancellationToken::new();
+        let result = solver
+            .solve_detailed(input(&problem, &matrix, &cancellation))
+            .unwrap();
+
+        assert!(result.sa_run_count >= 5);
+        for prefix in [
+            "sa_greedy_run_1_",
+            "sa_mst_run_2_",
+            "sa_christofides_run_3_",
+            "sa_clustered_run_4_",
+            "sa_warm_start_run_5_",
+        ] {
+            assert!(result
+                .candidates
+                .iter()
+                .any(|candidate| candidate.strategy.starts_with(prefix)));
+        }
+        let warm = result
+            .candidates
+            .iter()
+            .find(|candidate| candidate.strategy.starts_with("sa_warm_start_run_5_"))
+            .unwrap();
+        let best_before_warm = result
+            .candidates
+            .iter()
+            .filter(|candidate| {
+                !candidate.strategy.starts_with("sa_")
+                    || (1..=4).any(|run| candidate.strategy.contains(&format!("_run_{run}_")))
+            })
+            .filter(|candidate| candidate.feasible)
+            .min_by(|left, right| {
+                DefaultObjectivePolicy.compare(
+                    left.objective_score.as_ref().unwrap(),
+                    right.objective_score.as_ref().unwrap(),
+                )
+            })
+            .unwrap();
+        let best_route_ids = best_before_warm
+            .route
+            .as_ref()
+            .unwrap()
+            .visit_order
+            .iter()
+            .map(|&index| problem.locations()[index].id().to_owned())
+            .collect::<Vec<_>>();
+        assert_eq!(warm.metadata.initial_route.as_ref(), Some(&best_route_ids));
+        assert_eq!(result.termination_reason, "deadline");
+        assert!(result
+            .candidates
+            .iter()
+            .any(|candidate| candidate.strategy == "greedy"));
+    }
+
+    #[test]
+    fn seed_sequence_is_deterministic_and_objective_never_selects_a_worse_result() {
+        let mut config = test_config();
+        config.exact_limit = 3;
+        config.total_budget = Duration::from_millis(45);
+        config.sa_chunk = Duration::from_millis(3);
+        config.deadline_safety_margin = Duration::from_millis(2);
+        config.sa_config.iteration_limit = Some(20);
+        config.sa_seeds = vec![1234];
+        let problem = problem(6);
+        let matrix = matrix(6);
+        let solve = || {
+            let cancellation = CancellationToken::new();
+            SolverOrchestrator::new(config.clone())
+                .unwrap()
+                .solve_detailed(input(&problem, &matrix, &cancellation))
+                .unwrap()
+        };
+        let first = solve();
+        let second = solve();
+        let first_four = |result: &OrchestratorSolveResult| {
+            (1..=4)
+                .map(|run| {
+                    result
+                        .candidates
+                        .iter()
+                        .find(|candidate| candidate.strategy.contains(&format!("_run_{run}_")))
+                        .and_then(|candidate| candidate.metadata.seed)
+                        .unwrap()
+                })
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(first_four(&first), first_four(&second));
+
+        let selected = first.candidates[0].objective_score.unwrap();
+        assert!(first
+            .candidates
+            .iter()
+            .filter_map(|candidate| candidate.objective_score)
+            .all(|metrics| !DefaultObjectivePolicy.compare(&selected, &metrics).is_gt()));
+    }
+
+    #[test]
+    fn cancellation_preserves_a_baseline_feasible_solution() {
+        let mut config = test_config();
+        config.exact_limit = 3;
+        config.total_budget = Duration::from_millis(500);
+        config.sa_chunk = Duration::from_millis(100);
+        config.deadline_safety_margin = Duration::from_millis(2);
+        config.sa_config.iteration_limit = None;
+        let solver = SolverOrchestrator::new(config).unwrap();
+        let problem = problem(8);
+        let matrix = matrix(8);
+        let cancellation = CancellationToken::new();
+        let canceller = cancellation.clone();
+        let handle = thread::spawn(move || {
+            thread::sleep(Duration::from_millis(40));
+            canceller.cancel();
+        });
+        let result = solver
+            .solve_detailed(input(&problem, &matrix, &cancellation))
+            .unwrap();
+        handle.join().unwrap();
+
+        assert_eq!(result.termination_reason, "cancellation");
+        assert!(result.candidates[0].feasible);
     }
 }

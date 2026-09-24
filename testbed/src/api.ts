@@ -34,6 +34,17 @@ export interface RouteResponse {
   }[];
   total_travel_minutes: number;
   solver_candidates?: SolverCandidate[];
+  solver_diagnostics?: SolverDiagnostics;
+}
+
+export interface SolverDiagnostics {
+  total_budget_ms: number;
+  total_elapsed_ms: number;
+  baseline_elapsed_ms: number;
+  sa_elapsed_ms: number;
+  sa_run_count: number;
+  global_best_updates: number;
+  termination_reason: string;
 }
 
 export interface SolverCandidate {
@@ -110,6 +121,7 @@ export interface SolverCandidate {
     accepted_moves?: number;
     improved_moves?: number;
     seed?: number;
+    improved_global_best?: boolean;
     timed_out: boolean;
     error?: string;
   };
@@ -349,6 +361,22 @@ export function parseRoute(response: ApiResponse): RouteResponse {
   ) {
     throw new ApiError(
       "경로 응답 형식 오류: solver_candidates 항목이 올바르지 않습니다.",
+      response,
+    );
+  }
+  if (
+    data.solver_diagnostics !== undefined &&
+    (!object(data.solver_diagnostics) ||
+      !unsigned(data.solver_diagnostics.total_budget_ms) ||
+      !unsigned(data.solver_diagnostics.total_elapsed_ms) ||
+      !unsigned(data.solver_diagnostics.baseline_elapsed_ms) ||
+      !unsigned(data.solver_diagnostics.sa_elapsed_ms) ||
+      !unsigned(data.solver_diagnostics.sa_run_count) ||
+      !unsigned(data.solver_diagnostics.global_best_updates) ||
+      !nonempty(data.solver_diagnostics.termination_reason))
+  ) {
+    throw new ApiError(
+      "경로 응답 형식 오류: solver_diagnostics 항목이 올바르지 않습니다.",
       response,
     );
   }

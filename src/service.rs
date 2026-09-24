@@ -244,7 +244,10 @@ pub enum OptimizationServiceError {
 
 #[cfg(test)]
 mod tests {
-    use std::sync::{Arc, Mutex};
+    use std::{
+        sync::{Arc, Mutex},
+        time::Duration,
+    };
 
     use super::*;
     use crate::{
@@ -392,6 +395,10 @@ mod tests {
     #[test]
     fn orchestrator_diagnostics_reach_the_api_response() {
         let solver = SolverOrchestrator::new(SolverOrchestratorConfig {
+            exact_limit: 1,
+            total_budget: Duration::from_millis(30),
+            sa_chunk: Duration::from_millis(5),
+            deadline_safety_margin: Duration::from_millis(1),
             sa_config: SimulatedAnnealingConfig {
                 iteration_limit: Some(1),
                 ..SimulatedAnnealingConfig::default()
@@ -403,16 +410,9 @@ mod tests {
         let response = service.optimize(valid_request()).unwrap();
         let candidates = response.solver_candidates.unwrap();
 
-        assert!(candidates
+        assert!(!candidates
             .iter()
             .any(|candidate| candidate.strategy == "exact_bit_dp"));
-        let exact = candidates
-            .iter()
-            .find(|candidate| candidate.strategy == "exact_bit_dp")
-            .unwrap();
-        assert!(exact.metadata.state_count.is_some());
-        assert!(exact.metadata.frontier_state_count.is_some());
-        assert!(exact.metadata.frontier_cell_count.is_some());
         let clustered = candidates
             .iter()
             .find(|candidate| candidate.strategy == "clustered")
@@ -474,7 +474,7 @@ mod tests {
         );
         let sa_greedy = candidates
             .iter()
-            .find(|candidate| candidate.strategy.starts_with("sa_greedy_seed_"))
+            .find(|candidate| candidate.strategy.starts_with("sa_greedy_"))
             .unwrap();
         assert_eq!(
             sa_greedy.metadata.initial_strategy.as_deref(),
@@ -496,7 +496,7 @@ mod tests {
         );
         assert!(candidates
             .iter()
-            .any(|candidate| candidate.strategy.starts_with("sa_greedy_seed_")));
+            .any(|candidate| candidate.strategy.starts_with("sa_greedy_")));
     }
 
     #[test]

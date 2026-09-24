@@ -133,16 +133,7 @@ fn orchestrator_selection_candidates_metrics_and_metadata_are_stable() {
     let first = solve();
     let second = solve();
 
-    let expected_strategies = [
-        "exact_bit_dp",
-        "clustered",
-        "mst_double_tree",
-        "christofides",
-        "sa_greedy_seed_42",
-        "sa_mst_seed_42",
-        "sa_christofides_seed_42",
-        "sa_clustered_seed_42",
-    ];
+    let expected_strategies = ["exact_bit_dp"];
     assert_eq!(first.selected_strategy, "exact_bit_dp");
     assert_eq!(first.solution.visit_order, vec![0, 3, 2, 1, 4]);
     assert_eq!(first.candidates.len(), expected_strategies.len());
@@ -212,7 +203,12 @@ fn caller_matrix_bypass_and_api_response_contract_are_stable() {
 
     assert_eq!(
         keys(&json),
-        BTreeSet::from(["route", "solver_candidates", "total_travel_minutes"])
+        BTreeSet::from([
+            "route",
+            "solver_candidates",
+            "solver_diagnostics",
+            "total_travel_minutes"
+        ])
     );
     assert_eq!(json["total_travel_minutes"], 40);
     assert_eq!(
@@ -234,7 +230,7 @@ fn caller_matrix_bypass_and_api_response_contract_are_stable() {
     );
 
     let candidates = json["solver_candidates"].as_array().unwrap();
-    assert_eq!(candidates.len(), 8);
+    assert_eq!(candidates.len(), 1);
     assert_eq!(
         candidates
             .iter()

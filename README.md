@@ -150,8 +150,11 @@ required, and missing or invalid configuration fails application startup.
 | `TROUTE_EXACT_LIMIT` | `15` | maximum location count at which the orchestrator also runs exact bit-DP; 1–15 |
 | `TROUTE_MAX_EXACT_CLUSTER_SIZE` | `10` | requested intermediate locations per exact cluster; 1–15 (internally capped at 13 to reserve entry/exit anchors) |
 | `SOLVER_MAX_CONCURRENCY` | `4` | maximum independently running solver strategies; 1–256 |
-| `SOLVER_STRATEGY_TIMEOUT_MS` | `30000` | positive cooperative timeout for each strategy |
-| `SOLVER_SA_SEEDS` | `42` | comma-separated deterministic seeds; every seed runs Greedy/MST/Christofides/Clustered SA starts |
+| `TROUTE_SOLVER_TOTAL_BUDGET_MS` | `30000` | global solver deadline shared by baseline and SA work |
+| `SOLVER_SA_CHUNK_MS` | `250` | maximum time allocated to one anytime SA run |
+| `SOLVER_DEADLINE_SAFETY_MS` | `50` | time reserved for schedule calculation and response assembly |
+| `SOLVER_STRATEGY_TIMEOUT_MS` | `30000` | per-strategy safety cap, bounded by the global deadline |
+| `SOLVER_SA_SEEDS` | `42` | deterministic SA base seed list, cycled by restart round before initializer-specific derivation |
 | `MATCHING_STRATEGY` | `auto` | Christofides benchmark/debug override: `auto`, `bitdp`, or `blossom` |
 | `MATCHING_BIT_DP_THRESHOLD` | `20` | auto-policy odd-vertex threshold, from 0 through 20 |
 
@@ -353,15 +356,15 @@ the supported integration is server-to-server.
 
 ### Solver and routing architecture
 
-The default server uses `SolverOrchestrator`. It independently runs clustered,
-MST Double-Tree, Christofides, and four SA starts (Greedy, MST, Christofides,
-and clustered) for every request. It also runs `ExactBitDpSolver` when the
-location count is at most `TROUTE_EXACT_LIMIT`. Additional values in
-`SOLVER_SA_SEEDS` multiply the four deterministic SA starts. A bounded worker
-queue enforces `SOLVER_MAX_CONCURRENCY`; per-strategy cooperative cancellation
-enforces `SOLVER_STRATEGY_TIMEOUT_MS`. A failure, panic, unsupported input,
-timeout, or infeasible route becomes that strategy's candidate error and does
-not stop the other strategies.
+The default server uses `SolverOrchestrator` with one global deadline. It first
+tries `ExactBitDpSolver` when applicable and returns immediately when exact
+finishes with a feasible optimum. Otherwise it builds clustered, Greedy, MST
+Double-Tree, and Christofides baselines, then spends the remaining budget on
+repeated time-bounded SA chunks. The first SA round uses Greedy, MST,
+Christofides, and clustered initial routes; later rounds interleave the current
+global best as a warm start with deterministic restarts. A bounded worker queue
+enforces `SOLVER_MAX_CONCURRENCY` for baselines, while the global deadline and
+`SOLVER_STRATEGY_TIMEOUT_MS` cooperatively cancel overlong work.
 
 Every route is converted to the same `SolverCandidate` and evaluated by the
 shared `ObjectiveEvaluator`. `CandidateSelector` ranks feasible routes first,
@@ -371,7 +374,9 @@ feasible candidate remains, the orchestrator returns `NoFeasibleRoute`.
 Successful API responses include `solver_candidates` with the selected `Best`
 candidate, every individual strategy result, elapsed time, objective fields,
 state/iteration counts, seed, timeout flag, and error. The Testbed renders the
-same comparison table rather than hiding losing or failed strategies.
+same comparison table rather than hiding losing or failed strategies. Optional
+`solver_diagnostics` reports the total/baseline/SA timing, SA run count, global
+best updates, and termination reason.
 
 The exact solver supports at most 15 locations, keeps the first and last
 request locations as fixed endpoints, and reorders every intermediate

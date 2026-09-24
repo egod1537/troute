@@ -1,12 +1,14 @@
 use std::sync::Arc;
 
+use rand::{rngs::StdRng, SeedableRng};
+
 use crate::solver::{
     AutoPerfectMatching, AverageSymmetricDistance, ChristofidesInitialRoute, ClusterDiagnostic,
     ClusteredInitialRoute, ClusteredSolver, ClusteredSolverConfig, DefaultObjectivePolicy,
-    ExactBitDpSolver, GreedyInitialRoute, InitialRouteStrategy, MatchingPairDiagnostic,
-    MixedNeighborhoodStrategy, MstDoubleTreeInitialRoute, MstEdgeDiagnostic,
-    SimulatedAnnealingConfig, SimulatedAnnealingSolver, SolverCandidateMetadata, SolverError,
-    SolverInput,
+    ExactBitDpSolver, FixedInitialRoute, GreedyInitialRoute, InitialRouteStrategy,
+    MatchingPairDiagnostic, MixedNeighborhoodStrategy, MstDoubleTreeInitialRoute,
+    MstEdgeDiagnostic, SimulatedAnnealingConfig, SimulatedAnnealingSolver, SolverCandidateMetadata,
+    SolverError, SolverInput, SolverSolution,
 };
 
 use super::{OrchestratedStrategy, SolverOrchestratorConfig, StrategyExecution};
@@ -16,13 +18,16 @@ pub(super) fn built_in_strategies(
 ) -> Result<Vec<Arc<dyn OrchestratedStrategy>>, SolverError> {
     let cluster_config = ClusteredSolverConfig::new(config.max_cluster_size)?;
     let matching = AutoPerfectMatching::new(config.matching)?;
-    let mut strategies: Vec<Arc<dyn OrchestratedStrategy>> = vec![
+    let strategies: Vec<Arc<dyn OrchestratedStrategy>> = vec![
         Arc::new(ExactStrategy {
             exact_limit: config.exact_limit,
             solver: ExactBitDpSolver::default(),
         }),
         Arc::new(ClusteredStrategy {
             solver: ClusteredSolver::with_config(cluster_config),
+        }),
+        Arc::new(GreedyStrategy {
+            generator: GreedyInitialRoute,
         }),
         Arc::new(MstDoubleTreeStrategy {
             generator: MstDoubleTreeInitialRoute::default(),
@@ -32,41 +37,101 @@ pub(super) fn built_in_strategies(
         }),
     ];
 
-    for &seed in &config.sa_seeds {
-        let sa_config = SimulatedAnnealingConfig {
-            seed: Some(seed),
-            ..config.sa_config
-        };
-        strategies.push(Arc::new(AnnealingStrategy::new(
-            format!("sa_greedy_seed_{seed}"),
-            "greedy",
+    Ok(strategies)
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SaInitializer {
+    Greedy,
+    MstDoubleTree,
+    Christofides,
+    Clustered,
+    GlobalBest,
+}
+
+impl SaInitializer {
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Greedy => "greedy",
+            Self::MstDoubleTree => "mst_double_tree",
+            Self::Christofides => "christofides",
+            Self::Clustered => "clustered",
+            Self::GlobalBest => "global_best",
+        }
+    }
+
+    pub fn strategy_key(self) -> &'static str {
+        match self {
+            Self::MstDoubleTree => "mst",
+            Self::GlobalBest => "warm_start",
+            _ => self.label(),
+        }
+    }
+}
+
+pub(super) fn annealing_strategy(
+    config: &SolverOrchestratorConfig,
+    initializer: SaInitializer,
+    warm_start: Option<SolverSolution>,
+    seed: u64,
+    run: u64,
+    time_limit_ms: u64,
+) -> Result<Arc<dyn OrchestratedStrategy>, SolverError> {
+    let sa_config = SimulatedAnnealingConfig {
+        seed: Some(seed),
+        time_limit_ms: Some(time_limit_ms.max(1)),
+        ..config.sa_config
+    };
+    let name = format!("sa_{}_run_{run}_seed_{seed}", initializer.strategy_key());
+    let strategy: Arc<dyn OrchestratedStrategy> = match initializer {
+        SaInitializer::Greedy => Arc::new(AnnealingStrategy::new(
+            name,
+            initializer.label(),
             seed,
             sa_config,
             GreedyInitialRoute,
-        )?));
-        strategies.push(Arc::new(AnnealingStrategy::new(
-            format!("sa_mst_seed_{seed}"),
-            "mst_double_tree",
+        )?),
+        SaInitializer::MstDoubleTree => Arc::new(AnnealingStrategy::new(
+            name,
+            initializer.label(),
             seed,
             sa_config,
             MstDoubleTreeInitialRoute::default(),
-        )?));
-        strategies.push(Arc::new(AnnealingStrategy::new(
-            format!("sa_christofides_seed_{seed}"),
-            "christofides",
+        )?),
+        SaInitializer::Christofides => Arc::new(AnnealingStrategy::new(
+            name,
+            initializer.label(),
             seed,
             sa_config,
-            ChristofidesInitialRoute::new(AverageSymmetricDistance, matching),
-        )?));
-        strategies.push(Arc::new(AnnealingStrategy::new(
-            format!("sa_clustered_seed_{seed}"),
-            "clustered",
+            ChristofidesInitialRoute::new(
+                AverageSymmetricDistance,
+                AutoPerfectMatching::new(config.matching)?,
+            ),
+        )?),
+        SaInitializer::Clustered => Arc::new(AnnealingStrategy::new(
+            name,
+            initializer.label(),
             seed,
             sa_config,
-            ClusteredInitialRoute::new(ClusteredSolver::with_config(cluster_config)),
-        )?));
-    }
-    Ok(strategies)
+            ClusteredInitialRoute::new(ClusteredSolver::with_config(ClusteredSolverConfig::new(
+                config.max_cluster_size,
+            )?)),
+        )?),
+        SaInitializer::GlobalBest => Arc::new(AnnealingStrategy::new(
+            name,
+            initializer.label(),
+            seed,
+            sa_config,
+            FixedInitialRoute {
+                solution: warm_start.ok_or_else(|| {
+                    SolverError::InvalidConfiguration(
+                        "global-best SA initializer requires a warm start".to_owned(),
+                    )
+                })?,
+            },
+        )?),
+    };
+    Ok(strategy)
 }
 
 struct ExactStrategy {
@@ -99,6 +164,24 @@ impl OrchestratedStrategy for ExactStrategy {
 
 struct ClusteredStrategy {
     solver: ClusteredSolver,
+}
+
+struct GreedyStrategy {
+    generator: GreedyInitialRoute,
+}
+
+impl OrchestratedStrategy for GreedyStrategy {
+    fn name(&self) -> &str {
+        "greedy"
+    }
+
+    fn execute(&self, input: SolverInput<'_>) -> Result<StrategyExecution, SolverError> {
+        let mut rng = StdRng::seed_from_u64(0);
+        Ok(StrategyExecution {
+            solution: self.generator.initial_solution(input, &mut rng)?,
+            metadata: SolverCandidateMetadata::default(),
+        })
+    }
 }
 
 impl OrchestratedStrategy for ClusteredStrategy {
@@ -336,6 +419,10 @@ impl<I> AnnealingStrategy<I> {
 impl<I: InitialRouteStrategy> OrchestratedStrategy for AnnealingStrategy<I> {
     fn name(&self) -> &str {
         &self.name
+    }
+
+    fn preserves_result_on_cancellation(&self) -> bool {
+        true
     }
 
     fn execute(&self, input: SolverInput<'_>) -> Result<StrategyExecution, SolverError> {

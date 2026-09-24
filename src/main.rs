@@ -90,12 +90,27 @@ async fn run() -> Result<(), Box<dyn Error>> {
         "SOLVER_STRATEGY_TIMEOUT_MS",
         u64::try_from(default_orchestrator.strategy_timeout.as_millis()).unwrap_or(u64::MAX),
     )?;
+    let total_budget_ms = read_positive_u64(
+        "TROUTE_SOLVER_TOTAL_BUDGET_MS",
+        u64::try_from(default_orchestrator.total_budget.as_millis()).unwrap_or(u64::MAX),
+    )?;
+    let sa_chunk_ms = read_positive_u64(
+        "SOLVER_SA_CHUNK_MS",
+        u64::try_from(default_orchestrator.sa_chunk.as_millis()).unwrap_or(u64::MAX),
+    )?;
+    let deadline_safety_ms = read_positive_u64(
+        "SOLVER_DEADLINE_SAFETY_MS",
+        u64::try_from(default_orchestrator.deadline_safety_margin.as_millis()).unwrap_or(u64::MAX),
+    )?;
     let sa_seeds = read_u64_list("SOLVER_SA_SEEDS", &default_orchestrator.sa_seeds)?;
     let solver = SolverOrchestrator::new(SolverOrchestratorConfig {
         exact_limit,
         max_cluster_size,
         max_concurrency,
         strategy_timeout: Duration::from_millis(strategy_timeout_ms),
+        total_budget: Duration::from_millis(total_budget_ms),
+        sa_chunk: Duration::from_millis(sa_chunk_ms),
+        deadline_safety_margin: Duration::from_millis(deadline_safety_ms),
         sa_seeds,
         matching: MatchingStrategyConfig::from_env()?,
         ..default_orchestrator
@@ -113,6 +128,9 @@ async fn run() -> Result<(), Box<dyn Error>> {
     println!("tcache pair concurrency: {pair_concurrency}");
     println!("tcache matrix total timeout: {matrix_total_timeout_ms} ms");
     println!("Per-strategy timeout: {strategy_timeout_ms} ms");
+    println!("Solver total budget: {total_budget_ms} ms");
+    println!("SA chunk: {sa_chunk_ms} ms");
+    println!("Deadline safety margin: {deadline_safety_ms} ms");
     let listener = TcpListener::bind(address).await?;
     let optimizer = RouteOptimizationService::new(routing_provider, solver);
     let app = http::router_with_storage(optimizer, Some(observation), Some(job_store));

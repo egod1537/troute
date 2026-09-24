@@ -60,6 +60,7 @@ pub struct SolverCandidateMetadata {
     pub accepted_moves: Option<u64>,
     pub improved_moves: Option<u64>,
     pub seed: Option<u64>,
+    pub improved_global_best: Option<bool>,
     pub timed_out: bool,
     pub error: Option<String>,
 }
@@ -91,10 +92,17 @@ pub struct MatchingPairDiagnostic {
     pub distance: u64,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct SolverDiagnostics {
     pub selected_strategy: String,
     pub candidates: Vec<SolverCandidate>,
+    pub total_budget_ms: u64,
+    pub total_elapsed_ms: u64,
+    pub baseline_elapsed_ms: u64,
+    pub sa_elapsed_ms: u64,
+    pub sa_run_count: u64,
+    pub global_best_updates: u64,
+    pub termination_reason: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

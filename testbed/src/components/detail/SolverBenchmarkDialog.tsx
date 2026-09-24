@@ -10,10 +10,11 @@ import {
   NonIdealState,
   Tag,
 } from "@blueprintjs/core";
-import type { SolverCandidate } from "../../api";
+import type { SolverCandidate, SolverDiagnostics } from "../../api";
 
 interface SolverBenchmarkDialogProps {
   candidates: SolverCandidate[];
+  diagnostics?: SolverDiagnostics;
   locationCount: number;
   dark: boolean;
   isOpen: boolean;
@@ -24,12 +25,14 @@ type BenchmarkView =
   | "overview"
   | "exact"
   | "clustered"
+  | "greedy"
   | "mst"
   | "christofides"
   | "sa-greedy"
   | "sa-mst"
   | "sa-christofides"
-  | "sa-clustered";
+  | "sa-clustered"
+  | "sa-warm-start";
 
 interface StrategyNavigationItem {
   id: BenchmarkView;
@@ -40,12 +43,14 @@ interface StrategyNavigationItem {
 const STRATEGY_NAVIGATION: StrategyNavigationItem[] = [
   { id: "exact", label: "Exact Bit DP", matches: (value) => value === "exact_bit_dp" },
   { id: "clustered", label: "Clustered", matches: (value) => value === "clustered" },
+  { id: "greedy", label: "Greedy", matches: (value) => value === "greedy" },
   { id: "mst", label: "MST Double-Tree", matches: (value) => value === "mst_double_tree" },
   { id: "christofides", label: "Christofides", matches: (value) => value === "christofides" },
   { id: "sa-greedy", label: "SA (Greedy)", matches: (value) => value.startsWith("sa_greedy_") },
   { id: "sa-mst", label: "SA (MST)", matches: (value) => value.startsWith("sa_mst_") },
   { id: "sa-christofides", label: "SA (Christofides)", matches: (value) => value.startsWith("sa_christofides_") },
   { id: "sa-clustered", label: "SA (Clustered)", matches: (value) => value.startsWith("sa_clustered_") },
+  { id: "sa-warm-start", label: "SA (Warm Start)", matches: (value) => value.startsWith("sa_warm_start_") },
 ];
 
 function scoreValue(candidate: SolverCandidate, field: "latest_start" | "finish_time") {
@@ -55,6 +60,11 @@ function scoreValue(candidate: SolverCandidate, field: "latest_start" | "finish_
 function minuteValue(candidate: SolverCandidate, field: "travel_minutes" | "wait_minutes") {
   const value = candidate.objective_score?.[field];
   return value === undefined ? "—" : `${value}분`;
+}
+
+function saRunNumber(strategy: string) {
+  const match = strategy.match(/_run_(\d+)_/);
+  return match ? Number(match[1]) : Number.MAX_SAFE_INTEGER;
 }
 
 function CandidateFacts({ candidate }: { candidate: SolverCandidate }) {
@@ -332,7 +342,12 @@ function ChristofidesDetail({ candidates }: { candidates: SolverCandidate[] }) {
 }
 
 function SimulatedAnnealingDetail({ item, candidates }: { item: StrategyNavigationItem; candidates: SolverCandidate[] }) {
-  const matches = candidates.filter((candidate) => item.matches(candidate.strategy));
+  const matches = candidates
+    .filter((candidate) => item.matches(candidate.strategy))
+    .sort((left, right) => saRunNumber(left.strategy) - saRunNumber(right.strategy));
+  const timeline = candidates
+    .filter((candidate) => candidate.strategy.startsWith("sa_"))
+    .sort((left, right) => saRunNumber(left.strategy) - saRunNumber(right.strategy));
   const candidate = matches.find((value) => value.best) ?? matches[0];
   const [rawOpen, setRawOpen] = useState(false);
   useEffect(() => setRawOpen(false), [item.id, candidate?.strategy]);
@@ -395,6 +410,13 @@ function SimulatedAnnealingDetail({ item, candidates }: { item: StrategyNavigati
         </div>
       </section>
       {moves.length > 0 && <section><h3>Move Statistics</h3>{metricGrid(moves)}</section>}
+      <section>
+        <h3>Run Timeline</h3>
+        <div className="benchmark-table-scroll"><table className={`${Classes.HTML_TABLE} ${Classes.HTML_TABLE_BORDERED} ${Classes.HTML_TABLE_STRIPED}`} aria-label={`${item.label} Run Timeline`}>
+          <thead><tr><th>Run</th><th>Initializer</th><th>Seed</th><th>Time</th><th>Initial</th><th>Final</th><th>Best Updated</th></tr></thead>
+          <tbody>{timeline.map((run) => <tr key={run.strategy}><td>{saRunNumber(run.strategy)}</td><td>{run.metadata.initial_strategy ?? "—"}</td><td>{run.metadata.seed?.toLocaleString() ?? "—"}</td><td>{run.elapsed_ms} ms</td><td>{run.metadata.initial_score?.toLocaleString() ?? "—"}</td><td>{run.metadata.final_score?.toLocaleString() ?? "—"}</td><td>{run.metadata.improved_global_best ? "Yes" : "No"}</td></tr>)}</tbody>
+        </table></div>
+      </section>
       <section><h3>Feasibility</h3><Callout intent={bestFeasible ? Intent.SUCCESS : Intent.DANGER} icon={bestFeasible ? "tick-circle" : "error"} title={`Best Feasible Solution: ${bestFeasible ? "Yes" : "No"}`}>{bestFeasible ? "최종 결과는 탐색 중 발견한 best feasible solution입니다." : "탐색에서 feasible solution을 찾지 못했습니다."}</Callout></section>
       <section className="raw-diagnostics">
         <Button alignText="left" fill icon="code" endIcon={rawOpen ? "chevron-up" : "chevron-down"} variant="minimal" onClick={() => setRawOpen((open) => !open)}>Raw Diagnostics</Button>
@@ -404,7 +426,7 @@ function SimulatedAnnealingDetail({ item, candidates }: { item: StrategyNavigati
   );
 }
 
-function Overview({ candidates }: { candidates: SolverCandidate[] }) {
+function Overview({ candidates, diagnostics }: { candidates: SolverCandidate[]; diagnostics?: SolverDiagnostics }) {
   const maximumRuntime = Math.max(1, ...candidates.map((candidate) => candidate.elapsed_ms));
   return (
     <div className="benchmark-overview">
@@ -412,6 +434,15 @@ function Overview({ candidates }: { candidates: SolverCandidate[] }) {
         <h2 className={Classes.HEADING}>Overview</h2>
         <p className={Classes.TEXT_MUTED}>동일 Job에서 실행된 solver candidate를 비교합니다.</p>
       </div>
+      {diagnostics && <dl className="exact-metrics-grid">
+        <div><dt>Total Budget</dt><dd>{diagnostics.total_budget_ms.toLocaleString()} ms</dd></div>
+        <div><dt>Total Elapsed</dt><dd>{diagnostics.total_elapsed_ms.toLocaleString()} ms</dd></div>
+        <div><dt>Baseline Time</dt><dd>{diagnostics.baseline_elapsed_ms.toLocaleString()} ms</dd></div>
+        <div><dt>SA Time</dt><dd>{diagnostics.sa_elapsed_ms.toLocaleString()} ms</dd></div>
+        <div><dt>SA Runs</dt><dd>{diagnostics.sa_run_count.toLocaleString()}</dd></div>
+        <div><dt>Global Best Updates</dt><dd>{diagnostics.global_best_updates.toLocaleString()}</dd></div>
+        <div><dt>Termination Reason</dt><dd>{diagnostics.termination_reason}</dd></div>
+      </dl>}
       <div className="benchmark-table-scroll">
         <table className={`${Classes.HTML_TABLE} ${Classes.HTML_TABLE_BORDERED} ${Classes.HTML_TABLE_STRIPED}`}>
           <thead><tr><th>Strategy</th><th>Feasible</th><th>Latest Start</th><th>Finish</th><th>Travel</th><th>Wait</th><th>Runtime</th></tr></thead>
@@ -476,7 +507,7 @@ function StrategyDetail({ item, candidates }: { item: StrategyNavigationItem; ca
   );
 }
 
-export function SolverBenchmarkDialog({ candidates, locationCount, dark, isOpen, onClose }: SolverBenchmarkDialogProps) {
+export function SolverBenchmarkDialog({ candidates, diagnostics, locationCount, dark, isOpen, onClose }: SolverBenchmarkDialogProps) {
   const [selectedView, setSelectedView] = useState<BenchmarkView>("overview");
   useEffect(() => { if (isOpen) setSelectedView("overview"); }, [isOpen]);
   const selectedItem = useMemo(() => STRATEGY_NAVIGATION.find((item) => item.id === selectedView), [selectedView]);
@@ -495,7 +526,7 @@ export function SolverBenchmarkDialog({ candidates, locationCount, dark, isOpen,
           </nav>
         </aside>
         <main className="benchmark-content">
-          {selectedView === "overview" ? <Overview candidates={candidates} /> : selectedView === "exact" ? <ExactBitDpDetail candidates={candidates} locationCount={locationCount} /> : selectedView === "clustered" ? <ClusteredDetail candidates={candidates} /> : selectedView === "mst" ? <MstDoubleTreeDetail candidates={candidates} /> : selectedView === "christofides" ? <ChristofidesDetail candidates={candidates} /> : selectedView.startsWith("sa-") && selectedItem ? <SimulatedAnnealingDetail item={selectedItem} candidates={candidates} /> : selectedItem ? <StrategyDetail item={selectedItem} candidates={candidates} /> : null}
+          {selectedView === "overview" ? <Overview candidates={candidates} diagnostics={diagnostics} /> : selectedView === "exact" ? <ExactBitDpDetail candidates={candidates} locationCount={locationCount} /> : selectedView === "clustered" ? <ClusteredDetail candidates={candidates} /> : selectedView === "mst" ? <MstDoubleTreeDetail candidates={candidates} /> : selectedView === "christofides" ? <ChristofidesDetail candidates={candidates} /> : selectedView.startsWith("sa-") && selectedItem ? <SimulatedAnnealingDetail item={selectedItem} candidates={candidates} /> : selectedItem ? <StrategyDetail item={selectedItem} candidates={candidates} /> : null}
         </main>
       </DialogBody>
     </Dialog>
