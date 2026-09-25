@@ -132,11 +132,14 @@ fn v0_pipeline_returns_ids_schedule_and_travel_total() {
 
     assert_eq!(json["total_travel_minutes"], 80);
     assert_eq!(json["route"][0]["location_id"], "A");
-    assert_eq!(json["route"][0]["departure_time"], "09:00");
+    assert_eq!(json["route"][0]["arrival_time"], "09:00");
+    assert_eq!(json["route"][0]["service_start_time"], "09:00");
+    assert_eq!(json["route"][0]["stay_minutes"], 60);
+    assert_eq!(json["route"][0]["departure_time"], "10:00");
     assert_eq!(json["route"][1]["location_id"], "C");
-    assert_eq!(json["route"][1]["arrival_time"], "09:25");
+    assert_eq!(json["route"][1]["arrival_time"], "10:25");
     assert_eq!(json["route"][1]["service_start_time"], "11:00");
-    assert_eq!(json["route"][1]["wait_minutes"], 95);
+    assert_eq!(json["route"][1]["wait_minutes"], 35);
     assert_eq!(json["route"][1]["stay_minutes"], 40);
     assert_eq!(json["route"][1]["departure_time"], "11:40");
     assert_eq!(json["route"][2]["location_id"], "B");

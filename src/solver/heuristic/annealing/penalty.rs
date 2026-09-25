@@ -103,10 +103,19 @@ pub fn evaluate_solution_with_penalties(
     }
 
     let earliest_slot = minutes_to_slot_ceil(u32::from(input.problem.start_time().minutes()));
-    let mut time_slot = earliest_slot;
+    let start_location = input.problem.start_location();
+    let start_service = earliest_slot.max(minutes_to_slot_ceil(u32::from(
+        start_location.time_window().open().minutes(),
+    )));
+    let mut time_slot =
+        start_service.saturating_add(minutes_to_slot_ceil(start_location.stay_minutes()));
     let mut travel_minutes = 0_u32;
-    let mut wait_minutes = 0_u32;
-    let mut late_minutes = 0_u32;
+    let mut wait_minutes = (start_service - earliest_slot).saturating_mul(TIME_SLOT_MINUTES);
+    let start_close_slot =
+        u32::from(start_location.time_window().close().minutes()) / TIME_SLOT_MINUTES;
+    let mut late_minutes = time_slot
+        .saturating_sub(start_close_slot)
+        .saturating_mul(TIME_SLOT_MINUTES);
     let mut day_overflow_minutes = 0_u32;
     for edge in solution.visit_order.windows(2) {
         let (from, to) = (edge[0], edge[1]);

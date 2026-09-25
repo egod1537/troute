@@ -1,9 +1,9 @@
 use crate::domain::TimeOfDay;
 
 use crate::solver::{
-    evaluate_solution, minutes_to_slot_ceil, transition_time, DefaultObjectivePolicy,
-    ExactBitDpSolver, FrontierPolicy, ObjectivePolicy, RouteSolver, SolutionMetrics, SolverError,
-    SolverInput, SolverSolution, TimeCostFrontierPolicy,
+    evaluate_solution, initial_service, minutes_to_slot_ceil, transition_time,
+    DefaultObjectivePolicy, ExactBitDpSolver, FrontierPolicy, ObjectivePolicy, RouteSolver,
+    SolutionMetrics, SolverError, SolverInput, SolverSolution, TimeCostFrontierPolicy,
 };
 
 use super::{
@@ -163,8 +163,11 @@ impl<
         let mut route = vec![input.problem.start_location_index()];
         let mut boundaries = Vec::new();
         let mut current_location = input.problem.start_location_index();
-        let mut current_slot =
+        let requested_start =
             minutes_to_slot_ceil(u32::from(input.problem.start_time().minutes())) as u16;
+        let mut current_slot = initial_service(&input, requested_start)
+            .ok_or(SolverError::NoFeasibleRoute)?
+            .departure_slot;
         let mut exact_generated_states = 0;
         let mut exact_frontier_states = 0;
         let mut cluster_details = Vec::with_capacity(clusters.len());

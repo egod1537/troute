@@ -6,4 +6,6 @@ mod transition;
 pub use bit_dp::*;
 pub use frontier::*;
 pub use stats::*;
-pub(super) use transition::{minutes_to_slot_ceil, slots_per_day, transition_time};
+pub(super) use transition::{
+    initial_service, minutes_to_slot_ceil, slots_per_day, transition_time,
+};

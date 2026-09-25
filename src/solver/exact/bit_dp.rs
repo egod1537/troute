@@ -7,7 +7,7 @@ use super::super::{
 use super::{
     frontier::{FrontierPolicy, ParetoState, TimeCostFrontierPolicy},
     stats::{ExactSolveResult, ExactSolverStats},
-    transition::{minutes_to_slot_ceil, slots_per_day, transition_time},
+    transition::{initial_service, minutes_to_slot_ceil, slots_per_day, transition_time},
 };
 
 /// Exact bitmask-DP solver for a single day and at most 15 locations.
@@ -104,6 +104,9 @@ impl<O: ObjectivePolicy, F: FrontierPolicy> ExactBitDpSolver<O, F> {
         input: &SolverInput<'_>,
         start_time_slot: u16,
     ) -> Result<Option<ExactSolveResult>, SolverError> {
+        let Some(initial) = initial_service(input, start_time_slot) else {
+            return Ok(None);
+        };
         let location_count = input.problem.locations().len();
         let state_count = 1_usize << location_count;
         let full_mask = state_count - 1;
@@ -111,11 +114,11 @@ impl<O: ObjectivePolicy, F: FrontierPolicy> ExactBitDpSolver<O, F> {
         let mut frontiers = vec![Vec::<usize>::new(); state_count * location_count];
         let mut arena = Vec::new();
         arena.push(ParetoState {
-            time_slot: start_time_slot,
+            time_slot: initial.departure_slot,
             travel_minutes: 0,
-            wait_minutes: 0,
-            score: self.objective.score(0, 0),
-            frontier_cost: self.objective.frontier_cost(0, 0),
+            wait_minutes: initial.wait_minutes,
+            score: self.objective.score(0, initial.wait_minutes),
+            frontier_cost: self.objective.frontier_cost(0, initial.wait_minutes),
             predecessor: None,
             location: input.problem.start_location_index(),
         });
@@ -210,6 +213,9 @@ impl<O: ObjectivePolicy, F: FrontierPolicy> ExactBitDpSolver<O, F> {
         input: &SolverInput<'_>,
         start_time_slot: u16,
     ) -> Result<bool, SolverError> {
+        let Some(initial) = initial_service(input, start_time_slot) else {
+            return Ok(false);
+        };
         let location_count = input.problem.locations().len();
         if location_count == 1 {
             return Ok(true);
@@ -218,7 +224,7 @@ impl<O: ObjectivePolicy, F: FrontierPolicy> ExactBitDpSolver<O, F> {
         let full_mask = state_count - 1;
         let end = input.problem.end_location_index();
         let mut earliest = vec![None::<u16>; state_count * location_count];
-        earliest[index(1, 0, location_count)] = Some(start_time_slot);
+        earliest[index(1, 0, location_count)] = Some(initial.departure_slot);
 
         for mask in 1..=full_mask {
             if input.cancellation.is_cancelled() {
@@ -503,6 +509,24 @@ mod tests {
             )
             .unwrap();
         assert_eq!(selected.to_string(), "11:30");
+    }
+
+    #[test]
+    fn latest_visit_start_moves_back_by_the_start_stay() {
+        let without_start_stay = problem(&[("00:00", "23:50", 0), ("00:00", "11:00", 0)], "00:00");
+        let with_start_stay = problem(&[("00:00", "23:50", 60), ("00:00", "11:00", 0)], "00:00");
+        let rows = vec![vec![0, 30], vec![30, 0]];
+
+        let without = detailed(&without_start_stay, rows.clone()).unwrap();
+        let with = detailed(&with_start_stay, rows).unwrap();
+
+        assert_eq!(without.metrics.start_time_slot, 63); // 10:30
+        assert_eq!(with.metrics.start_time_slot, 57); // 09:30
+        assert_eq!(
+            without.metrics.start_time_slot - with.metrics.start_time_slot,
+            6
+        );
+        assert_eq!(with.metrics.finish_time_slot, 66); // 11:00
     }
 
     #[test]

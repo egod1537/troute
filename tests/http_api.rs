@@ -1431,11 +1431,11 @@ async fn persistent_job_failure_writes_error_and_terminal_state() {
     );
     assert_eq!(
         detail.body["error"]["failure_detail"]["arrival_time"],
-        "09:15"
+        "10:15"
     );
     assert_eq!(
         detail.body["error"]["failure_detail"]["required_departure"],
-        "09:45"
+        "10:45"
     );
     assert_eq!(
         detail.body["error"]["failure_detail"]["close_time"],
@@ -1446,7 +1446,7 @@ async fn persistent_job_failure_writes_error_and_terminal_state() {
     assert_eq!(suggestions[0]["type"], "REDUCE_STAY_TIME");
     assert_eq!(suggestions[1]["type"], "MOVE_LOCATION_EARLIER");
     assert_eq!(suggestions[1]["location_id"], "place-2");
-    assert_eq!(suggestions[1]["current_value"], "09:15");
+    assert_eq!(suggestions[1]["current_value"], "10:15");
     assert_eq!(suggestions[1]["suggested_value"], "08:40");
     assert!(suggestions.iter().any(|suggestion| {
         suggestion["type"] == "REMOVE_LOCATION"
@@ -1859,15 +1859,19 @@ async fn valid_optimize_request_uses_the_service_pipeline() {
     assert_eq!(response.body["total_travel_minutes"], 30);
     assert_eq!(response.body["route"][0]["location_id"], "place-1");
     assert_eq!(response.body["route"][0]["arrival_time"], "09:00");
+    assert_eq!(response.body["route"][0]["service_start_time"], "09:00");
+    assert_eq!(response.body["route"][0]["stay_minutes"], 60);
+    assert_eq!(response.body["route"][0]["departure_time"], "10:00");
+    assert_eq!(response.body["selected_start_time"], "09:00");
     assert_eq!(response.body["route"][1]["location_id"], "place-2");
-    assert_eq!(response.body["route"][1]["arrival_time"], "09:15");
-    assert_eq!(response.body["route"][1]["service_start_time"], "09:15");
+    assert_eq!(response.body["route"][1]["arrival_time"], "10:15");
+    assert_eq!(response.body["route"][1]["service_start_time"], "10:15");
     assert_eq!(response.body["route"][1]["wait_minutes"], 0);
     assert_eq!(response.body["route"][1]["stay_minutes"], 30);
-    assert_eq!(response.body["route"][1]["departure_time"], "09:45");
+    assert_eq!(response.body["route"][1]["departure_time"], "10:45");
     assert_eq!(response.body["route"][2]["location_id"], "place-3");
-    assert_eq!(response.body["route"][2]["arrival_time"], "10:00");
-    assert_eq!(response.body["route"][2]["departure_time"], "10:00");
+    assert_eq!(response.body["route"][2]["arrival_time"], "11:00");
+    assert_eq!(response.body["route"][2]["departure_time"], "11:00");
 }
 
 #[tokio::test]
@@ -2017,6 +2021,31 @@ async fn infeasible_schedule_has_the_documented_error() {
         response,
         StatusCode::UNPROCESSABLE_ENTITY,
         "TIME_WINDOW_VIOLATION",
+    );
+}
+
+#[tokio::test]
+async fn infeasible_start_service_reports_the_start_time_window() {
+    let mut request = valid_request();
+    request["start_policy"] = json!("FIXED");
+    request["locations"][0]["close_time"] = json!("09:30");
+    let response = send(
+        Method::POST,
+        "/optimize",
+        Some("application/json"),
+        request.to_string(),
+    )
+    .await;
+
+    assert_eq!(response.status, StatusCode::UNPROCESSABLE_ENTITY);
+    assert_eq!(response.body["error"]["code"], "TIME_WINDOW_VIOLATION");
+    assert_eq!(
+        response.body["error"]["failure_detail"]["location_id"],
+        "place-1"
+    );
+    assert_eq!(
+        response.body["error"]["failure_detail"]["required_departure"],
+        "10:00"
     );
 }
 

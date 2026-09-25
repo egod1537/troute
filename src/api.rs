@@ -444,7 +444,7 @@ impl OptimizeRouteResponse {
             })
             .collect();
 
-        let selected_start_time = route.first().and_then(|stop| stop.departure_time);
+        let selected_start_time = route.first().map(|stop| stop.arrival_time);
 
         Self {
             route,
@@ -575,7 +575,7 @@ struct ScheduleObjective {
 impl ScheduleObjective {
     fn from_plan(plan: &RoutePlan) -> Option<Self> {
         Some(Self {
-            start_time: plan.stops.first()?.departure_time?,
+            start_time: plan.stops.first()?.arrival_time,
             finish_time: plan.stops.last()?.departure_time?,
             travel_minutes: plan.total_travel_minutes,
             wait_minutes: plan.stops.iter().map(|stop| stop.wait_minutes).sum(),

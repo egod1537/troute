@@ -312,7 +312,7 @@ pub(crate) fn no_feasible_suggestions(request: &OptimizeRouteRequest) -> Vec<Fai
 
     // A stay longer than its entire opening window is locally impossible,
     // independent of visit order or travel times.
-    for location in request.locations.iter().skip(1) {
+    for location in &request.locations {
         let window_minutes = u32::from(
             location
                 .close_time
@@ -415,6 +415,7 @@ pub(crate) fn schedule_suggestions(error: &ScheduleError) -> Vec<FailureSuggesti
         close_time,
         selected_start_time,
         total_wait_minutes_before_violation,
+        is_start,
         is_destination,
         current_stay_minutes,
         suggested_max_stay_minutes,
@@ -452,10 +453,9 @@ pub(crate) fn schedule_suggestions(error: &ScheduleError) -> Vec<FailureSuggesti
         .and_then(|minutes| u16::try_from(minutes).ok())
         .and_then(|minutes| TimeOfDay::from_minutes(minutes).ok());
     if let Some(latest_service_start) = latest_service_start {
-        // Both endpoints are fixed by contract, so a destination cannot be
-        // reordered. Its actionable route-level remediation is an earlier
-        // start (or a policy change), not MOVE_LOCATION_EARLIER.
-        if !*is_destination && service_start_time > &latest_service_start {
+        // Both endpoints are fixed by contract, so neither the start nor the
+        // destination can be reordered.
+        if !*is_start && !*is_destination && service_start_time > &latest_service_start {
             let mut suggestion = FailureSuggestion::new(
                 FailureSuggestionType::MoveLocationEarlier,
                 SuggestionConfidence::Exact,
@@ -654,13 +654,9 @@ pub(crate) fn service_suggestions(
 }
 
 fn minimum_duration_lower_bound(request: &OptimizeRouteRequest) -> u32 {
-    let stay_minutes = request
-        .locations
-        .iter()
-        .skip(1)
-        .fold(0_u32, |total, location| {
-            total.saturating_add(location.stay_minutes)
-        });
+    let stay_minutes = request.locations.iter().fold(0_u32, |total, location| {
+        total.saturating_add(location.stay_minutes)
+    });
     let Some(matrix) = request.travel_time_matrix.as_ref() else {
         return stay_minutes;
     };
@@ -778,6 +774,7 @@ mod tests {
             close_time: TimeOfDay::from_minutes(9 * 60 + 10).unwrap(),
             selected_start_time: TimeOfDay::from_minutes(9 * 60).unwrap(),
             total_wait_minutes_before_violation: 0,
+            is_start: false,
             is_destination: true,
             current_stay_minutes: 30,
             suggested_max_stay_minutes: 0,
@@ -815,6 +812,7 @@ mod tests {
             close_time: TimeOfDay::from_minutes(9 * 60 + 20).unwrap(),
             selected_start_time: TimeOfDay::from_minutes(8 * 60 + 30).unwrap(),
             total_wait_minutes_before_violation: 0,
+            is_start: false,
             is_destination: false,
             current_stay_minutes: 30,
             suggested_max_stay_minutes: 20,
@@ -836,6 +834,31 @@ mod tests {
         assert!(!suggestions
             .iter()
             .any(|item| item.suggestion_type == FailureSuggestionType::StartEarlier));
+    }
+
+    #[test]
+    fn start_window_violation_suggests_stay_reduction_not_reordering() {
+        let error = ScheduleError::TimeWindowViolation {
+            location_id: "start".to_owned(),
+            arrival_time: TimeOfDay::from_minutes(9 * 60).unwrap(),
+            service_start_time: TimeOfDay::from_minutes(9 * 60).unwrap(),
+            required_departure: TimeOfDay::from_minutes(10 * 60).unwrap(),
+            close_time: TimeOfDay::from_minutes(9 * 60 + 30).unwrap(),
+            selected_start_time: TimeOfDay::from_minutes(9 * 60).unwrap(),
+            total_wait_minutes_before_violation: 0,
+            is_start: true,
+            is_destination: false,
+            current_stay_minutes: 60,
+            suggested_max_stay_minutes: 30,
+        };
+
+        let suggestions = schedule_suggestions(&error);
+        assert!(suggestions
+            .iter()
+            .any(|item| item.suggestion_type == FailureSuggestionType::ReduceStayTime));
+        assert!(!suggestions
+            .iter()
+            .any(|item| item.suggestion_type == FailureSuggestionType::MoveLocationEarlier));
     }
 
     #[test]

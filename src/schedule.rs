@@ -8,9 +8,8 @@ use crate::{
 
 /// Expands a solver order into arrival and departure times.
 ///
-/// The first and last locations are fixed endpoints. The start location's
-/// opening hours and stay duration are ignored at initial departure; every
-/// subsequent location, including the destination, keeps its service rules.
+/// The first and last locations are fixed endpoints. Every location, including
+/// the start and destination, observes its opening hours and stay duration.
 pub fn calculate_schedule(
     problem: &OptimizationProblem,
     matrix: &TravelTimeMatrix,
@@ -19,7 +18,7 @@ pub fn calculate_schedule(
     calculate_schedule_from(problem, matrix, solution, problem.start_time())
 }
 
-/// Expands an order using a solver-selected departure time.
+/// Expands an order using a solver-selected visit-start time.
 pub fn calculate_schedule_from(
     problem: &OptimizationProblem,
     matrix: &TravelTimeMatrix,
@@ -28,17 +27,45 @@ pub fn calculate_schedule_from(
 ) -> Result<RoutePlan, ScheduleError> {
     validate_solution(problem, matrix, solution)?;
 
-    let mut current_time = start_time;
+    let start_location = problem.start_location();
+    let start_service = start_time.max(start_location.time_window().open());
+    let start_wait = u32::from(start_service.minutes() - start_time.minutes());
+    let start_departure = start_service
+        .checked_add(start_location.stay_minutes())
+        .ok_or(ScheduleError::OutsideSingleDay)?;
+    if start_departure > start_location.time_window().close() {
+        return Err(ScheduleError::TimeWindowViolation {
+            location_id: start_location.id().to_owned(),
+            arrival_time: start_time,
+            service_start_time: start_service,
+            required_departure: start_departure,
+            close_time: start_location.time_window().close(),
+            selected_start_time: start_time,
+            total_wait_minutes_before_violation: start_wait,
+            is_start: true,
+            is_destination: problem.start_location_index() == problem.end_location_index(),
+            current_stay_minutes: start_location.stay_minutes(),
+            suggested_max_stay_minutes: u32::from(
+                start_location
+                    .time_window()
+                    .close()
+                    .minutes()
+                    .saturating_sub(start_service.minutes()),
+            ),
+        });
+    }
+
+    let mut current_time = start_departure;
     let mut total_travel_minutes = 0_u32;
-    let mut total_wait_minutes = 0_u32;
+    let mut total_wait_minutes = start_wait;
     let mut stops = Vec::with_capacity(solution.visit_order.len());
     stops.push(ScheduledStop {
         location_index: problem.start_location_index(),
-        arrival_time: current_time,
-        service_start_time: current_time,
-        departure_time: Some(current_time),
-        wait_minutes: 0,
-        stay_minutes: 0,
+        arrival_time: start_time,
+        service_start_time: start_service,
+        departure_time: Some(start_departure),
+        wait_minutes: start_wait,
+        stay_minutes: start_location.stay_minutes(),
     });
 
     for edge in solution.visit_order.windows(2) {
@@ -71,6 +98,7 @@ pub fn calculate_schedule_from(
                 selected_start_time: start_time,
                 total_wait_minutes_before_violation: total_wait_minutes
                     .saturating_add(wait_minutes),
+                is_start: false,
                 is_destination: to == problem.end_location_index(),
                 current_stay_minutes: location.stay_minutes(),
                 suggested_max_stay_minutes: u32::from(
@@ -163,6 +191,7 @@ pub enum ScheduleError {
         close_time: crate::domain::TimeOfDay,
         selected_start_time: crate::domain::TimeOfDay,
         total_wait_minutes_before_violation: u32,
+        is_start: bool,
         is_destination: bool,
         current_stay_minutes: u32,
         suggested_max_stay_minutes: u32,
@@ -256,6 +285,101 @@ mod tests {
         assert_eq!(plan.stops[1].departure_time.unwrap().to_string(), "10:20");
         assert_eq!(plan.stops[1].wait_minutes, 45);
         assert_eq!(plan.stops[1].stay_minutes, 20);
+    }
+
+    #[test]
+    fn start_stay_delays_the_first_travel_leg() {
+        let request: OptimizeRouteRequest = serde_json::from_str(
+            r#"{
+                "job_id":"route-start-stay",
+                "start_policy":"FIXED",
+                "start_time":"09:00",
+                "locations":[
+                    {"id":"A","place_id":"a","open_time":"08:00","close_time":"18:00","stay_minutes":60},
+                    {"id":"B","place_id":"b","open_time":"08:00","close_time":"18:00","stay_minutes":0}
+                ]
+            }"#,
+        )
+        .unwrap();
+        let problem: OptimizationProblem = request.try_into().unwrap();
+        let matrix = TravelTimeMatrix::new(vec![vec![0, 20], vec![20, 0]]).unwrap();
+        let plan = calculate_schedule(
+            &problem,
+            &matrix,
+            &SolverSolution {
+                visit_order: vec![0, 1],
+            },
+        )
+        .unwrap();
+
+        assert_eq!(plan.stops[0].arrival_time.to_string(), "09:00");
+        assert_eq!(plan.stops[0].service_start_time.to_string(), "09:00");
+        assert_eq!(plan.stops[0].departure_time.unwrap().to_string(), "10:00");
+        assert_eq!(plan.stops[0].stay_minutes, 60);
+        assert_eq!(plan.stops[1].arrival_time.to_string(), "10:20");
+        assert_eq!(plan.total_travel_minutes, 20);
+    }
+
+    #[test]
+    fn start_opening_time_adds_wait_before_stay() {
+        let request: OptimizeRouteRequest = serde_json::from_str(
+            r#"{
+                "job_id":"route-start-wait",
+                "start_policy":"FIXED",
+                "start_time":"08:30",
+                "locations":[
+                    {"id":"A","place_id":"a","open_time":"09:00","close_time":"18:00","stay_minutes":30},
+                    {"id":"B","place_id":"b","open_time":"00:00","close_time":"23:50","stay_minutes":0}
+                ]
+            }"#,
+        )
+        .unwrap();
+        let problem: OptimizationProblem = request.try_into().unwrap();
+        let matrix = TravelTimeMatrix::new(vec![vec![0; 2]; 2]).unwrap();
+        let plan = calculate_schedule(
+            &problem,
+            &matrix,
+            &SolverSolution {
+                visit_order: vec![0, 1],
+            },
+        )
+        .unwrap();
+
+        assert_eq!(plan.stops[0].arrival_time.to_string(), "08:30");
+        assert_eq!(plan.stops[0].service_start_time.to_string(), "09:00");
+        assert_eq!(plan.stops[0].wait_minutes, 30);
+        assert_eq!(plan.stops[0].departure_time.unwrap().to_string(), "09:30");
+    }
+
+    #[test]
+    fn start_service_must_finish_before_close() {
+        let request: OptimizeRouteRequest = serde_json::from_str(
+            r#"{
+                "job_id":"route-start-close",
+                "start_policy":"FIXED",
+                "start_time":"09:00",
+                "locations":[
+                    {"id":"A","place_id":"a","open_time":"09:00","close_time":"09:30","stay_minutes":60},
+                    {"id":"B","place_id":"b","open_time":"00:00","close_time":"23:50","stay_minutes":0}
+                ]
+            }"#,
+        )
+        .unwrap();
+        let problem: OptimizationProblem = request.try_into().unwrap();
+        let matrix = TravelTimeMatrix::new(vec![vec![0; 2]; 2]).unwrap();
+        let error = calculate_schedule(
+            &problem,
+            &matrix,
+            &SolverSolution {
+                visit_order: vec![0, 1],
+            },
+        )
+        .unwrap_err();
+
+        assert!(matches!(
+            error,
+            ScheduleError::TimeWindowViolation { ref location_id, .. } if location_id == "A"
+        ));
     }
 
     #[test]

@@ -10,7 +10,7 @@ pub const TIME_SLOT_MINUTES: u32 = 10;
 
 pub mod exact;
 pub use exact::*;
-use exact::{minutes_to_slot_ceil, slots_per_day, transition_time};
+use exact::{initial_service, minutes_to_slot_ceil, slots_per_day, transition_time};
 
 impl<T: ObjectivePolicy> ObjectiveEvaluator for T {
     fn evaluate(
@@ -99,7 +99,7 @@ pub fn evaluate_solution(
     simulate_solution(objective, &input, solution, low).ok_or(SolverError::NoFeasibleRoute)
 }
 
-/// Converts slot-based metrics into the departure time exposed by the API.
+/// Converts slot-based metrics into the selected visit-start time exposed by the API.
 /// Fixed and earliest policies retain the exact requested minute.
 pub fn selected_start_time(
     problem: &OptimizationProblem,
@@ -147,9 +147,10 @@ fn simulate_solution(
     {
         return None;
     }
-    let mut time_slot = u32::from(start);
+    let initial = initial_service(input, start)?;
+    let mut time_slot = u32::from(initial.departure_slot);
     let mut travel_minutes = 0_u32;
-    let mut wait_minutes = 0_u32;
+    let mut wait_minutes = initial.wait_minutes;
     for edge in solution.visit_order.windows(2) {
         let travel = input.matrix.travel_minutes(edge[0], edge[1])?;
         travel_minutes = travel_minutes.checked_add(travel)?;
@@ -183,3 +184,45 @@ pub mod heuristic;
 pub use heuristic::*;
 mod orchestrator;
 pub use orchestrator::*;
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::{
+        api::OptimizeRouteRequest, cancellation::CancellationToken, matrix::TravelTimeMatrix,
+    };
+
+    #[test]
+    fn shared_evaluator_applies_start_wait_and_stay() {
+        let request: OptimizeRouteRequest = serde_json::from_value(serde_json::json!({
+            "job_id": "evaluate-start-service",
+            "start_policy": "FIXED",
+            "start_time": "08:30",
+            "locations": [
+                {"id":"A","place_id":"a","open_time":"09:00","close_time":"18:00","stay_minutes":60},
+                {"id":"B","place_id":"b","open_time":"00:00","close_time":"18:00","stay_minutes":0}
+            ]
+        }))
+        .unwrap();
+        let problem: OptimizationProblem = request.try_into().unwrap();
+        let matrix = TravelTimeMatrix::new(vec![vec![0, 20], vec![20, 0]]).unwrap();
+        let metrics = evaluate_solution(
+            &DefaultObjectivePolicy,
+            SolverInput {
+                matrix: &matrix,
+                problem: &problem,
+                cancellation: &CancellationToken::new(),
+            },
+            &SolverSolution {
+                visit_order: vec![0, 1],
+            },
+        )
+        .unwrap();
+
+        assert_eq!(metrics.start_time_slot, 51); // 08:30
+        assert_eq!(metrics.finish_time_slot, 62); // 10:20
+        assert_eq!(metrics.wait_minutes, 30);
+        assert_eq!(metrics.travel_minutes, 20);
+        assert_eq!(metrics.score, 50);
+    }
+}
