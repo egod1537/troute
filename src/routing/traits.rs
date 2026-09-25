@@ -6,6 +6,17 @@ use crate::{cancellation::CancellationToken, domain::Location, matrix::TravelTim
 
 use super::{RouteProviderPolicyDiagnostics, RouteProviderSelection, RoutingContext};
 
+pub trait RoutingProgressObserver: Send + Sync {
+    fn pairs_completed(&self, completed: usize, total: usize);
+}
+
+#[derive(Debug, Default)]
+pub struct NoopRoutingProgressObserver;
+
+impl RoutingProgressObserver for NoopRoutingProgressObserver {
+    fn pairs_completed(&self, _completed: usize, _total: usize) {}
+}
+
 /// Supplies a complete directed matrix independently of the solver.
 /// Providers with a native matrix API should implement this trait directly.
 pub trait RoutingProvider {
@@ -14,6 +25,17 @@ pub trait RoutingProvider {
         locations: &[Location],
         context: &RoutingContext,
     ) -> Result<TravelTimeMatrix, RoutingError>;
+
+    /// Builds a matrix while reporting real pair completions when the provider
+    /// can observe them. Native batch providers may keep the default.
+    fn travel_time_matrix_with_progress(
+        &self,
+        locations: &[Location],
+        context: &RoutingContext,
+        _observer: &dyn RoutingProgressObserver,
+    ) -> Result<TravelTimeMatrix, RoutingError> {
+        self.travel_time_matrix(locations, context)
+    }
 
     /// Builds a matrix without starting work after the caller's deadline.
     /// Providers with deadline-aware I/O should override this method.
@@ -53,6 +75,15 @@ where
         context: &RoutingContext,
     ) -> Result<TravelTimeMatrix, RoutingError> {
         (**self).travel_time_matrix(locations, context)
+    }
+
+    fn travel_time_matrix_with_progress(
+        &self,
+        locations: &[Location],
+        context: &RoutingContext,
+        observer: &dyn RoutingProgressObserver,
+    ) -> Result<TravelTimeMatrix, RoutingError> {
+        (**self).travel_time_matrix_with_progress(locations, context, observer)
     }
 
     fn travel_time_matrix_until(

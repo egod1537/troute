@@ -6,6 +6,33 @@ use crate::{
 
 use super::{SolverError, SolverRunResult};
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum SolverProgressEvent {
+    StrategyStarted(String),
+    StrategyCompleted(String),
+    AnnealingRunStarted(u64),
+    SelectionStarted(usize),
+}
+
+pub trait SolverProgressObserver: Send + Sync {
+    fn on_progress(&self, event: SolverProgressEvent);
+
+    fn is_enabled(&self) -> bool {
+        true
+    }
+}
+
+#[derive(Debug, Default)]
+pub struct NoopSolverProgressObserver;
+
+impl SolverProgressObserver for NoopSolverProgressObserver {
+    fn on_progress(&self, _event: SolverProgressEvent) {}
+
+    fn is_enabled(&self) -> bool {
+        false
+    }
+}
+
 #[derive(Clone, Copy)]
 pub struct SolverInput<'a> {
     pub matrix: &'a TravelTimeMatrix,
@@ -35,6 +62,26 @@ pub trait RouteSolver {
             solution,
             diagnostics: None,
         })
+    }
+
+    /// Runs the solver with optional high-level progress events. Implementors
+    /// can override this without coupling their algorithms to job reporting.
+    fn solve_with_diagnostics_and_progress(
+        &self,
+        input: SolverInput<'_>,
+        observer: &dyn SolverProgressObserver,
+    ) -> Result<SolverRunResult, SolverError> {
+        observer.on_progress(SolverProgressEvent::StrategyStarted(
+            "route_solver".to_owned(),
+        ));
+        let result = self.solve_with_diagnostics(input);
+        observer.on_progress(SolverProgressEvent::StrategyCompleted(
+            "route_solver".to_owned(),
+        ));
+        if result.is_ok() {
+            observer.on_progress(SolverProgressEvent::SelectionStarted(1));
+        }
+        result
     }
 
     /// Selects the schedule departure represented by the solution. Existing

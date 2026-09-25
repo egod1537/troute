@@ -826,32 +826,44 @@ async fn job_events(
         )
     })?;
 
-    // Subscribe before reading the source-of-truth snapshot. An event racing
-    // with the read is then either represented by the snapshot or buffered for
-    // live delivery (and can harmlessly be observed in both forms).
+    // Subscribe before reading the source-of-truth snapshot. Retry the read if
+    // an event was published concurrently so buffered progress older than the
+    // snapshot is not replayed after it.
     let subscription = state
         .runner
         .as_ref()
         .and_then(|runner| runner.subscribe(&job_id));
-    let initial = store
-        .get_job(&job_id)
-        .map_err(ApiError::from_storage)?
-        .ok_or_else(|| {
-            ApiError::new(
-                StatusCode::NOT_FOUND,
-                "JOB_NOT_FOUND",
-                "The requested job does not exist.",
-                &job_id,
-            )
-        })?;
+    let read_job = || {
+        store
+            .get_job(&job_id)
+            .map_err(ApiError::from_storage)?
+            .ok_or_else(|| {
+                ApiError::new(
+                    StatusCode::NOT_FOUND,
+                    "JOB_NOT_FOUND",
+                    "The requested job does not exist.",
+                    &job_id,
+                )
+            })
+    };
+    let (initial, initial_sequence) = if let Some(subscription) = subscription.as_ref() {
+        loop {
+            let before = subscription.current_sequence();
+            let initial = read_job()?;
+            let after = subscription.current_sequence();
+            if before == after {
+                break (initial, after);
+            }
+        }
+    } else {
+        let initial = read_job()?;
+        let sequence = u64::try_from(initial.state.updated_at).unwrap_or(0);
+        (initial, sequence)
+    };
     let initial_terminal = !matches!(
         initial.state.status,
         JobStatus::Pending | JobStatus::Running
     );
-    let persisted_sequence = u64::try_from(initial.state.updated_at).unwrap_or(0);
-    let initial_sequence = subscription
-        .as_ref()
-        .map_or(persisted_sequence, |subscription| subscription.cursor);
     let snapshot = JobEventData::snapshot(initial);
     let event_store = store.clone();
     let event_job_id = job_id.clone();
@@ -980,7 +992,7 @@ async fn cancel_job(
     Path(job_id): Path<String>,
     headers: HeaderMap,
 ) -> Result<Json<CancelJobResponse>, ApiError> {
-    const CANCEL_MESSAGE: &str = "Job cancelled by request";
+    const CANCEL_MESSAGE: &str = "Optimization cancelled at the user's request.";
 
     let started = Instant::now();
     let pair_id = state

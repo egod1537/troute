@@ -254,15 +254,12 @@ impl JobActivity {
     }
 
     fn subscribe(&self) -> JobEventSubscription {
-        // Subscribing before reading the cursor ensures every event newer than
-        // the cursor is buffered. Events included by the cursor were persisted
-        // before publication and will therefore be represented by the snapshot.
+        // Subscribe before the HTTP layer reads its stable persisted snapshot
+        // so every later event is buffered for live delivery.
         let receiver = self.events.subscribe();
-        let cursor = self.sequence.load(Ordering::Acquire);
         JobEventSubscription {
             receiver,
             sequence: self.sequence.clone(),
-            cursor,
         }
     }
 }
@@ -270,7 +267,6 @@ impl JobActivity {
 pub(crate) struct JobEventSubscription {
     pub receiver: broadcast::Receiver<JobEvent>,
     sequence: Arc<AtomicU64>,
-    pub cursor: u64,
 }
 
 impl JobEventSubscription {
@@ -497,7 +493,10 @@ impl JobRunner {
     fn persist_cancelled(&self, job_id: &str) -> Result<(), JobStoreError> {
         // Usually the cancel endpoint has already persisted this transition.
         // Also cover executors that report cancellation directly.
-        match self.store.cancel_job(job_id, "Job execution was cancelled") {
+        match self
+            .store
+            .cancel_job(job_id, "Optimization cancelled at the user's request.")
+        {
             Ok(_) => self.publish_persisted(job_id, JobEventKind::Cancelled),
             Err(JobStoreError::JobNotCancellable { .. }) => {}
             Err(error) => return Err(error),
@@ -686,7 +685,7 @@ mod tests {
             }
             for progress in 0..300 {
                 reporter.progress(
-                    ProgressStage::Solving,
+                    ProgressStage::OptimizingRoute,
                     (progress % 100) as u8,
                     Some("flooding a slow subscriber"),
                 );
@@ -729,6 +728,8 @@ mod tests {
             loop {
                 let job = store.get_job("slow-subscriber").unwrap().unwrap();
                 if job.state.status == JobStatus::Failed {
+                    assert_eq!(job.state.stage, Some(ProgressStage::OptimizingRoute));
+                    assert_eq!(job.state.progress, 99);
                     assert_eq!(job.error.unwrap().code, "SOLVER_ERROR");
                     break;
                 }
@@ -743,5 +744,40 @@ mod tests {
             Err(broadcast::error::RecvError::Lagged(_))
         ));
         assert!(subscription.current_sequence() >= 300);
+    }
+
+    struct RoutingFailureExecutor;
+
+    impl JobExecutor for RoutingFailureExecutor {
+        fn execute(
+            &self,
+            _request: OptimizeRouteRequest,
+            reporter: &dyn OptimizationEventReporter,
+            _cancellation: &CancellationToken,
+        ) -> Result<OptimizeRouteResponse, OptimizationServiceError> {
+            reporter.progress(
+                ProgressStage::FetchingTravelTimes,
+                33,
+                Some("Fetched 3 / 10 travel-time pairs."),
+            );
+            Err(OptimizationServiceError::Routing(
+                crate::routing::RoutingError::Provider("expected routing failure".to_owned()),
+            ))
+        }
+    }
+
+    #[tokio::test]
+    async fn routing_failure_preserves_the_fetching_stage() {
+        let temporary = TestDirectory::new();
+        let store = Arc::new(FileJobStore::new(&temporary.0).unwrap());
+        let runner = JobRunner::new(Arc::new(RoutingFailureExecutor), store.clone(), None);
+        let submission = runner.submit_with_completion(request()).unwrap();
+
+        submission.completion.await.unwrap().unwrap();
+        let job = store.get_job("slow-subscriber").unwrap().unwrap();
+        assert_eq!(job.state.status, JobStatus::Failed);
+        assert_eq!(job.state.stage, Some(ProgressStage::FetchingTravelTimes));
+        assert_eq!(job.state.progress, 33);
+        assert_eq!(job.error.unwrap().code, "ROUTING_UNAVAILABLE");
     }
 }

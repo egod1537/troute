@@ -163,6 +163,35 @@ mod tests {
         assert_eq!(matrix.travel_minutes(2, 1), Some(21));
     }
 
+    #[derive(Default)]
+    struct RecordingRoutingProgress {
+        updates: Mutex<Vec<(usize, usize)>>,
+    }
+
+    impl RoutingProgressObserver for RecordingRoutingProgress {
+        fn pairs_completed(&self, completed: usize, total: usize) {
+            self.updates.lock().unwrap().push((completed, total));
+        }
+    }
+
+    #[test]
+    fn pairwise_matrix_reports_real_monotonic_pair_completions() {
+        let provider = PairwiseMatrixRoutingProvider::with_concurrency(
+            DirectedPairs::default(),
+            NonZeroUsize::new(3).unwrap(),
+        );
+        let progress = RecordingRoutingProgress::default();
+
+        provider
+            .travel_time_matrix_with_progress(&locations(), &RoutingContext::default(), &progress)
+            .unwrap();
+
+        assert_eq!(
+            *progress.updates.lock().unwrap(),
+            [(1, 6), (2, 6), (3, 6), (4, 6), (5, 6), (6, 6)]
+        );
+    }
+
     struct FailingPairs {
         started: Barrier,
         calls: Mutex<Vec<(String, String)>>,

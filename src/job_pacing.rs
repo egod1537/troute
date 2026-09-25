@@ -28,12 +28,7 @@ impl DebugJobPacer {
         stage: ProgressStage,
         cancellation: &CancellationToken,
     ) -> bool {
-        let percentage = match stage {
-            ProgressStage::Accepted => 0,
-            ProgressStage::BuildingMatrix => 20,
-            ProgressStage::Solving => 50,
-            ProgressStage::Scheduling => 80,
-        };
+        let percentage = u64::from(stage.range().start);
         self.wait_until_percentage(percentage, cancellation).await
     }
 

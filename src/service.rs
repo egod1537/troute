@@ -1,4 +1,4 @@
-use std::time::Instant;
+use std::{sync::Mutex, time::Instant};
 
 use rand::{rngs::StdRng, SeedableRng};
 use thiserror::Error;
@@ -19,16 +19,105 @@ use crate::{
     result_debug::shuffle_solution,
     routing::{
         normalize_country_code, RouteProviderPolicyDiagnostics, RouteProviderSelection,
-        RoutingContext, RoutingError, RoutingProvider,
+        RoutingContext, RoutingError, RoutingProgressObserver, RoutingProvider,
     },
     schedule::{calculate_schedule_from, ScheduleError},
     solver::{
         DefaultObjectivePolicy, ExactBitDpSolver, GreedyInitialRoute, InitialRouteGenerator,
-        ObjectiveEvaluator, RouteSolver, SolverError, SolverInput, EXACT_MAX_LOCATIONS,
+        ObjectiveEvaluator, RouteSolver, SolverError, SolverInput, SolverProgressEvent,
+        SolverProgressObserver, EXACT_MAX_LOCATIONS,
     },
 };
 
 const ROUTING_DEPARTURE_LEAD_MINUTES: i64 = 5;
+
+struct ProgressState {
+    stage: Option<ProgressStage>,
+    progress: u8,
+}
+
+struct ProgressCoordinator<'a> {
+    reporter: &'a dyn OptimizationEventReporter,
+    state: Mutex<ProgressState>,
+}
+
+impl<'a> ProgressCoordinator<'a> {
+    fn new(reporter: &'a dyn OptimizationEventReporter) -> Self {
+        Self {
+            reporter,
+            state: Mutex::new(ProgressState {
+                stage: None,
+                progress: 0,
+            }),
+        }
+    }
+
+    fn report(&self, stage: ProgressStage, progress: u8, message: impl AsRef<str>) {
+        let mut state = self
+            .state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if state.stage.is_some_and(|current| stage < current) {
+            return;
+        }
+        let progress = state.progress.max(progress.min(100));
+        state.stage = Some(stage);
+        state.progress = progress;
+        self.reporter
+            .progress(stage, progress, Some(message.as_ref()));
+    }
+}
+
+struct RoutingProgressReporter<'a> {
+    progress: &'a ProgressCoordinator<'a>,
+    provider: Option<String>,
+}
+
+impl RoutingProgressObserver for RoutingProgressReporter<'_> {
+    fn pairs_completed(&self, completed: usize, total: usize) {
+        let range = ProgressStage::FetchingTravelTimes.range();
+        let percentage = range.interpolate(completed, total);
+        let message = match &self.provider {
+            Some(provider) => {
+                format!("Fetched {completed} / {total} travel-time pairs from {provider}.")
+            }
+            None => format!("Fetched {completed} / {total} travel-time pairs."),
+        };
+        self.progress
+            .report(ProgressStage::FetchingTravelTimes, percentage, message);
+    }
+}
+
+struct SolverProgressReporter<'a> {
+    progress: &'a ProgressCoordinator<'a>,
+}
+
+impl SolverProgressObserver for SolverProgressReporter<'_> {
+    fn on_progress(&self, event: SolverProgressEvent) {
+        match event {
+            SolverProgressEvent::StrategyStarted(name) => self.progress.report(
+                ProgressStage::OptimizingRoute,
+                66,
+                format!("Running solver strategy {name}."),
+            ),
+            SolverProgressEvent::StrategyCompleted(name) => self.progress.report(
+                ProgressStage::OptimizingRoute,
+                68,
+                format!("Completed solver strategy {name}."),
+            ),
+            SolverProgressEvent::AnnealingRunStarted(index) => self.progress.report(
+                ProgressStage::OptimizingRoute,
+                70_u8.saturating_add(u8::try_from(index.saturating_sub(1).min(9)).unwrap_or(9)),
+                format!("Running simulated annealing search {index}."),
+            ),
+            SolverProgressEvent::SelectionStarted(candidate_count) => self.progress.report(
+                ProgressStage::SelectingBestCandidate,
+                ProgressStage::SelectingBestCandidate.range().start,
+                format!("Comparing {candidate_count} route candidates."),
+            ),
+        }
+    }
+}
 
 /// Coordinates the provider -> solver -> schedule pipeline without coupling
 /// any of those components to an HTTP framework.
@@ -77,7 +166,19 @@ where
         reporter: &dyn OptimizationEventReporter,
         cancellation: &CancellationToken,
     ) -> Result<OptimizeRouteResponse, OptimizationServiceError> {
+        let progress = ProgressCoordinator::new(reporter);
         let result = (|| {
+            progress.report(
+                ProgressStage::Accepted,
+                ProgressStage::Accepted.range().start,
+                "Optimization request accepted.",
+            );
+            check_cancelled(cancellation)?;
+            progress.report(
+                ProgressStage::ValidatingRequest,
+                ProgressStage::ValidatingRequest.range().start,
+                "Validating locations and schedule constraints.",
+            );
             let shuffle_options = request.debug.as_ref().and_then(|debug| {
                 debug
                     .shuffle_result_route
@@ -94,51 +195,115 @@ where
                 .map(normalize_country_code)
                 .transpose()
                 .expect("request validation normalizes country codes");
-            reporter.progress(
-                ProgressStage::Accepted,
-                0,
-                Some("Optimization request accepted."),
-            );
             check_cancelled(cancellation)?;
-            reporter.progress(
-                ProgressStage::BuildingMatrix,
-                20,
-                Some(if supplied_matrix.is_some() {
-                    "Using caller-supplied travel-time matrix."
+            progress.report(
+                ProgressStage::SelectingProvider,
+                ProgressStage::SelectingProvider.range().start,
+                if supplied_matrix.is_some() {
+                    "Using the caller-supplied matrix; no route provider is required."
                 } else {
-                    "Building travel-time matrix."
-                }),
+                    "Selecting a route provider for the requested travel mode."
+                },
             );
             check_cancelled(cancellation)?;
             let mut provider_selection: Option<RouteProviderSelection> = None;
+            let routing_context = if supplied_matrix.is_none() {
+                let mut context = RoutingContext {
+                    departure_time: Some(routing_departure_time()),
+                    travel_mode,
+                    ..RoutingContext::default()
+                };
+                apply_provider_request_context(
+                    &mut context,
+                    country_code.as_deref(),
+                    requested_provider,
+                );
+                provider_selection = self.routing_provider.provider_selection(&context)?;
+                if let Some(selection) = &provider_selection {
+                    progress.report(
+                        ProgressStage::SelectingProvider,
+                        ProgressStage::SelectingProvider.range().start,
+                        format!("Selected {} as the route provider.", selection.provider),
+                    );
+                }
+                Some(context)
+            } else {
+                None
+            };
+            let pair_count = problem
+                .locations()
+                .len()
+                .saturating_mul(problem.locations().len().saturating_sub(1));
+            progress.report(
+                ProgressStage::PreparingMatrix,
+                ProgressStage::PreparingMatrix.range().start,
+                format!("Prepared {pair_count} directed travel-time pairs."),
+            );
+            check_cancelled(cancellation)?;
+            progress.report(
+                ProgressStage::FetchingTravelTimes,
+                ProgressStage::FetchingTravelTimes.range().start,
+                if supplied_matrix.is_some() {
+                    "Loading the caller-supplied travel-time matrix.".to_owned()
+                } else {
+                    format!("Fetching travel times for {pair_count} directed pairs.")
+                },
+            );
             let matrix = match supplied_matrix {
                 Some(rows) => TravelTimeMatrix::new(rows)
                     .expect("request validation guarantees a non-empty square matrix"),
                 None => {
-                    let mut routing_context = RoutingContext {
-                        departure_time: Some(routing_departure_time()),
-                        travel_mode,
-                        ..RoutingContext::default()
+                    let routing_context = routing_context
+                        .as_ref()
+                        .expect("routing context exists when no matrix was supplied");
+                    let routing_progress = RoutingProgressReporter {
+                        progress: &progress,
+                        provider: provider_selection
+                            .as_ref()
+                            .map(|selection| selection.provider.to_string()),
                     };
-                    apply_provider_request_context(
-                        &mut routing_context,
-                        country_code.as_deref(),
-                        requested_provider,
-                    );
-                    provider_selection =
-                        self.routing_provider.provider_selection(&routing_context)?;
-                    self.routing_provider
-                        .travel_time_matrix(problem.locations(), &routing_context)?
+                    self.routing_provider.travel_time_matrix_with_progress(
+                        problem.locations(),
+                        routing_context,
+                        &routing_progress,
+                    )?
                 }
             };
             check_cancelled(cancellation)?;
-            reporter.progress(ProgressStage::Solving, 60, Some("Optimizing visit order."));
+            progress.report(
+                ProgressStage::BuildingMatrix,
+                ProgressStage::BuildingMatrix.range().start,
+                "Normalizing and validating the travel-time matrix.",
+            );
+            progress.report(
+                ProgressStage::BuildingMatrix,
+                ProgressStage::BuildingMatrix.range().end,
+                "Travel-time matrix validation completed.",
+            );
             check_cancelled(cancellation)?;
-            let solver_result = match self.solver.solve_with_diagnostics(SolverInput {
-                matrix: &matrix,
-                problem: &problem,
-                cancellation,
-            }) {
+            progress.report(
+                ProgressStage::GeneratingCandidates,
+                ProgressStage::GeneratingCandidates.range().start,
+                "Generating initial route candidates.",
+            );
+            check_cancelled(cancellation)?;
+            progress.report(
+                ProgressStage::OptimizingRoute,
+                ProgressStage::OptimizingRoute.range().start,
+                "Optimizing route candidates.",
+            );
+            check_cancelled(cancellation)?;
+            let solver_progress = SolverProgressReporter {
+                progress: &progress,
+            };
+            let solver_result = match self.solver.solve_with_diagnostics_and_progress(
+                SolverInput {
+                    matrix: &matrix,
+                    problem: &problem,
+                    cancellation,
+                },
+                &solver_progress,
+            ) {
                 Ok(result) => result,
                 Err(SolverError::Cancelled) => return Err(OptimizationServiceError::Cancelled),
                 Err(SolverError::NoFeasibleRoute) => {
@@ -149,6 +314,15 @@ where
                 }
                 Err(error) => return Err(error.into()),
             };
+            let candidate_count = solver_result
+                .diagnostics
+                .as_ref()
+                .map_or(1, |diagnostics| diagnostics.candidates.len());
+            progress.report(
+                ProgressStage::SelectingBestCandidate,
+                ProgressStage::SelectingBestCandidate.range().end,
+                format!("Selected the best feasible route from {candidate_count} candidates."),
+            );
             let solution = solver_result.solution;
             let selected_start_time = match self.solver.selected_start_time(
                 SolverInput {
@@ -163,10 +337,13 @@ where
                 Err(error) => return Err(error.into()),
             };
             check_cancelled(cancellation)?;
-            reporter.progress(
+            progress.report(
                 ProgressStage::Scheduling,
-                85,
-                Some("Building itinerary schedule."),
+                ProgressStage::Scheduling.range().start,
+                format!(
+                    "Calculating arrival and departure times for {} locations.",
+                    problem.locations().len()
+                ),
             );
             check_cancelled(cancellation)?;
             let normal_plan =
@@ -185,6 +362,17 @@ where
                 None => normal_plan,
             };
             check_cancelled(cancellation)?;
+            progress.report(
+                ProgressStage::ValidatingSchedule,
+                ProgressStage::ValidatingSchedule.range().start,
+                "Validated opening hours, stays, and single-day constraints.",
+            );
+            check_cancelled(cancellation)?;
+            progress.report(
+                ProgressStage::FinalizingResult,
+                ProgressStage::FinalizingResult.range().start,
+                "Finalizing optimization results and diagnostics.",
+            );
             let mut response = OptimizeRouteResponse::from_plan(
                 plan,
                 &problem,
@@ -558,20 +746,29 @@ mod tests {
     #[derive(Default)]
     struct InMemoryReporter {
         events: Mutex<Vec<RecordedEvent>>,
+        messages: Mutex<Vec<Option<String>>>,
     }
 
     impl InMemoryReporter {
         fn events(&self) -> Vec<RecordedEvent> {
             self.events.lock().unwrap().clone()
         }
+
+        fn messages(&self) -> Vec<Option<String>> {
+            self.messages.lock().unwrap().clone()
+        }
     }
 
     impl OptimizationEventReporter for InMemoryReporter {
-        fn progress(&self, stage: ProgressStage, progress: u8, _message: Option<&str>) {
+        fn progress(&self, stage: ProgressStage, progress: u8, message: Option<&str>) {
             self.events
                 .lock()
                 .unwrap()
                 .push(RecordedEvent::Progress(stage, progress));
+            self.messages
+                .lock()
+                .unwrap()
+                .push(message.map(str::to_owned));
         }
 
         fn error(&self, code: OptimizationErrorCode, _message: &str, _detail: &str) {
@@ -676,29 +873,59 @@ mod tests {
             .optimize_with_reporter(valid_request(), &reporter)
             .unwrap();
 
+        let events = reporter.events();
+        assert_eq!(events.last(), Some(&RecordedEvent::Result(response)));
+        let progress: Vec<_> = events
+            .iter()
+            .filter_map(|event| match event {
+                RecordedEvent::Progress(stage, progress) => Some((*stage, *progress)),
+                _ => None,
+            })
+            .collect();
+        assert!(progress.windows(2).all(|pair| pair[0].1 <= pair[1].1));
+        let mut stages: Vec<_> = progress.iter().map(|(stage, _)| *stage).collect();
+        stages.dedup();
         assert_eq!(
-            reporter.events(),
-            vec![
-                RecordedEvent::Progress(ProgressStage::Accepted, 0),
-                RecordedEvent::Progress(ProgressStage::BuildingMatrix, 20),
-                RecordedEvent::Progress(ProgressStage::Solving, 60),
-                RecordedEvent::Progress(ProgressStage::Scheduling, 85),
-                RecordedEvent::Result(response),
+            stages,
+            [
+                ProgressStage::Accepted,
+                ProgressStage::ValidatingRequest,
+                ProgressStage::SelectingProvider,
+                ProgressStage::PreparingMatrix,
+                ProgressStage::FetchingTravelTimes,
+                ProgressStage::BuildingMatrix,
+                ProgressStage::GeneratingCandidates,
+                ProgressStage::OptimizingRoute,
+                ProgressStage::SelectingBestCandidate,
+                ProgressStage::Scheduling,
+                ProgressStage::ValidatingSchedule,
+                ProgressStage::FinalizingResult,
             ]
         );
+        assert!(reporter.messages().iter().all(|message| message
+            .as_deref()
+            .is_some_and(|message| !message.is_empty())));
     }
 
     #[test]
     fn exact_solver_start_selection_reaches_the_schedule() {
         let service =
             RouteOptimizationService::new(DevelopmentRoutingProvider, ExactBitDpSolver::default());
-        let response = service.optimize(valid_request()).unwrap();
+        let reporter = InMemoryReporter::default();
+        let response = service
+            .optimize_with_reporter(valid_request(), &reporter)
+            .unwrap();
 
         assert_eq!(
             response.route[0].departure_time.unwrap().to_string(),
             "23:30"
         );
         assert_eq!(response.route[1].arrival_time.to_string(), "23:45");
+        assert!(reporter.messages().iter().any(|message| {
+            message
+                .as_deref()
+                .is_some_and(|message| message.contains("exact_bit_dp"))
+        }));
     }
 
     #[test]
@@ -894,14 +1121,20 @@ mod tests {
             .optimize_with_reporter(valid_request(), &reporter)
             .is_err());
 
+        let events = reporter.events();
         assert_eq!(
-            reporter.events(),
-            vec![
-                RecordedEvent::Progress(ProgressStage::Accepted, 0),
-                RecordedEvent::Progress(ProgressStage::BuildingMatrix, 20),
-                RecordedEvent::Error(OptimizationErrorCode::RoutingUnavailable),
-            ]
+            events.last(),
+            Some(&RecordedEvent::Error(
+                OptimizationErrorCode::RoutingUnavailable
+            ))
         );
+        assert!(matches!(
+            events.get(events.len() - 2),
+            Some(RecordedEvent::Progress(
+                ProgressStage::FetchingTravelTimes,
+                20
+            ))
+        ));
     }
 
     #[test]
@@ -952,15 +1185,17 @@ mod tests {
             .optimize_with_reporter(valid_request(), &reporter)
             .is_err());
 
+        let events = reporter.events();
         assert_eq!(
-            reporter.events(),
-            vec![
-                RecordedEvent::Progress(ProgressStage::Accepted, 0),
-                RecordedEvent::Progress(ProgressStage::BuildingMatrix, 20),
-                RecordedEvent::Progress(ProgressStage::Solving, 60),
-                RecordedEvent::Error(OptimizationErrorCode::NoFeasibleRoute),
-            ]
+            events.last(),
+            Some(&RecordedEvent::Error(
+                OptimizationErrorCode::NoFeasibleRoute
+            ))
         );
+        assert!(events.iter().rev().skip(1).any(|event| matches!(
+            event,
+            RecordedEvent::Progress(ProgressStage::OptimizingRoute, _)
+        )));
     }
 
     #[test]

@@ -10,7 +10,10 @@ use std::{
 
 use crate::{cancellation::CancellationToken, domain::Location, matrix::TravelTimeMatrix};
 
-use super::{RoutingContext, RoutingError, RoutingProvider, TravelTimeProvider};
+use super::{
+    NoopRoutingProgressObserver, RoutingContext, RoutingError, RoutingProgressObserver,
+    RoutingProvider, TravelTimeProvider,
+};
 
 pub const DEFAULT_PAIR_CONCURRENCY: usize = 4;
 pub const DEFAULT_MATRIX_TOTAL_TIMEOUT_MS: u64 = 120_000;
@@ -85,7 +88,23 @@ impl<P: TravelTimeProvider + Sync> RoutingProvider for PairwiseMatrixRoutingProv
                     "matrix total timeout exceeds the supported range".to_owned(),
                 )
             })?;
-        self.travel_time_matrix_until(locations, context, deadline)
+        self.build_matrix_until(locations, context, deadline, &NoopRoutingProgressObserver)
+    }
+
+    fn travel_time_matrix_with_progress(
+        &self,
+        locations: &[Location],
+        context: &RoutingContext,
+        observer: &dyn RoutingProgressObserver,
+    ) -> Result<TravelTimeMatrix, RoutingError> {
+        let deadline = Instant::now()
+            .checked_add(self.total_timeout)
+            .ok_or_else(|| {
+                RoutingError::Provider(
+                    "matrix total timeout exceeds the supported range".to_owned(),
+                )
+            })?;
+        self.build_matrix_until(locations, context, deadline, observer)
     }
 
     fn travel_time_matrix_until(
@@ -93,6 +112,23 @@ impl<P: TravelTimeProvider + Sync> RoutingProvider for PairwiseMatrixRoutingProv
         locations: &[Location],
         context: &RoutingContext,
         caller_deadline: Instant,
+    ) -> Result<TravelTimeMatrix, RoutingError> {
+        self.build_matrix_until(
+            locations,
+            context,
+            caller_deadline,
+            &NoopRoutingProgressObserver,
+        )
+    }
+}
+
+impl<P: TravelTimeProvider + Sync> PairwiseMatrixRoutingProvider<P> {
+    fn build_matrix_until(
+        &self,
+        locations: &[Location],
+        context: &RoutingContext,
+        caller_deadline: Instant,
+        observer: &dyn RoutingProgressObserver,
     ) -> Result<TravelTimeMatrix, RoutingError> {
         let pairs = (0..locations.len())
             .flat_map(|from_index| {
@@ -113,6 +149,7 @@ impl<P: TravelTimeProvider + Sync> RoutingProvider for PairwiseMatrixRoutingProv
         let deadline = caller_deadline.min(own_deadline);
         let next_pair = AtomicUsize::new(0);
         let completed_pairs = AtomicUsize::new(0);
+        let progress_lock = Mutex::new(());
         let matrix_timed_out = AtomicBool::new(false);
         let cancellation = CancellationToken::new();
         let results = Mutex::new(vec![None; pairs.len()]);
@@ -188,7 +225,11 @@ impl<P: TravelTimeProvider + Sync> RoutingProvider for PairwiseMatrixRoutingProv
                             }
                             results.lock().expect("pair result lock poisoned")[pair_index] =
                                 Some(travel_time.minutes);
-                            completed_pairs.fetch_add(1, Ordering::AcqRel);
+                            let _progress_guard = progress_lock
+                                .lock()
+                                .expect("routing progress lock poisoned");
+                            let completed = completed_pairs.fetch_add(1, Ordering::AcqRel) + 1;
+                            observer.pairs_completed(completed, pairs.len());
                         }
                         Err(error) => {
                             if Instant::now() >= deadline {

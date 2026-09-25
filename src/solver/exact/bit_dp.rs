@@ -2,7 +2,8 @@ use crate::domain::{StartPolicy, TimeOfDay};
 
 use super::super::{
     evaluate_solution, DefaultObjectivePolicy, ObjectivePolicy, RouteSolver, SolutionMetrics,
-    SolverError, SolverInput, SolverSolution, EXACT_MAX_LOCATIONS, TIME_SLOT_MINUTES,
+    SolverError, SolverInput, SolverProgressEvent, SolverProgressObserver, SolverRunResult,
+    SolverSolution, EXACT_MAX_LOCATIONS, TIME_SLOT_MINUTES,
 };
 use super::{
     frontier::{FrontierPolicy, ParetoState, TimeCostFrontierPolicy},
@@ -293,6 +294,27 @@ impl<O: ObjectivePolicy, F: FrontierPolicy> ExactBitDpSolver<O, F> {
 impl<O: ObjectivePolicy, F: FrontierPolicy> RouteSolver for ExactBitDpSolver<O, F> {
     fn solve(&self, input: SolverInput<'_>) -> Result<SolverSolution, SolverError> {
         self.solve_detailed(input).map(|result| result.solution)
+    }
+
+    fn solve_with_diagnostics_and_progress(
+        &self,
+        input: SolverInput<'_>,
+        observer: &dyn SolverProgressObserver,
+    ) -> Result<SolverRunResult, SolverError> {
+        observer.on_progress(SolverProgressEvent::StrategyStarted(
+            "exact_bit_dp".to_owned(),
+        ));
+        let result = self.solve_detailed(input);
+        observer.on_progress(SolverProgressEvent::StrategyCompleted(
+            "exact_bit_dp".to_owned(),
+        ));
+        result.map(|result| {
+            observer.on_progress(SolverProgressEvent::SelectionStarted(1));
+            SolverRunResult {
+                solution: result.solution,
+                diagnostics: None,
+            }
+        })
     }
 
     fn selected_start_time(

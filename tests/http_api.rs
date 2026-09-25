@@ -573,7 +573,12 @@ async fn async_submit_returns_202_before_solver_and_persists_state_transitions()
     assert_eq!(submitted.body.as_object().unwrap().len(), 3);
 
     wait_for_solver_starts(&solver.started, 1).await;
-    wait_for_job_stage(store.as_ref(), "async-state-flow", ProgressStage::Solving).await;
+    wait_for_job_stage(
+        store.as_ref(),
+        "async-state-flow",
+        ProgressStage::OptimizingRoute,
+    )
+    .await;
     let running = send_to(
         app.clone(),
         Method::GET,
@@ -584,8 +589,8 @@ async fn async_submit_returns_202_before_solver_and_persists_state_transitions()
     .await;
     assert_eq!(running.status, StatusCode::OK);
     assert_eq!(running.body["status"], "running");
-    assert_eq!(running.body["stage"], "solving");
-    assert_eq!(running.body["progress"], 60);
+    assert_eq!(running.body["stage"], "optimizing_route");
+    assert!(running.body["progress"].as_u64().unwrap() >= 65);
     assert!(running.body["result"].is_null());
 
     solver.release.store(true, Ordering::Release);
@@ -656,13 +661,26 @@ async fn debug_minimum_duration_spaces_real_stages_persists_request_and_preserve
         }
     }
     assert!(started.elapsed() >= Duration::from_millis(1_000));
-    let expected = ["accepted", "building_matrix", "solving", "scheduling"];
+    let expected = [
+        "accepted",
+        "validating_request",
+        "selecting_provider",
+        "preparing_matrix",
+        "fetching_travel_times",
+        "building_matrix",
+        "generating_candidates",
+        "optimizing_route",
+        "selecting_best_candidate",
+        "scheduling",
+        "validating_schedule",
+        "finalizing_result",
+    ];
     let first = expected
         .iter()
         .position(|stage| Some(*stage) == stages.first().map(String::as_str))
         .expect("snapshot must expose a real progress stage");
     assert_eq!(stages, expected[first..]);
-    assert_eq!(stages.last().map(String::as_str), Some("scheduling"));
+    assert_eq!(stages.last().map(String::as_str), Some("finalizing_result"));
 
     let paced = store.get_job("debug-paced").unwrap().unwrap();
     assert_eq!(
@@ -994,11 +1012,24 @@ async fn sse_reconnects_with_snapshot_orders_progress_and_closes_after_completio
     let snapshot_data = sse_data(&snapshot);
     assert_eq!(snapshot_data["job_id"], "sse-completed");
     assert_eq!(snapshot_data["status"], "running");
-    assert_eq!(snapshot_data["stage"], "solving");
+    assert!(matches!(
+        snapshot_data["stage"].as_str(),
+        Some(
+            "accepted"
+                | "validating_request"
+                | "selecting_provider"
+                | "preparing_matrix"
+                | "fetching_travel_times"
+                | "building_matrix"
+                | "generating_candidates"
+                | "optimizing_route"
+        )
+    ));
     assert_eq!(snapshot_data["request"]["job_id"], "sse-completed");
 
     solver.release.store(true, Ordering::Release);
     let mut last_id = snapshot_id;
+    let mut last_progress = snapshot_data["progress"].as_u64().unwrap();
     let mut saw_progress = false;
     loop {
         let message = next_sse_message(&mut body, &mut buffered)
@@ -1013,7 +1044,9 @@ async fn sse_reconnects_with_snapshot_orders_progress_and_closes_after_completio
         match event {
             "progress" => {
                 saw_progress = true;
-                assert!(sse_data(&message)["progress"].as_u64().unwrap() >= 85);
+                let progress = sse_data(&message)["progress"].as_u64().unwrap();
+                assert!(progress >= last_progress);
+                last_progress = progress;
             }
             "completed" => {
                 let data = sse_data(&message);
@@ -1247,6 +1280,8 @@ async fn async_submit_persists_failure_and_can_cancel_a_running_job() {
     assert_eq!(submitted.status, StatusCode::ACCEPTED);
     wait_for_job_status(store.as_ref(), "async-failure", JobStatus::Failed).await;
     let failed = store.get_job("async-failure").unwrap().unwrap();
+    assert_eq!(failed.state.stage, Some(ProgressStage::Scheduling));
+    assert_eq!(failed.state.progress, 88);
     assert_eq!(failed.error.unwrap().code, "TIME_WINDOW_VIOLATION");
     assert!(failed.result.is_none());
 
@@ -1281,6 +1316,12 @@ async fn async_submit_persists_failure_and_can_cancel_a_running_job() {
     })
     .await
     .unwrap();
+    wait_for_job_stage(
+        cancel_store.as_ref(),
+        "async-cancel",
+        ProgressStage::OptimizingRoute,
+    )
+    .await;
     let cancelled = send_to(
         cancel_app,
         Method::POST,
@@ -1292,6 +1333,13 @@ async fn async_submit_persists_failure_and_can_cancel_a_running_job() {
     assert_eq!(cancelled.status, StatusCode::OK);
     assert_eq!(cancelled.body["status"], "cancelled");
     wait_for_job_status(cancel_store.as_ref(), "async-cancel", JobStatus::Cancelled).await;
+    let cancelled = cancel_store.get_job("async-cancel").unwrap().unwrap();
+    assert_eq!(cancelled.state.stage, Some(ProgressStage::OptimizingRoute));
+    assert!(cancelled.state.progress >= 65);
+    assert_eq!(
+        cancelled.state.last_message.as_deref(),
+        Some("Optimization cancelled at the user's request.")
+    );
 }
 
 #[tokio::test]

@@ -318,9 +318,12 @@ impl JobStore for FileJobStore {
                     status: state.status,
                 });
             }
+            if state.stage.is_some_and(|current| stage < current) {
+                return Ok(());
+            }
             state.status = JobStatus::Running;
             state.stage = Some(stage);
-            state.progress = progress;
+            state.progress = state.progress.max(progress.min(100));
             state.last_message = message.map(str::to_owned);
             Ok(())
         })
@@ -787,7 +790,12 @@ mod tests {
 
         store.mark_running("job-001").unwrap();
         store
-            .update_progress("job-001", ProgressStage::Solving, 60, Some("Solving route"))
+            .update_progress(
+                "job-001",
+                ProgressStage::OptimizingRoute,
+                65,
+                Some("Optimizing route"),
+            )
             .unwrap();
         store.save_result("job-001", &response()).unwrap();
 
@@ -879,16 +887,17 @@ mod tests {
         store
             .update_progress(
                 "running-cancel",
-                ProgressStage::Solving,
-                60,
-                Some("Solving route"),
+                ProgressStage::OptimizingRoute,
+                65,
+                Some("Optimizing route"),
             )
             .unwrap();
         let running = store
             .cancel_job("running-cancel", "Job cancelled by request")
             .unwrap();
         assert_eq!(running.status, JobStatus::Cancelled);
-        assert_eq!(running.progress, 60);
+        assert_eq!(running.progress, 65);
+        assert_eq!(running.stage, Some(ProgressStage::OptimizingRoute));
         assert_eq!(
             running.last_message.as_deref(),
             Some("Job cancelled by request")

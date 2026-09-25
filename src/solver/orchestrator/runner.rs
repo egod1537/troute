@@ -15,8 +15,8 @@ use crate::{
     domain::TimeOfDay,
     solver::{
         DefaultObjectivePolicy, ObjectiveEvaluator, RouteSolver, SolverCandidate,
-        SolverCandidateMetadata, SolverDiagnostics, SolverError, SolverInput, SolverRunResult,
-        SolverSolution,
+        SolverCandidateMetadata, SolverDiagnostics, SolverError, SolverInput, SolverProgressEvent,
+        SolverProgressObserver, SolverRunResult, SolverSolution,
     },
 };
 
@@ -26,6 +26,15 @@ use super::{
 };
 
 const TIMEOUT_POLL_INTERVAL: Duration = Duration::from_millis(2);
+
+fn report_progress(
+    observer: &dyn SolverProgressObserver,
+    event: impl FnOnce() -> SolverProgressEvent,
+) {
+    if observer.is_enabled() {
+        observer.on_progress(event());
+    }
+}
 
 /// Result produced by a strategy before common feasibility/objective
 /// evaluation is applied by the orchestrator.
@@ -161,6 +170,14 @@ impl<E: ObjectiveEvaluator> SolverOrchestrator<E> {
         &self,
         input: SolverInput<'_>,
     ) -> Result<OrchestratorSolveResult, SolverError> {
+        self.solve_detailed_with_progress(input, &crate::solver::NoopSolverProgressObserver)
+    }
+
+    fn solve_detailed_with_progress(
+        &self,
+        input: SolverInput<'_>,
+        observer: &dyn SolverProgressObserver,
+    ) -> Result<OrchestratorSolveResult, SolverError> {
         if input.cancellation.is_cancelled() {
             return Err(SolverError::Cancelled);
         }
@@ -172,14 +189,15 @@ impl<E: ObjectiveEvaluator> SolverOrchestrator<E> {
             });
         }
         if self.anytime {
-            return self.solve_anytime(input);
+            return self.solve_anytime(input, observer);
         }
-        self.solve_registered(input)
+        self.solve_registered(input, observer)
     }
 
     fn solve_registered(
         &self,
         input: SolverInput<'_>,
+        observer: &dyn SolverProgressObserver,
     ) -> Result<OrchestratorSolveResult, SolverError> {
         let started = Instant::now();
         let location_count = input.problem.locations().len();
@@ -215,6 +233,9 @@ impl<E: ObjectiveEvaluator> SolverOrchestrator<E> {
                     let Some((index, strategy)) = task else {
                         break;
                     };
+                    report_progress(observer, || {
+                        SolverProgressEvent::StrategyStarted(strategy.name().to_owned())
+                    });
                     let candidate = execute_strategy(
                         strategy.as_ref(),
                         evaluator,
@@ -225,6 +246,9 @@ impl<E: ObjectiveEvaluator> SolverOrchestrator<E> {
                         },
                         timeout,
                     );
+                    report_progress(observer, || {
+                        SolverProgressEvent::StrategyCompleted(strategy.name().to_owned())
+                    });
                     if result_tx.send((index, candidate)).is_err() {
                         break;
                     }
@@ -242,6 +266,9 @@ impl<E: ObjectiveEvaluator> SolverOrchestrator<E> {
             .into_iter()
             .map(|(_, candidate)| candidate)
             .collect();
+        report_progress(observer, || {
+            SolverProgressEvent::SelectionStarted(candidates.len())
+        });
         let selector = CandidateSelector::new(&self.evaluator);
         selector.rank(&mut candidates);
         let selected = selector.select(&candidates)?;
@@ -263,6 +290,7 @@ impl<E: ObjectiveEvaluator> SolverOrchestrator<E> {
     fn solve_anytime(
         &self,
         input: SolverInput<'_>,
+        observer: &dyn SolverProgressObserver,
     ) -> Result<OrchestratorSolveResult, SolverError> {
         let started = Instant::now();
         let deadline = started + self.config.total_budget;
@@ -279,6 +307,9 @@ impl<E: ObjectiveEvaluator> SolverOrchestrator<E> {
                 self.config.deadline_safety_margin,
                 self.config.strategy_timeout,
             ) {
+                report_progress(observer, || {
+                    SolverProgressEvent::StrategyStarted(exact.name().to_owned())
+                });
                 let candidate = execute_strategy(
                     exact.as_ref(),
                     &self.evaluator,
@@ -289,6 +320,9 @@ impl<E: ObjectiveEvaluator> SolverOrchestrator<E> {
                     },
                     timeout,
                 );
+                report_progress(observer, || {
+                    SolverProgressEvent::StrategyCompleted(exact.name().to_owned())
+                });
                 update_global_best(
                     &self.evaluator,
                     &candidates,
@@ -309,6 +343,7 @@ impl<E: ObjectiveEvaluator> SolverOrchestrator<E> {
                         global_best_updates,
                         "exact_optimum",
                         candidates,
+                        observer,
                     );
                 }
             }
@@ -365,6 +400,9 @@ impl<E: ObjectiveEvaluator> SolverOrchestrator<E> {
                         ) else {
                             break;
                         };
+                        report_progress(observer, || {
+                            SolverProgressEvent::StrategyStarted(strategy.name().to_owned())
+                        });
                         let candidate = execute_strategy(
                             strategy.as_ref(),
                             evaluator,
@@ -375,6 +413,9 @@ impl<E: ObjectiveEvaluator> SolverOrchestrator<E> {
                             },
                             timeout,
                         );
+                        report_progress(observer, || {
+                            SolverProgressEvent::StrategyCompleted(strategy.name().to_owned())
+                        });
                         if result_tx.send((index, candidate)).is_err() {
                             break;
                         }
@@ -424,6 +465,12 @@ impl<E: ObjectiveEvaluator> SolverOrchestrator<E> {
                 sa_run_count + 1,
                 duration_ms(chunk).saturating_sub(1).max(1),
             )?;
+            report_progress(observer, || {
+                SolverProgressEvent::AnnealingRunStarted(sa_run_count + 1)
+            });
+            report_progress(observer, || {
+                SolverProgressEvent::StrategyStarted(strategy.name().to_owned())
+            });
             let mut candidate = execute_strategy(
                 strategy.as_ref(),
                 &self.evaluator,
@@ -434,6 +481,9 @@ impl<E: ObjectiveEvaluator> SolverOrchestrator<E> {
                 },
                 chunk,
             );
+            report_progress(observer, || {
+                SolverProgressEvent::StrategyCompleted(strategy.name().to_owned())
+            });
             sa_run_count += 1;
             candidate
                 .metadata
@@ -480,6 +530,7 @@ impl<E: ObjectiveEvaluator> SolverOrchestrator<E> {
             global_best_updates,
             termination_reason,
             candidates,
+            observer,
         )
     }
 }
@@ -521,6 +572,28 @@ impl<E: ObjectiveEvaluator> RouteSolver for SolverOrchestrator<E> {
                 termination_reason: result.termination_reason,
             }),
         })
+    }
+
+    fn solve_with_diagnostics_and_progress(
+        &self,
+        input: SolverInput<'_>,
+        observer: &dyn SolverProgressObserver,
+    ) -> Result<SolverRunResult, SolverError> {
+        self.solve_detailed_with_progress(input, observer)
+            .map(|result| SolverRunResult {
+                solution: result.solution,
+                diagnostics: Some(SolverDiagnostics {
+                    selected_strategy: result.selected_strategy,
+                    candidates: result.candidates,
+                    total_budget_ms: result.total_budget_ms,
+                    total_elapsed_ms: result.total_elapsed_ms,
+                    baseline_elapsed_ms: result.baseline_elapsed_ms,
+                    sa_elapsed_ms: result.sa_elapsed_ms,
+                    sa_run_count: result.sa_run_count,
+                    global_best_updates: result.global_best_updates,
+                    termination_reason: result.termination_reason,
+                }),
+            })
     }
 
     fn selected_start_time(
@@ -580,7 +653,11 @@ fn build_result<E: ObjectiveEvaluator>(
     global_best_updates: u64,
     termination_reason: &str,
     mut candidates: Vec<SolverCandidate>,
+    observer: &dyn SolverProgressObserver,
 ) -> Result<OrchestratorSolveResult, SolverError> {
+    report_progress(observer, || {
+        SolverProgressEvent::SelectionStarted(candidates.len())
+    });
     let selector = CandidateSelector::new(evaluator);
     selector.rank(&mut candidates);
     let selected = selector.select(&candidates)?;
