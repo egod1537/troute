@@ -273,10 +273,20 @@ export interface StoredJobRecord extends StoredJobState {
   error?: StoredJobError | null;
 }
 
-export interface StoredJobEvent extends StoredJobState {
-  request?: RouteInput;
-  result?: RouteResponse | null;
-  error?: StoredJobError | null;
+export interface JobClientState {
+  job_id: string;
+  status: StoredJobStatus;
+  stage: string | null;
+  progress: number;
+  last_message: string | null;
+  result: RouteResponse | null;
+  error: StoredJobError | null;
+}
+
+export interface StoredJobEvent {
+  sequence: number;
+  updated_at: number;
+  state: JobClientState;
 }
 
 export interface StoredTimelineEntry {
@@ -677,11 +687,20 @@ export function subscribeToStoredJob(
   const receive = (message: MessageEvent<string>) => {
     try {
       const event = JSON.parse(message.data) as StoredJobEvent;
+      if (
+        !object(event) ||
+        !Number.isSafeInteger(event.sequence) ||
+        event.sequence < 0 ||
+        message.lastEventId !== String(event.sequence) ||
+        !object(event.state)
+      ) {
+        return;
+      }
       onEvent(event);
       if (
-        event.status === "completed" ||
-        event.status === "failed" ||
-        event.status === "cancelled"
+        event.state.status === "completed" ||
+        event.state.status === "failed" ||
+        event.state.status === "cancelled"
       ) {
         source.close();
       }

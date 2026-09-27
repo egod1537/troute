@@ -262,6 +262,21 @@ omitted; they may be blank when a matrix is supplied because tcache is bypassed.
 Overnight windows are not supported, so `open_time` must not be later than
 `close_time`. The request body limit is 1 MiB.
 
+The canonical `OptimizeRouteRequest` wire fields are:
+
+- `job_id`
+- `locations[].id`, optional `locations[].name`, `locations[].place_id`,
+  `locations[].open_time`, `locations[].close_time`, and
+  `locations[].stay_minutes`
+- optional `start_policy`, `start_time`, `travel_mode`, `country_code`,
+  `route_provider`, and `travel_time_matrix`
+- optional `debug.min_job_duration_ms`, `debug.shuffle_result_route`, and
+  `debug.shuffle_seed`
+
+Unknown fields are rejected. The compatibility input aliases `countryCode`,
+`provider`, and `routeProvider` are accepted, but serialization always uses the
+snake-case canonical names above.
+
 The optional `travel_mode` field accepts exactly `TRANSIT`, `DRIVING`,
 `WALKING`, or `BICYCLING` and defaults to `TRANSIT` when omitted. When troute
 builds the matrix, the selected value is forwarded to each tcache Route Job.
@@ -289,7 +304,7 @@ optional diagnostic setting below:
 `min_job_duration_ms` must be an integer from 0 through 60000. It measures from
 Job creation, so time spent pending behind the concurrency semaphore counts
 toward the minimum. Real progress stages are exposed near 0% (`accepted`), 20%
-(`building_matrix`), 50% (`solving`), and 80% (`scheduling`); result or error
+(`building_matrix`), 50% (`optimizing_route`), and 80% (`scheduling`); result or error
 persistence waits until 100% only when the actual execution finished sooner.
 Cancellation interrupts these waits immediately. The option is disabled when
 omitted, is retained in `request.json`, applies consistently to successful and
@@ -384,6 +399,13 @@ brevity):
 `start_time`; for `EARLIEST` and `LATEST`, an omitted `start_time` defaults to
 `00:00`, while a supplied value is the lower bound. For compatibility, omitting
 `start_policy` retains the previous `LATEST` behavior.
+
+`OptimizeRouteResponse` always contains `route` and
+`total_travel_minutes`. Its current optional metadata fields are
+`start_policy`, `selected_start_time`, `solver_candidates`,
+`solver_diagnostics`, `selected_provider`, `provider_selection_reason`,
+`provider_selection_source`, `country_code`, and `mode`. Optional metadata is
+omitted when it is unavailable.
 
 For `[A, B, C, D]`, `A` and `D` remain fixed while the solver may return an
 intermediate order such as `[A, C, B, D]`. The start location's stay duration
@@ -624,7 +646,7 @@ Trasolve
 
 troute validates and persists the request before spawning a Tokio task. The
 blocking optimization pipeline runs on Tokio's blocking pool, records progress
-through `accepted`, `building_matrix`, `solving`, and `scheduling`, then stores
+through `accepted`, `building_matrix`, `optimizing_route`, and `scheduling`, then stores
 either the result or error before its terminal state. The Job Store is
 authoritative; the lifetime of the submitting HTTP request is independent of
 optimization. It performs no HTTP request to Trasolve. A consumer can poll the
@@ -635,7 +657,7 @@ state:
 {
   "job_id": "route-example",
   "status": "running",
-  "stage": "solving",
+  "stage": "optimizing_route",
   "progress": 60,
   "last_message": "Solving route.",
   "created_at": 1789520000000,
@@ -662,12 +684,51 @@ delivery. Idle connections receive a `: heartbeat` comment every 15 seconds.
 Responses use `text/event-stream`, `Cache-Control: no-cache`,
 `Connection: keep-alive`, and `X-Accel-Buffering: no`.
 
+Every event uses the same public envelope, independently of the full Job detail
+and its persistence representation:
+
+```text
+event: progress
+id: 17
+data: {"sequence":17,"updated_at":123456789,"state":{"job_id":"route-example","status":"running","stage":"fetching_travel_times","progress":33,"last_message":"Fetched 3 / 10 travel-time pairs.","error":null,"result":null}}
+```
+
+`id` is always the decimal form of `data.sequence`. `sequence` is the Job's
+logical SSE revision and is persisted separately from the detail DTO, so a
+terminal reconnect keeps the same current revision. `updated_at` is copied from
+the persisted Job state and is not the transmission time. Consumers must read
+Job fields from `data.state`; `job_id`, `status`, request data, `created_at`,
+and `completed_at` are never flat envelope fields. `stage`, `last_message`,
+`error`, and `result` are always present and use JSON `null` when absent.
+
+`snapshot` permits every Job status. `progress` carries only `pending` or
+`running` state and a stage. `completed` has a non-null result and null error;
+`failed` has a non-null error and null result; `cancelled` carries cancelled
+state with null result and error. A failed error retains `code`, `message`,
+`detail`, `failure_detail`, and `suggestions`. The latter two are stable,
+machine-readable public contracts.
+
+Public progress stages, in order, are `accepted`, `validating_request`,
+`selecting_provider`, `preparing_matrix`, `fetching_travel_times`,
+`building_matrix`, `generating_candidates`, `optimizing_route`,
+`selecting_best_candidate`, `scheduling`, `validating_schedule`, and
+`finalizing_result`. The legacy input value `solving` is accepted when reading
+stored data, but new payloads serialize only `optimizing_route`.
+
+During rollout, Trasolve may accept the former flat SSE payload as a temporary
+read-only compatibility fallback. troute emits only the canonical envelope;
+it does not maintain two output formats. Inventory any additional consumers
+before deployment and remove the fallback after all producers are upgraded.
+
 The broadcast channel is only a low-latency notification path. State is always
 persisted before publication, and the Job Store remains authoritative. A new or
 reconnected client receives the latest snapshot; clients should use
 `GET /integration/jobs/{job_id}` if an SSE connection is interrupted. Slow
 subscribers never block workers and recover from broadcast lag using another
-persisted snapshot.
+persisted snapshot. That recovery snapshot uses the current sequence at the
+stable snapshot read, and its SSE `id` matches the envelope sequence. Opening a
+stream for an already-terminal Job yields one snapshot containing its result or
+error and then closes.
 
 The testbed uses SSE for the selected active Job while retaining polling for
 Job-list discovery. Its nginx proxy disables response buffering and uses a

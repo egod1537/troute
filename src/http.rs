@@ -13,7 +13,7 @@ use crate::{
         rank_failure_suggestions, service_failure_detail, service_suggestions, FailureDetail,
         FailureSuggestion, DEFAULT_MAX_FAILURE_SUGGESTIONS,
     },
-    jobs::{JobEventData, JobEventKind, JobExecutor, JobRunner},
+    jobs::{JobEventEnvelope, JobEventKind, JobExecutor, JobRunner},
     observation::{
         allowlisted_headers, JobObservationRecorder, JobTimelineEntry, ObservationDirection,
         ObservationHeaders, ObservationPeer,
@@ -857,19 +857,23 @@ async fn job_events(
         }
     } else {
         let initial = read_job()?;
-        let sequence = u64::try_from(initial.state.updated_at).unwrap_or(0);
+        let sequence = store
+            .current_event_sequence(&job_id)
+            .map_err(ApiError::from_storage)?
+            // Compatibility for Job records created before sequence metadata.
+            .unwrap_or_else(|| u64::try_from(initial.state.updated_at).unwrap_or(0));
         (initial, sequence)
     };
     let initial_terminal = !matches!(
         initial.state.status,
         JobStatus::Pending | JobStatus::Running
     );
-    let snapshot = JobEventData::snapshot(initial);
+    let snapshot = JobEventEnvelope::from_stored_job(initial_sequence, initial);
     let event_store = store.clone();
     let event_job_id = job_id.clone();
 
     let stream = async_stream::stream! {
-        yield Ok::<Event, Infallible>(sse_event("snapshot", initial_sequence, &snapshot));
+        yield Ok::<Event, Infallible>(sse_event("snapshot", &snapshot));
         if initial_terminal {
             return;
         }
@@ -878,43 +882,49 @@ async fn job_events(
             return;
         };
         let mut cursor = initial_sequence;
-        loop {
+        'events: loop {
             match subscription.receiver.recv().await {
                 Ok(event) => {
-                    if event.sequence <= cursor {
+                    if event.envelope.sequence <= cursor {
                         continue;
                     }
-                    cursor = event.sequence;
+                    cursor = event.envelope.sequence;
                     let terminal = matches!(
                         event.kind,
                         JobEventKind::Completed | JobEventKind::Failed | JobEventKind::Cancelled
                     );
-                    yield Ok(sse_event(event.kind.as_str(), event.sequence, &event.data));
+                    yield Ok(sse_event(event.kind.as_str(), &event.envelope));
                     if terminal {
                         break;
                     }
                 }
                 Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => {
-                    match event_store.get_job(&event_job_id) {
-                        Ok(Some(job)) => {
-                            let terminal = !matches!(
-                                job.state.status,
-                                JobStatus::Pending | JobStatus::Running
-                            );
-                            cursor = subscription.current_sequence();
-                            let snapshot = JobEventData::snapshot(job);
-                            yield Ok(sse_event("snapshot", cursor, &snapshot));
-                            if terminal {
-                                break;
+                    let (job, recovered_sequence) = loop {
+                        let before = subscription.current_sequence();
+                        let job = match event_store.get_job(&event_job_id) {
+                            Ok(Some(job)) => job,
+                            Ok(None) => break 'events,
+                            Err(error) => {
+                                eprintln!(
+                                    "SSE lag recovery failed; job_id={event_job_id}; error={error}"
+                                );
+                                break 'events;
                             }
+                        };
+                        let after = subscription.current_sequence();
+                        if before == after {
+                            break (job, after);
                         }
-                        Ok(None) => break,
-                        Err(error) => {
-                            eprintln!(
-                                "SSE lag recovery failed; job_id={event_job_id}; error={error}"
-                            );
-                            break;
-                        }
+                    };
+                    let terminal = !matches!(
+                        job.state.status,
+                        JobStatus::Pending | JobStatus::Running
+                    );
+                    cursor = recovered_sequence;
+                    let snapshot = JobEventEnvelope::from_stored_job(cursor, job);
+                    yield Ok(sse_event("snapshot", &snapshot));
+                    if terminal {
+                        break;
                     }
                 }
                 Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
@@ -942,11 +952,15 @@ async fn job_events(
     Ok(response)
 }
 
-fn sse_event(event: &'static str, sequence: u64, data: &JobEventData) -> Event {
+fn sse_event(event: &'static str, envelope: &JobEventEnvelope) -> Event {
+    assert!(
+        envelope.is_valid_for_event(event),
+        "persisted Job violates the {event} SSE contract"
+    );
     Event::default()
         .event(event)
-        .id(sequence.to_string())
-        .data(serde_json::to_string(data).expect("job event data must serialize"))
+        .id(envelope.sequence.to_string())
+        .data(serde_json::to_string(envelope).expect("job event envelope must serialize"))
 }
 
 fn record_job_inspection(

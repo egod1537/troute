@@ -34,7 +34,7 @@ function recordFor(job: ServerJob) {
     request: requestFor(job.id),
     job_id: job.id,
     status: job.status,
-    stage: job.status === "running" ? "solving" : job.status,
+    stage: job.status === "running" ? "optimizing_route" : job.status,
     progress: job.progress,
     last_message: `${job.status} message`,
     created_at: job.createdAt,
@@ -265,7 +265,19 @@ test("selected active Job receives progress through SSE without list polling", a
       await route.fulfill({
         contentType: "text/event-stream",
         headers: { "Cache-Control": "no-cache" },
-        body: `event: progress\nid: 2\ndata: ${JSON.stringify(recordFor(job))}\n\n`,
+        body: `event: progress\nid: 2\ndata: ${JSON.stringify({
+          sequence: 2,
+          updated_at: job.updatedAt,
+          state: {
+            job_id: job.id,
+            status: job.status,
+            stage: "optimizing_route",
+            progress: job.progress,
+            last_message: `${job.status} message`,
+            result: null,
+            error: null,
+          },
+        })}\n\n`,
       });
     },
   );

@@ -36,7 +36,7 @@ pub use failure::{
     rank_failure_suggestions, FailureDetail, FailureSuggestion, FailureSuggestionType,
     RemediationConfig, SuggestionConfidence,
 };
-pub use jobs::{JobExecutor, JobRunner};
+pub use jobs::{JobClientError, JobClientState, JobEventEnvelope, JobExecutor, JobRunner};
 pub use observation::{
     InMemoryJobTimelineStore, JobObservationRecorder, JobTimelineEntry, JobTimelineStore,
     ObservationDirection, ObservationPeer,

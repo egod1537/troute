@@ -6,7 +6,7 @@ use std::{
     },
 };
 
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use tokio::sync::broadcast;
 use tokio::sync::{mpsc, oneshot, Semaphore};
 
@@ -155,52 +155,101 @@ impl JobEventKind {
 
 #[derive(Debug, Clone)]
 pub(crate) struct JobEvent {
-    pub sequence: u64,
     pub kind: JobEventKind,
-    pub data: JobEventData,
+    pub envelope: JobEventEnvelope,
 }
 
-#[derive(Debug, Clone, Serialize)]
-pub(crate) struct JobEventData {
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub request: Option<OptimizeRouteRequest>,
+/// The persisted Job fields exposed to SSE consumers.
+///
+/// This deliberately excludes request and persistence lifecycle metadata. All
+/// fields are serialized for every event so consumers can replace their
+/// current view without merging event-specific shapes.
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
+pub struct JobClientState {
     pub job_id: String,
     pub status: JobStatus,
     pub stage: Option<ProgressStage>,
     pub progress: u8,
     pub last_message: Option<String>,
-    pub created_at: i64,
-    pub updated_at: i64,
-    pub completed_at: Option<i64>,
-    #[serde(skip_serializing_if = "Option::is_none")]
     pub result: Option<OptimizeRouteResponse>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub error: Option<StoredJobError>,
+    pub error: Option<JobClientError>,
 }
 
-impl JobEventData {
-    pub(crate) fn snapshot(job: StoredJob) -> Self {
-        Self::from_job(job, true)
-    }
+/// Stable, machine-readable optimization failure sent over SSE.
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
+pub struct JobClientError {
+    pub code: String,
+    pub message: String,
+    pub detail: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub failure_detail: Option<FailureDetail>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub suggestions: Option<Vec<crate::failure::FailureSuggestion>>,
+}
 
-    fn event(job: StoredJob) -> Self {
-        Self::from_job(job, false)
-    }
-
-    fn from_job(job: StoredJob, include_request: bool) -> Self {
+impl From<StoredJobError> for JobClientError {
+    fn from(error: StoredJobError) -> Self {
         Self {
-            request: include_request.then_some(job.request),
-            job_id: job.state.job_id,
-            status: job.state.status,
-            stage: job.state.stage,
-            progress: job.state.progress,
-            last_message: job.state.last_message,
-            created_at: job.state.created_at,
-            updated_at: job.state.updated_at,
-            completed_at: job.state.completed_at,
-            result: job.result,
-            error: job.error,
+            code: error.code,
+            message: error.message,
+            detail: error.detail,
+            failure_detail: error.failure_detail,
+            suggestions: error.suggestions,
         }
+    }
+}
+
+/// Canonical payload serialized into every Job SSE `data` field.
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
+pub struct JobEventEnvelope {
+    pub sequence: u64,
+    pub updated_at: i64,
+    pub state: JobClientState,
+}
+
+impl JobEventEnvelope {
+    /// Builds a wire DTO from a persisted Job without serializing the storage
+    /// model itself. `updated_at` is copied from persistence, never generated
+    /// at transmission time.
+    pub fn from_stored_job(sequence: u64, job: StoredJob) -> Self {
+        Self {
+            updated_at: job.state.updated_at,
+            sequence,
+            state: JobClientState {
+                job_id: job.state.job_id,
+                status: job.state.status,
+                stage: job.state.stage,
+                progress: job.state.progress,
+                last_message: job.state.last_message,
+                result: job.result,
+                error: job.error.map(JobClientError::from),
+            },
+        }
+    }
+
+    /// Checks the event-name and payload invariants of the public wire
+    /// contract. Snapshot accepts every valid persisted status.
+    pub fn is_valid_for_event(&self, event: &str) -> bool {
+        let payload_is_valid = match self.state.status {
+            JobStatus::Pending | JobStatus::Running => {
+                self.state.result.is_none() && self.state.error.is_none()
+            }
+            JobStatus::Completed => self.state.result.is_some() && self.state.error.is_none(),
+            JobStatus::Failed => self.state.result.is_none() && self.state.error.is_some(),
+            JobStatus::Cancelled => self.state.result.is_none() && self.state.error.is_none(),
+        };
+        payload_is_valid
+            && match event {
+                "snapshot" => true,
+                "progress" => {
+                    matches!(self.state.status, JobStatus::Pending | JobStatus::Running)
+                        && self.state.stage.is_some()
+                }
+                "completed" => self.state.status == JobStatus::Completed,
+                "failed" => self.state.status == JobStatus::Failed,
+                "cancelled" => self.state.status == JobStatus::Cancelled,
+                _ => false,
+            }
     }
 }
 
@@ -225,12 +274,17 @@ impl JobActivity {
         self.cancellation.cancel();
     }
 
-    fn publish(&self, kind: JobEventKind, data: JobEventData) {
+    fn publish(&self, store: &dyn JobStore, kind: JobEventKind, job: StoredJob) {
         let sequence = self.sequence.fetch_add(1, Ordering::AcqRel) + 1;
+        if let Err(error) = store.record_event_sequence(&job.state.job_id, sequence) {
+            eprintln!(
+                "job event sequence persistence failed; job_id={}; sequence={sequence}; error={error}",
+                job.state.job_id
+            );
+        }
         let _ = self.events.send(JobEvent {
-            sequence,
             kind,
-            data,
+            envelope: JobEventEnvelope::from_stored_job(sequence, job),
         });
     }
 
@@ -242,7 +296,7 @@ impl JobActivity {
                 {
                     return;
                 }
-                self.publish(kind, JobEventData::event(job));
+                self.publish(store, kind, job);
             }
             Ok(None) => {
                 eprintln!("job event publish skipped; job_id={job_id}; persisted job disappeared")
@@ -706,6 +760,71 @@ mod tests {
             "start_time": "09:00"
         }))
         .unwrap()
+    }
+
+    #[test]
+    fn canonical_event_envelope_snapshot_matches_the_serializer() {
+        let suggestion = serde_json::from_value(json!({
+            "type": "REMOVE_LOCATION",
+            "reason": "Remove the conflicting stop.",
+            "confidence": "heuristic",
+            "location_id": "B"
+        }))
+        .unwrap();
+        let envelope = JobEventEnvelope::from_stored_job(
+            17,
+            StoredJob {
+                request: request(),
+                state: JobState {
+                    job_id: "wire-contract".to_owned(),
+                    status: JobStatus::Failed,
+                    stage: Some(ProgressStage::OptimizingRoute),
+                    progress: 70,
+                    last_message: Some("No feasible route was found.".to_owned()),
+                    created_at: 100,
+                    updated_at: 123_456_789,
+                    completed_at: Some(123_456_789),
+                },
+                result: None,
+                error: Some(StoredJobError {
+                    code: "NO_FEASIBLE_ROUTE".to_owned(),
+                    message: "No feasible route was found.".to_owned(),
+                    detail: "solver found no feasible route".to_owned(),
+                    failure_detail: Some(FailureDetail::NoFeasibleRoute),
+                    suggestions: Some(vec![suggestion]),
+                }),
+            },
+        );
+
+        assert!(envelope.is_valid_for_event("snapshot"));
+        assert!(envelope.is_valid_for_event("failed"));
+        assert_eq!(
+            serde_json::to_value(envelope).unwrap(),
+            json!({
+                "sequence": 17,
+                "updated_at": 123_456_789,
+                "state": {
+                    "job_id": "wire-contract",
+                    "status": "failed",
+                    "stage": "optimizing_route",
+                    "progress": 70,
+                    "last_message": "No feasible route was found.",
+                    "result": null,
+                    "error": {
+                        "code": "NO_FEASIBLE_ROUTE",
+                        "message": "No feasible route was found.",
+                        "detail": "solver found no feasible route",
+                        "failure_detail": { "type": "NO_FEASIBLE_ROUTE" },
+                        "suggestions": [{
+                            "type": "REMOVE_LOCATION",
+                            "reason": "Remove the conflicting stop.",
+                            "confidence": "heuristic",
+                            "location_id": "B"
+                        }]
+                    }
+                }
+            })
+        );
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

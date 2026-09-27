@@ -123,9 +123,9 @@ export function App({ initialThemeMode }: AppProps) {
             ),
           );
           if (
-            event.status === "completed" ||
-            event.status === "failed" ||
-            event.status === "cancelled"
+            event.state.status === "completed" ||
+            event.state.status === "failed" ||
+            event.state.status === "cancelled"
           ) {
             void getStoredTimeline(selectedJobId)
               .then((timeline) => updateJob(selectedJobId, { timeline }))

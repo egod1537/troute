@@ -149,6 +149,17 @@ pub trait JobStore: Send + Sync {
     fn get_job(&self, job_id: &str) -> Result<Option<StoredJob>, JobStoreError>;
     fn list_recent(&self, limit: usize) -> Result<Vec<JobIndexEntry>, JobStoreError>;
     fn recover_interrupted(&self) -> Result<usize, JobStoreError>;
+
+    /// Returns the last SSE sequence persisted for this Job. `None` supports
+    /// custom stores and records created before sequence persistence existed.
+    fn current_event_sequence(&self, _job_id: &str) -> Result<Option<u64>, JobStoreError> {
+        Ok(None)
+    }
+
+    /// Persists SSE sequence metadata without adding it to the Job detail DTO.
+    fn record_event_sequence(&self, _job_id: &str, _sequence: u64) -> Result<(), JobStoreError> {
+        Ok(())
+    }
 }
 
 #[derive(Debug)]
@@ -186,6 +197,10 @@ impl FileJobStore {
 
     fn state_path(&self, job_id: &str) -> PathBuf {
         self.job_dir(job_id).join("state.json")
+    }
+
+    fn event_sequence_path(&self, job_id: &str) -> PathBuf {
+        self.job_dir(job_id).join("event-sequence.json")
     }
 
     fn read_state(&self, job_id: &str) -> Result<JobState, JobStoreError> {
@@ -274,6 +289,7 @@ impl JobStore for FileJobStore {
         }
 
         atomic_write_json(&job_dir.join("request.json"), request)?;
+        atomic_write_json(&job_dir.join("event-sequence.json"), &0_u64)?;
         let timestamp = now_ms();
         let state = JobState {
             job_id: request.job_id.clone(),
@@ -479,11 +495,36 @@ impl JobStore for FileJobStore {
                 state.updated_at = timestamp;
                 state.completed_at = Some(timestamp);
                 atomic_write_json(&state_path, &state)?;
+                let sequence_path = directory.join("event-sequence.json");
+                let sequence = read_optional_json::<u64>(&sequence_path)?
+                    .unwrap_or(0)
+                    .saturating_add(1);
+                atomic_write_json(&sequence_path, &sequence)?;
                 recovered += 1;
             }
         }
         self.rebuild_index()?;
         Ok(recovered)
+    }
+
+    fn current_event_sequence(&self, job_id: &str) -> Result<Option<u64>, JobStoreError> {
+        let _guard = self
+            .lock
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        read_optional_json(&self.event_sequence_path(job_id))
+    }
+
+    fn record_event_sequence(&self, job_id: &str, sequence: u64) -> Result<(), JobStoreError> {
+        let _guard = self
+            .lock
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let directory = self.job_dir(job_id);
+        if !directory.exists() {
+            return Err(JobStoreError::JobNotFound(job_id.to_owned()));
+        }
+        atomic_write_json(&self.event_sequence_path(job_id), &sequence)
     }
 }
 

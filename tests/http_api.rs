@@ -19,11 +19,15 @@ use tower::ServiceExt;
 use troute::{
     development::{DevelopmentRouteSolver, DevelopmentRoutingProvider},
     http,
+    matrix::TravelTimeMatrix,
     observation::{
         JobObservationRecorder, JobTimelineEntry, JobTimelineStore, ObservationDirection,
         ObservationPeer,
     },
-    routing::{PolicyRoutingProvider, RouteProviderPolicyResolver, RouteProviderRegistry},
+    routing::{
+        PolicyRoutingProvider, RouteProviderPolicyResolver, RouteProviderRegistry, RoutingContext,
+        RoutingError, RoutingProgressObserver, RoutingProvider,
+    },
     solver::{RouteSolver, SolverError, SolverInput, SolverSolution},
     storage::{FileJobStore, FileJobTimelineStore, JobStatus, JobStore},
     ProgressStage, RouteOptimizationService,
@@ -53,6 +57,45 @@ struct GatedFailureSolver {
 struct TimedSolver {
     duration: Duration,
     finished_at: Arc<Mutex<Option<std::time::Instant>>>,
+}
+
+#[derive(Clone)]
+struct FloodingRoutingProvider {
+    started: Arc<AtomicBool>,
+    release: Arc<AtomicBool>,
+}
+
+impl RoutingProvider for FloodingRoutingProvider {
+    fn travel_time_matrix(
+        &self,
+        locations: &[troute::domain::Location],
+        _context: &RoutingContext,
+    ) -> Result<TravelTimeMatrix, RoutingError> {
+        let rows = (0..locations.len())
+            .map(|from| {
+                (0..locations.len())
+                    .map(|to| if from == to { 0 } else { 15 })
+                    .collect()
+            })
+            .collect();
+        TravelTimeMatrix::new(rows).map_err(|error| RoutingError::Provider(error.to_string()))
+    }
+
+    fn travel_time_matrix_with_progress(
+        &self,
+        locations: &[troute::domain::Location],
+        context: &RoutingContext,
+        observer: &dyn RoutingProgressObserver,
+    ) -> Result<TravelTimeMatrix, RoutingError> {
+        self.started.store(true, Ordering::Release);
+        while !self.release.load(Ordering::Acquire) {
+            std::thread::sleep(Duration::from_millis(1));
+        }
+        for completed in 1..=300 {
+            observer.pairs_completed(completed, 300);
+        }
+        self.travel_time_matrix(locations, context)
+    }
 }
 
 impl RouteSolver for TimedSolver {
@@ -384,7 +427,19 @@ fn sse_field<'a>(message: &'a str, name: &str) -> Option<&'a str> {
 }
 
 fn sse_data(message: &str) -> Value {
-    serde_json::from_str(sse_field(message, "data").expect("SSE data field is missing")).unwrap()
+    let data: Value =
+        serde_json::from_str(sse_field(message, "data").expect("SSE data field is missing"))
+            .unwrap();
+    let id: u64 = sse_field(message, "id")
+        .expect("SSE id field is missing")
+        .parse()
+        .unwrap();
+    assert_eq!(data["sequence"], id);
+    assert!(data["updated_at"].is_number());
+    assert!(data["state"].is_object());
+    assert!(data.get("job_id").is_none());
+    assert!(data.get("status").is_none());
+    data
 }
 
 #[tokio::test]
@@ -539,7 +594,9 @@ async fn integration_job_preserves_travel_mode_in_list_detail_and_sse_snapshot()
     let mut buffered = String::new();
     let snapshot = next_sse_message(&mut body, &mut buffered).await.unwrap();
     assert_eq!(sse_field(&snapshot, "event"), Some("snapshot"));
-    assert_eq!(sse_data(&snapshot)["request"]["travel_mode"], "WALKING");
+    let data = sse_data(&snapshot);
+    assert_eq!(data["state"]["job_id"], "travel-mode-job");
+    assert!(data["state"].get("request").is_none());
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -650,7 +707,7 @@ async fn debug_minimum_duration_spaces_real_stages_persists_request_and_preserve
             .expect("paced job must reach a terminal event");
         let event = sse_field(&message, "event");
         if matches!(event, Some("snapshot" | "progress")) {
-            if let Some(stage) = sse_data(&message)["stage"].as_str() {
+            if let Some(stage) = sse_data(&message)["state"]["stage"].as_str() {
                 if stages.last().map(String::as_str) != Some(stage) {
                     stages.push(stage.to_owned());
                 }
@@ -757,7 +814,7 @@ async fn debug_shuffle_combines_with_pacing_and_persists_one_result_for_sse_and_
     .await;
     assert_eq!(detail.status, StatusCode::OK);
     assert_eq!(detail.body["status"], "completed");
-    assert_eq!(completed_snapshot["result"], detail.body["result"]);
+    assert_eq!(completed_snapshot["state"]["result"], detail.body["result"]);
 
     let persisted_request: Value = serde_json::from_str(
         &fs::read_to_string(temporary.0.join("jobs/debug-shuffled/request.json")).unwrap(),
@@ -997,7 +1054,7 @@ async fn sse_reconnects_with_snapshot_orders_progress_and_closes_after_completio
         .await
         .unwrap();
     assert_eq!(sse_field(&first_snapshot, "event"), Some("snapshot"));
-    assert_eq!(sse_data(&first_snapshot)["status"], "running");
+    assert_eq!(sse_data(&first_snapshot)["state"]["status"], "running");
     drop(disconnected_body);
 
     let (headers, mut body) = open_event_stream(app.clone(), "sse-completed").await;
@@ -1010,10 +1067,10 @@ async fn sse_reconnects_with_snapshot_orders_progress_and_closes_after_completio
     assert_eq!(sse_field(&snapshot, "event"), Some("snapshot"));
     let snapshot_id: u64 = sse_field(&snapshot, "id").unwrap().parse().unwrap();
     let snapshot_data = sse_data(&snapshot);
-    assert_eq!(snapshot_data["job_id"], "sse-completed");
-    assert_eq!(snapshot_data["status"], "running");
+    assert_eq!(snapshot_data["state"]["job_id"], "sse-completed");
+    assert_eq!(snapshot_data["state"]["status"], "running");
     assert!(matches!(
-        snapshot_data["stage"].as_str(),
+        snapshot_data["state"]["stage"].as_str(),
         Some(
             "accepted"
                 | "validating_request"
@@ -1025,11 +1082,15 @@ async fn sse_reconnects_with_snapshot_orders_progress_and_closes_after_completio
                 | "optimizing_route"
         )
     ));
-    assert_eq!(snapshot_data["request"]["job_id"], "sse-completed");
+    assert!(snapshot_data["state"]["error"].is_null());
+    assert!(snapshot_data["state"]["result"].is_null());
+    assert!(snapshot_data["state"].get("request").is_none());
+    assert!(snapshot_data.get("created_at").is_none());
+    assert!(snapshot_data.get("completed_at").is_none());
 
     solver.release.store(true, Ordering::Release);
     let mut last_id = snapshot_id;
-    let mut last_progress = snapshot_data["progress"].as_u64().unwrap();
+    let mut last_progress = snapshot_data["state"]["progress"].as_u64().unwrap();
     let mut saw_progress = false;
     loop {
         let message = next_sse_message(&mut body, &mut buffered)
@@ -1044,14 +1105,23 @@ async fn sse_reconnects_with_snapshot_orders_progress_and_closes_after_completio
         match event {
             "progress" => {
                 saw_progress = true;
-                let progress = sse_data(&message)["progress"].as_u64().unwrap();
+                let data = sse_data(&message);
+                assert!(matches!(
+                    data["state"]["status"].as_str(),
+                    Some("pending" | "running")
+                ));
+                assert!(data["state"]["stage"].is_string());
+                assert!(data["state"]["error"].is_null());
+                assert!(data["state"]["result"].is_null());
+                let progress = data["state"]["progress"].as_u64().unwrap();
                 assert!(progress >= last_progress);
                 last_progress = progress;
             }
             "completed" => {
                 let data = sse_data(&message);
-                assert_eq!(data["status"], "completed");
-                assert!(data["result"].is_object());
+                assert_eq!(data["state"]["status"], "completed");
+                assert!(data["state"]["result"].is_object());
+                assert!(data["state"]["error"].is_null());
                 break;
             }
             unexpected => panic!("unexpected SSE event: {unexpected}"),
@@ -1066,10 +1136,79 @@ async fn sse_reconnects_with_snapshot_orders_progress_and_closes_after_completio
         .await
         .unwrap();
     assert_eq!(sse_field(&late_snapshot, "event"), Some("snapshot"));
-    assert_eq!(sse_data(&late_snapshot)["status"], "completed");
+    let late_data = sse_data(&late_snapshot);
+    assert_eq!(late_data["sequence"], last_id);
+    assert_eq!(late_data["state"]["status"], "completed");
+    assert!(late_data["state"]["result"].is_object());
+    assert!(late_data["state"]["error"].is_null());
     assert!(next_sse_message(&mut late_body, &mut late_buffer)
         .await
         .is_none());
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn sse_lag_recovery_emits_a_canonical_terminal_snapshot() {
+    let temporary = TestDirectory::new();
+    let store = Arc::new(FileJobStore::new(&temporary.0).unwrap());
+    let started = Arc::new(AtomicBool::new(false));
+    let release = Arc::new(AtomicBool::new(false));
+    let app = http::router_with_storage_and_limit(
+        RouteOptimizationService::new(
+            FloodingRoutingProvider {
+                started: started.clone(),
+                release: release.clone(),
+            },
+            DevelopmentRouteSolver,
+        ),
+        None,
+        Some(store.clone()),
+        None,
+    );
+    assert_eq!(
+        send_to(
+            app.clone(),
+            Method::POST,
+            "/integration/jobs",
+            Some("application/json"),
+            request_with_job_id("sse-lag-recovery").to_string(),
+        )
+        .await
+        .status,
+        StatusCode::ACCEPTED
+    );
+    tokio::time::timeout(Duration::from_secs(2), async {
+        while !started.load(Ordering::Acquire) {
+            sleep(Duration::from_millis(1)).await;
+        }
+    })
+    .await
+    .unwrap();
+
+    // Do not poll the response body until more than the broadcast capacity has
+    // been published. The next receiver read must recover from persisted state.
+    let (_, mut body) = open_event_stream(app, "sse-lag-recovery").await;
+    release.store(true, Ordering::Release);
+    wait_for_job_status(store.as_ref(), "sse-lag-recovery", JobStatus::Completed).await;
+
+    let mut buffered = String::new();
+    let initial = next_sse_message(&mut body, &mut buffered).await.unwrap();
+    assert_eq!(sse_field(&initial, "event"), Some("snapshot"));
+    let recovery = next_sse_message(&mut body, &mut buffered).await.unwrap();
+    assert_eq!(sse_field(&recovery, "event"), Some("snapshot"));
+    let data = sse_data(&recovery);
+    assert_eq!(data["state"]["status"], "completed");
+    assert!(data["state"]["result"].is_object());
+    assert!(data["state"]["error"].is_null());
+    assert_eq!(
+        data["updated_at"],
+        store
+            .get_job("sse-lag-recovery")
+            .unwrap()
+            .unwrap()
+            .state
+            .updated_at
+    );
+    assert!(next_sse_message(&mut body, &mut buffered).await.is_none());
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -1138,7 +1277,10 @@ async fn sse_sends_heartbeat_and_cancelled_terminal_event() {
             .await
             .expect("cancelled event must be sent");
         if sse_field(&message, "event") == Some("cancelled") {
-            assert_eq!(sse_data(&message)["status"], "cancelled");
+            let data = sse_data(&message);
+            assert_eq!(data["state"]["status"], "cancelled");
+            assert!(data["state"]["result"].is_null());
+            assert!(data["state"]["error"].is_null());
             break;
         }
     }
@@ -1206,8 +1348,14 @@ async fn sse_failed_event_contains_persisted_error_and_closes() {
             .expect("failed event must be sent");
         if sse_field(&message, "event") == Some("failed") {
             let data = sse_data(&message);
-            assert_eq!(data["status"], "failed");
-            assert_eq!(data["error"]["code"], "NO_FEASIBLE_ROUTE");
+            assert_eq!(data["state"]["status"], "failed");
+            assert!(data["state"]["result"].is_null());
+            assert_eq!(data["state"]["error"]["code"], "NO_FEASIBLE_ROUTE");
+            assert_eq!(
+                data["state"]["error"]["failure_detail"]["type"],
+                "NO_FEASIBLE_ROUTE"
+            );
+            assert!(data["state"]["error"]["suggestions"].is_array());
             break;
         }
     }

@@ -91,13 +91,28 @@ export function mergeStoredJobEvent(
   event: StoredJobEvent,
   existing: TestbedJob,
 ): TestbedJob {
-  return mergeStoredJob(
-    {
-      ...event,
-      request: event.request ?? existing.request,
-    },
-    existing,
-  );
+  const state = event.state;
+  const error = state.error
+    ? `${state.error.code}: ${state.error.message}${state.error.detail ? ` (${state.error.detail})` : ""}`
+    : undefined;
+  const terminal =
+    state.status === "completed" ||
+    state.status === "failed" ||
+    state.status === "cancelled";
+  return {
+    ...existing,
+    id: state.job_id,
+    status: state.status,
+    updatedAt: event.updated_at,
+    completedAt: terminal ? event.updated_at : existing.completedAt,
+    progress: state.progress,
+    stage: state.stage ?? undefined,
+    message: state.last_message ?? undefined,
+    error,
+    failure: state.error ?? existing.failure,
+    route: state.result ?? existing.route,
+    serverUpdatedAt: event.updated_at,
+  };
 }
 
 export function sortJobsNewestFirst(jobs: TestbedJob[]): TestbedJob[] {
