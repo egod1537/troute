@@ -993,13 +993,14 @@ Browser tests use explicitly mocked HTTP route fixtures, not a working solver.
 
 ## Mac mini operation
 
-Run `docker compose up -d --build` from the `main` checkout. The service uses
-`restart: unless-stopped`, so it can restart when the Docker engine starts again.
-Configure the installed Docker engine to start automatically after reboot/login,
-and keep the Mac awake for continuous service. Compose does not start the Docker
-engine or wake the Mac. Reboot behavior depends on that host configuration.
-An explicitly stopped container remains stopped; use `docker compose up -d` to
-start it again. `docker compose down` removes it.
+Run `docker compose up -d --build` from the `main` checkout. Both services use
+`restart: always`, so Docker starts them again after its daemon restarts, including
+when they had been stopped before a Mac reboot. Configure the installed Docker
+engine to start automatically after reboot/login, and keep the Mac awake for
+continuous service. Compose does not start the Docker engine or wake the Mac.
+An explicitly stopped container stays stopped until it is started manually or the
+Docker daemon restarts; use `docker compose up -d` to start it immediately.
+`docker compose down` removes it.
 
 ## Automatic deployment
 
