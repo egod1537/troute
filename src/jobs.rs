@@ -8,7 +8,7 @@ use std::{
 
 use serde::{Deserialize, Serialize};
 use tokio::sync::broadcast;
-use tokio::sync::{mpsc, oneshot, Semaphore};
+use tokio::sync::{mpsc, oneshot, OwnedSemaphorePermit, Semaphore};
 
 use crate::{
     api::{OptimizeRouteRequest, OptimizeRouteResponse},
@@ -16,18 +16,22 @@ use crate::{
     events::{OptimizationEventReporter, ProgressStage},
     failure::{
         rank_failure_suggestions, service_failure_detail, service_suggestions, FailureDetail,
-        DEFAULT_MAX_FAILURE_SUGGESTIONS,
+        FailureSuggestion, DEFAULT_MAX_FAILURE_SUGGESTIONS,
     },
     job_pacing::DebugJobPacer,
+    logging::logger,
     routing::RoutingProvider,
     schedule::ScheduleError,
     service::{OptimizationServiceError, RouteOptimizationService},
-    solver::{RouteSolver, SolverError},
+    solver::{PortfolioCapabilities, RouteSolver, SolverError, TelemetryEvent},
     storage::{
         JobState, JobStatus, JobStore, JobStoreError, StoredJob, StoredJobError,
         TerminalWriteOutcome,
     },
 };
+
+mod cancellation;
+use cancellation::JobCancellationRegistry;
 
 /// Executes the optimization pipeline independently of its HTTP request.
 pub trait JobExecutor: Send + Sync {
@@ -51,7 +55,11 @@ pub trait JobExecutor: Send + Sync {
 
     fn provider_policy_diagnostics(
         &self,
-    ) -> Option<crate::routing::RouteProviderPolicyDiagnostics> {
+    ) -> Option<crate::routing::RouteProviderSelectionDiagnostics> {
+        None
+    }
+
+    fn solver_capabilities(&self) -> Option<PortfolioCapabilities> {
         None
     }
 
@@ -91,8 +99,12 @@ where
 
     fn provider_policy_diagnostics(
         &self,
-    ) -> Option<crate::routing::RouteProviderPolicyDiagnostics> {
+    ) -> Option<crate::routing::RouteProviderSelectionDiagnostics> {
         RouteOptimizationService::provider_policy_diagnostics(self)
+    }
+
+    fn solver_capabilities(&self) -> Option<PortfolioCapabilities> {
+        RouteOptimizationService::solver_capabilities(self)
     }
 
     fn failure_suggestions(
@@ -103,60 +115,6 @@ where
     ) -> Vec<crate::failure::FailureSuggestion> {
         RouteOptimizationService::failure_suggestions(self, request, error, cancellation)
     }
-}
-
-#[derive(Clone, Default)]
-pub(crate) struct JobCancellationRegistry {
-    jobs: Arc<Mutex<HashMap<String, JobActivity>>>,
-}
-
-impl JobCancellationRegistry {
-    fn insert(&self, job_id: &str, activity: JobActivity) {
-        self.jobs
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .insert(job_id.to_owned(), activity);
-    }
-
-    pub(crate) fn get(&self, job_id: &str) -> Option<JobActivity> {
-        self.jobs
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .get(job_id)
-            .cloned()
-    }
-
-    fn remove(&self, job_id: &str) {
-        self.jobs
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .remove(job_id);
-    }
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum JobEventKind {
-    Progress,
-    Completed,
-    Failed,
-    Cancelled,
-}
-
-impl JobEventKind {
-    pub(crate) fn as_str(self) -> &'static str {
-        match self {
-            Self::Progress => "progress",
-            Self::Completed => "completed",
-            Self::Failed => "failed",
-            Self::Cancelled => "cancelled",
-        }
-    }
-}
-
-#[derive(Debug, Clone)]
-pub(crate) struct JobEvent {
-    pub kind: JobEventKind,
-    pub envelope: JobEventEnvelope,
 }
 
 /// The persisted Job fields exposed to SSE consumers.
@@ -253,6 +211,381 @@ impl JobEventEnvelope {
     }
 }
 
+/// Owns submission and background execution of persisted optimization jobs.
+#[derive(Clone)]
+pub struct JobRunner {
+    executor: Arc<dyn JobExecutor>,
+    store: Arc<dyn JobStore>,
+    cancellations: JobCancellationRegistry,
+    permits: Option<Arc<Semaphore>>,
+    admission_permits: Option<Arc<Semaphore>>,
+    max_outstanding_jobs: Option<usize>,
+}
+
+pub(crate) struct JobSubmission {
+    pub state: JobState,
+    pub completion: oneshot::Receiver<Result<JobCompletion, JobStoreError>>,
+}
+
+pub(crate) struct JobCompletion {
+    pub result: Result<OptimizeRouteResponse, OptimizationServiceError>,
+    pub persisted_error: Option<StoredJobError>,
+}
+
+impl JobCompletion {
+    fn cancelled() -> Self {
+        Self {
+            result: Err(OptimizationServiceError::Cancelled),
+            persisted_error: None,
+        }
+    }
+}
+
+impl JobRunner {
+    pub fn new(
+        executor: Arc<dyn JobExecutor>,
+        store: Arc<dyn JobStore>,
+        max_concurrent_jobs: Option<usize>,
+    ) -> Self {
+        Self::new_with_limits(executor, store, max_concurrent_jobs, None)
+    }
+
+    pub fn new_with_limits(
+        executor: Arc<dyn JobExecutor>,
+        store: Arc<dyn JobStore>,
+        max_concurrent_jobs: Option<usize>,
+        max_outstanding_jobs: Option<usize>,
+    ) -> Self {
+        Self {
+            executor,
+            store,
+            cancellations: JobCancellationRegistry::default(),
+            permits: max_concurrent_jobs
+                .filter(|limit| *limit > 0)
+                .map(|limit| Arc::new(Semaphore::new(limit))),
+            admission_permits: max_outstanding_jobs
+                .filter(|limit| *limit > 0)
+                .map(|limit| Arc::new(Semaphore::new(limit))),
+            max_outstanding_jobs: max_outstanding_jobs.filter(|limit| *limit > 0),
+        }
+    }
+
+    pub(crate) fn activity(&self, job_id: &str) -> Option<JobActivity> {
+        self.cancellations.get(job_id)
+    }
+
+    pub(crate) fn subscribe(&self, job_id: &str) -> Option<JobEventSubscription> {
+        self.cancellations
+            .get(job_id)
+            .map(|activity| activity.subscribe())
+    }
+
+    /// Persists a pending job and schedules its execution without waiting for it.
+    pub fn submit(&self, request: OptimizeRouteRequest) -> Result<JobState, JobStoreError> {
+        Ok(self.submit_with_completion(request)?.state)
+    }
+
+    pub(crate) fn submit_with_completion(
+        &self,
+        request: OptimizeRouteRequest,
+    ) -> Result<JobSubmission, JobStoreError> {
+        let admission_permit = self.try_admit()?;
+        // Creation is the authoritative duplicate check and happens before any
+        // task can observe or execute the job.
+        let state = self.store.create_job(&request)?;
+        let token = CancellationToken::new();
+        let pacer = DebugJobPacer::new(request.debug.as_ref());
+        if let Some(minimum_duration_ms) = pacer.minimum_duration_ms() {
+            logger().debug_job_pacing_enabled(&request.job_id, minimum_duration_ms);
+        }
+        self.cancellations
+            .insert(&request.job_id, JobActivity::new(token.clone()));
+
+        let (completion_tx, completion) = oneshot::channel();
+        let runner = self.clone();
+        tokio::spawn(async move {
+            let _admission_permit = admission_permit;
+            let outcome = runner.run(request, token, pacer).await;
+            let _ = completion_tx.send(outcome);
+        });
+
+        Ok(JobSubmission { state, completion })
+    }
+
+    fn try_admit(&self) -> Result<Option<OwnedSemaphorePermit>, JobStoreError> {
+        let Some(permits) = &self.admission_permits else {
+            return Ok(None);
+        };
+        permits
+            .clone()
+            .try_acquire_owned()
+            .map(Some)
+            .map_err(|_| JobStoreError::CapacityExceeded {
+                maximum: self.max_outstanding_jobs.unwrap_or(0),
+            })
+    }
+
+    async fn run(
+        &self,
+        request: OptimizeRouteRequest,
+        cancellation: CancellationToken,
+        pacer: DebugJobPacer,
+    ) -> Result<JobCompletion, JobStoreError> {
+        let context = JobExecutionContext::new(request, cancellation, pacer);
+        let job_id = context.job_id.clone();
+        let outcome = self.run_inner(context).await;
+        self.cancellations.remove(&job_id);
+        if let Err(error) = &outcome {
+            logger().job_operation_failed("job execution persistence", &job_id, error);
+        }
+        outcome
+    }
+
+    async fn run_inner(
+        &self,
+        context: JobExecutionContext,
+    ) -> Result<JobCompletion, JobStoreError> {
+        let JobExecutionContext {
+            request,
+            cancellation,
+            pacer,
+            job_id,
+        } = context;
+        let _permit = match &self.permits {
+            Some(permits) => {
+                tokio::select! {
+                    biased;
+                    _ = cancellation.cancelled() => return Ok(JobCompletion::cancelled()),
+                    permit = permits.acquire() => {
+                        Some(permit.expect("job semaphore is not closed"))
+                    }
+                }
+            }
+            None => None,
+        };
+        // A queued job may have been cancelled while waiting for a permit.
+        if cancellation.is_cancelled() {
+            return Ok(JobCompletion::cancelled());
+        }
+        match self.store.mark_running(&job_id) {
+            Ok(()) => {}
+            Err(JobStoreError::InvalidTransition {
+                status: JobStatus::Cancelled,
+                ..
+            }) => return Ok(JobCompletion::cancelled()),
+            Err(error) => return Err(error),
+        }
+
+        let (execution, update_rx) = self.spawn_worker(request, cancellation.clone());
+        let full_result = self
+            .consume_updates(&job_id, &pacer, &cancellation, update_rx)
+            .await;
+        let execution = execution.await;
+
+        let execution_was_cancelled = matches!(
+            &execution,
+            Ok((Err(OptimizationServiceError::Cancelled), _, _))
+        );
+        if execution_was_cancelled || !pacer.wait_until_minimum(&cancellation).await {
+            self.persist_cancelled(&job_id)?;
+            return Ok(JobCompletion::cancelled());
+        }
+        self.persist_execution(&job_id, execution, full_result)
+    }
+
+    fn spawn_worker(
+        &self,
+        request: OptimizeRouteRequest,
+        cancellation: CancellationToken,
+    ) -> (
+        tokio::task::JoinHandle<WorkerResult>,
+        mpsc::UnboundedReceiver<ExecutionUpdate>,
+    ) {
+        let (update_tx, update_rx) = mpsc::unbounded_channel();
+        let reporter = ProgressForwarder { update_tx };
+        let executor = self.executor.clone();
+        let analysis_request = request.clone();
+        let worker_cancellation = cancellation;
+        let execution = tokio::task::spawn_blocking(move || {
+            let result = executor.execute(request, &reporter, &worker_cancellation);
+            let suggestions = result
+                .as_ref()
+                .err()
+                .map(|error| {
+                    executor.failure_suggestions(&analysis_request, error, &worker_cancellation)
+                })
+                .unwrap_or_default();
+            let failure_detail = result
+                .as_ref()
+                .err()
+                .map(|error| service_failure_detail(error, Some(&analysis_request)));
+            (result, suggestions, failure_detail)
+        });
+        (execution, update_rx)
+    }
+
+    async fn consume_updates(
+        &self,
+        job_id: &str,
+        pacer: &DebugJobPacer,
+        cancellation: &CancellationToken,
+        mut updates: mpsc::UnboundedReceiver<ExecutionUpdate>,
+    ) -> Option<OptimizeRouteResponse> {
+        // The optimizer continues on the blocking pool while this async task
+        // exposes its real stage boundaries at the configured target times.
+        let mut full_result = None;
+        while let Some(update) = updates.recv().await {
+            match update {
+                ExecutionUpdate::Progress(update) => {
+                    if !pacer.wait_for_stage(update.stage, cancellation).await {
+                        break;
+                    }
+                    match self.store.update_progress(
+                        job_id,
+                        update.stage,
+                        update.progress,
+                        update.message.as_deref(),
+                    ) {
+                        Ok(()) => self.publish_persisted(job_id, JobEventKind::Progress),
+                        Err(JobStoreError::InvalidTransition {
+                            status: JobStatus::Cancelled,
+                            ..
+                        }) => {
+                            cancellation.cancel();
+                            break;
+                        }
+                        Err(error) => {
+                            logger().job_operation_failed(
+                                "job progress persistence",
+                                job_id,
+                                &error,
+                            );
+                        }
+                    }
+                }
+                ExecutionUpdate::Telemetry(event) => {
+                    if let Err(error) = self.store.append_solver_event(job_id, &event) {
+                        logger().job_operation_failed(
+                            "solver telemetry persistence",
+                            job_id,
+                            &error,
+                        );
+                    }
+                }
+                ExecutionUpdate::ResultSnapshot(result) => full_result = Some(result),
+            }
+        }
+        full_result
+    }
+
+    fn persist_execution(
+        &self,
+        job_id: &str,
+        execution: Result<WorkerResult, tokio::task::JoinError>,
+        full_result: Option<OptimizeRouteResponse>,
+    ) -> Result<JobCompletion, JobStoreError> {
+        match execution {
+            Ok((Ok(result), _, _)) => {
+                let result = full_result.unwrap_or(result);
+                match self.store.save_result(job_id, &result)? {
+                    TerminalWriteOutcome::Applied => {
+                        self.publish_persisted(job_id, JobEventKind::Completed);
+                        Ok(JobCompletion {
+                            result: Ok(result),
+                            persisted_error: None,
+                        })
+                    }
+                    TerminalWriteOutcome::Cancelled => Ok(JobCompletion::cancelled()),
+                }
+            }
+            Ok((Err(OptimizationServiceError::Cancelled), _, _)) => {
+                self.persist_cancelled(job_id)?;
+                Ok(JobCompletion::cancelled())
+            }
+            Ok((Err(error), suggestions, failure_detail)) => {
+                let stored = stored_error(&error, suggestions, failure_detail);
+                match self.store.save_error(job_id, &stored)? {
+                    TerminalWriteOutcome::Applied => {
+                        self.publish_persisted(job_id, JobEventKind::Failed);
+                        Ok(JobCompletion {
+                            result: Err(error),
+                            persisted_error: Some(stored),
+                        })
+                    }
+                    TerminalWriteOutcome::Cancelled => Ok(JobCompletion::cancelled()),
+                }
+            }
+            Err(join_error) => {
+                let detail = join_error.to_string();
+                let stored = StoredJobError {
+                    code: "JOB_EXECUTION_FAILED".to_owned(),
+                    message: "Route optimization failed unexpectedly.".to_owned(),
+                    detail: detail.clone(),
+                    failure_detail: None,
+                    suggestions: None,
+                };
+                match self.store.save_error(job_id, &stored)? {
+                    TerminalWriteOutcome::Applied => {
+                        self.publish_persisted(job_id, JobEventKind::Failed);
+                        Ok(JobCompletion {
+                            result: Err(OptimizationServiceError::Solver(SolverError::Failed(
+                                detail,
+                            ))),
+                            persisted_error: Some(stored),
+                        })
+                    }
+                    TerminalWriteOutcome::Cancelled => Ok(JobCompletion::cancelled()),
+                }
+            }
+        }
+    }
+
+    fn persist_cancelled(&self, job_id: &str) -> Result<(), JobStoreError> {
+        // Usually the cancel endpoint has already persisted this transition.
+        // Also cover executors that report cancellation directly.
+        match self
+            .store
+            .cancel_job(job_id, "Optimization cancelled at the user's request.")
+        {
+            Ok(_) => self.publish_persisted(job_id, JobEventKind::Cancelled),
+            Err(JobStoreError::JobNotCancellable { .. }) => {}
+            Err(error) => return Err(error),
+        }
+        Ok(())
+    }
+
+    fn publish_persisted(&self, job_id: &str, kind: JobEventKind) {
+        if let Some(activity) = self.cancellations.get(job_id) {
+            activity.publish_persisted(self.store.as_ref(), job_id, kind);
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum JobEventKind {
+    Progress,
+    Completed,
+    Failed,
+    Cancelled,
+}
+
+impl JobEventKind {
+    pub(crate) fn as_str(self) -> &'static str {
+        match self {
+            Self::Progress => "progress",
+            Self::Completed => "completed",
+            Self::Failed => "failed",
+            Self::Cancelled => "cancelled",
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
+pub(crate) struct JobEvent {
+    pub kind: JobEventKind,
+    pub envelope: JobEventEnvelope,
+}
+
 #[derive(Clone)]
 pub(crate) struct JobActivity {
     cancellation: CancellationToken,
@@ -277,10 +610,7 @@ impl JobActivity {
     fn publish(&self, store: &dyn JobStore, kind: JobEventKind, job: StoredJob) {
         let sequence = self.sequence.fetch_add(1, Ordering::AcqRel) + 1;
         if let Err(error) = store.record_event_sequence(&job.state.job_id, sequence) {
-            eprintln!(
-                "job event sequence persistence failed; job_id={}; sequence={sequence}; error={error}",
-                job.state.job_id
-            );
+            logger().job_event_sequence_persistence_failed(&job.state.job_id, sequence, &error);
         }
         let _ = self.events.send(JobEvent {
             kind,
@@ -299,10 +629,10 @@ impl JobActivity {
                 self.publish(store, kind, job);
             }
             Ok(None) => {
-                eprintln!("job event publish skipped; job_id={job_id}; persisted job disappeared")
+                logger().job_event_publish_skipped_missing(job_id);
             }
             Err(error) => {
-                eprintln!("job event publish skipped; job_id={job_id}; error={error}")
+                logger().job_event_publish_skipped(job_id, &error);
             }
         }
     }
@@ -329,241 +659,36 @@ impl JobEventSubscription {
     }
 }
 
-/// Owns submission and background execution of persisted optimization jobs.
-#[derive(Clone)]
-pub struct JobRunner {
-    executor: Arc<dyn JobExecutor>,
-    store: Arc<dyn JobStore>,
-    cancellations: JobCancellationRegistry,
-    permits: Option<Arc<Semaphore>>,
+/// Owns the per-job values whose lifetime spans permit waiting, blocking
+/// execution, progress persistence, and terminal state selection.
+struct JobExecutionContext {
+    request: OptimizeRouteRequest,
+    cancellation: CancellationToken,
+    pacer: DebugJobPacer,
+    job_id: String,
 }
 
-pub(crate) struct JobSubmission {
-    pub state: JobState,
-    pub completion: oneshot::Receiver<Result<(), String>>,
-}
-
-impl JobRunner {
-    pub fn new(
-        executor: Arc<dyn JobExecutor>,
-        store: Arc<dyn JobStore>,
-        max_concurrent_jobs: Option<usize>,
+impl JobExecutionContext {
+    fn new(
+        request: OptimizeRouteRequest,
+        cancellation: CancellationToken,
+        pacer: DebugJobPacer,
     ) -> Self {
+        let job_id = request.job_id.clone();
         Self {
-            executor,
-            store,
-            cancellations: JobCancellationRegistry::default(),
-            permits: max_concurrent_jobs
-                .filter(|limit| *limit > 0)
-                .map(|limit| Arc::new(Semaphore::new(limit))),
-        }
-    }
-
-    pub(crate) fn store(&self) -> &Arc<dyn JobStore> {
-        &self.store
-    }
-
-    pub(crate) fn activity(&self, job_id: &str) -> Option<JobActivity> {
-        self.cancellations.get(job_id)
-    }
-
-    pub(crate) fn subscribe(&self, job_id: &str) -> Option<JobEventSubscription> {
-        self.cancellations
-            .get(job_id)
-            .map(|activity| activity.subscribe())
-    }
-
-    /// Persists a pending job and schedules its execution without waiting for it.
-    pub fn submit(&self, request: OptimizeRouteRequest) -> Result<JobState, JobStoreError> {
-        Ok(self.submit_with_completion(request)?.state)
-    }
-
-    pub(crate) fn submit_with_completion(
-        &self,
-        request: OptimizeRouteRequest,
-    ) -> Result<JobSubmission, JobStoreError> {
-        // Creation is the authoritative duplicate check and happens before any
-        // task can observe or execute the job.
-        let state = self.store.create_job(&request)?;
-        let token = CancellationToken::new();
-        let pacer = DebugJobPacer::new(request.debug.as_ref());
-        if let Some(minimum_duration_ms) = pacer.minimum_duration_ms() {
-            eprintln!(
-                "debug job pacing enabled; job_id={}; min_job_duration_ms={minimum_duration_ms}",
-                request.job_id
-            );
-        }
-        self.cancellations
-            .insert(&request.job_id, JobActivity::new(token.clone()));
-
-        let (completion_tx, completion) = oneshot::channel();
-        let runner = self.clone();
-        tokio::spawn(async move {
-            let outcome = runner.run(request, token, pacer).await;
-            let _ = completion_tx.send(outcome.map_err(|error| error.to_string()));
-        });
-
-        Ok(JobSubmission { state, completion })
-    }
-
-    async fn run(
-        &self,
-        request: OptimizeRouteRequest,
-        cancellation: CancellationToken,
-        pacer: DebugJobPacer,
-    ) -> Result<(), JobStoreError> {
-        let job_id = request.job_id.clone();
-        let outcome = self.run_inner(request, cancellation, pacer).await;
-        self.cancellations.remove(&job_id);
-        if let Err(error) = &outcome {
-            eprintln!("job execution persistence failed; job_id={job_id}; error={error}");
-        }
-        outcome
-    }
-
-    async fn run_inner(
-        &self,
-        request: OptimizeRouteRequest,
-        cancellation: CancellationToken,
-        pacer: DebugJobPacer,
-    ) -> Result<(), JobStoreError> {
-        let _permit = match &self.permits {
-            Some(permits) => {
-                tokio::select! {
-                    biased;
-                    _ = cancellation.cancelled() => return Ok(()),
-                    permit = permits.acquire() => {
-                        Some(permit.expect("job semaphore is not closed"))
-                    }
-                }
-            }
-            None => None,
-        };
-        let job_id = request.job_id.clone();
-
-        // A queued job may have been cancelled while waiting for a permit.
-        if cancellation.is_cancelled() {
-            return Ok(());
-        }
-        match self.store.mark_running(&job_id) {
-            Ok(()) => {}
-            Err(JobStoreError::InvalidTransition {
-                status: JobStatus::Cancelled,
-                ..
-            }) => return Ok(()),
-            Err(error) => return Err(error),
-        }
-
-        let (progress_tx, mut progress_rx) = mpsc::unbounded_channel();
-        let reporter = ProgressForwarder { progress_tx };
-        let executor = self.executor.clone();
-        let worker_cancellation = cancellation.clone();
-        let failure_request = request.clone();
-        let analysis_request = failure_request.clone();
-        let execution = tokio::task::spawn_blocking(move || {
-            let result = executor.execute(request, &reporter, &worker_cancellation);
-            let suggestions = result
-                .as_ref()
-                .err()
-                .map(|error| {
-                    executor.failure_suggestions(&analysis_request, error, &worker_cancellation)
-                })
-                .unwrap_or_default();
-            let failure_detail = result
-                .as_ref()
-                .err()
-                .map(|error| service_failure_detail(error, Some(&analysis_request)));
-            (result, suggestions, failure_detail)
-        });
-
-        // The optimizer continues on the blocking pool while this async task
-        // exposes its real stage boundaries at the configured target times.
-        while let Some(update) = progress_rx.recv().await {
-            if !pacer.wait_for_stage(update.stage, &cancellation).await {
-                break;
-            }
-            match self.store.update_progress(
-                &job_id,
-                update.stage,
-                update.progress,
-                update.message.as_deref(),
-            ) {
-                Ok(()) => self.publish_persisted(&job_id, JobEventKind::Progress),
-                Err(JobStoreError::InvalidTransition {
-                    status: JobStatus::Cancelled,
-                    ..
-                }) => {
-                    cancellation.cancel();
-                    break;
-                }
-                Err(error) => {
-                    eprintln!("job progress persistence failed; job_id={job_id}; error={error}")
-                }
-            }
-        }
-        drop(progress_rx);
-        let execution = execution.await;
-
-        let execution_was_cancelled = matches!(
-            &execution,
-            Ok((Err(OptimizationServiceError::Cancelled), _, _))
-        );
-        if execution_was_cancelled || !pacer.wait_until_minimum(&cancellation).await {
-            self.persist_cancelled(&job_id)?;
-            return Ok(());
-        }
-
-        match execution {
-            Ok((Ok(result), _, _)) => {
-                if self.store.save_result(&job_id, &result)? == TerminalWriteOutcome::Applied {
-                    self.publish_persisted(&job_id, JobEventKind::Completed);
-                }
-            }
-            Ok((Err(OptimizationServiceError::Cancelled), _, _)) => {
-                self.persist_cancelled(&job_id)?;
-            }
-            Ok((Err(error), suggestions, failure_detail)) => {
-                let stored = stored_error(&error, suggestions, failure_detail);
-                if self.store.save_error(&job_id, &stored)? == TerminalWriteOutcome::Applied {
-                    self.publish_persisted(&job_id, JobEventKind::Failed);
-                }
-            }
-            Err(join_error) => {
-                let stored = StoredJobError {
-                    code: "JOB_EXECUTION_FAILED".to_owned(),
-                    message: "Route optimization failed unexpectedly.".to_owned(),
-                    detail: join_error.to_string(),
-                    failure_detail: None,
-                    suggestions: None,
-                };
-                if self.store.save_error(&job_id, &stored)? == TerminalWriteOutcome::Applied {
-                    self.publish_persisted(&job_id, JobEventKind::Failed);
-                }
-            }
-        }
-        Ok(())
-    }
-
-    fn persist_cancelled(&self, job_id: &str) -> Result<(), JobStoreError> {
-        // Usually the cancel endpoint has already persisted this transition.
-        // Also cover executors that report cancellation directly.
-        match self
-            .store
-            .cancel_job(job_id, "Optimization cancelled at the user's request.")
-        {
-            Ok(_) => self.publish_persisted(job_id, JobEventKind::Cancelled),
-            Err(JobStoreError::JobNotCancellable { .. }) => {}
-            Err(error) => return Err(error),
-        }
-        Ok(())
-    }
-
-    fn publish_persisted(&self, job_id: &str, kind: JobEventKind) {
-        if let Some(activity) = self.cancellations.get(job_id) {
-            activity.publish_persisted(self.store.as_ref(), job_id, kind);
+            request,
+            cancellation,
+            pacer,
+            job_id,
         }
     }
 }
+
+type WorkerResult = (
+    Result<OptimizeRouteResponse, OptimizationServiceError>,
+    Vec<FailureSuggestion>,
+    Option<FailureDetail>,
+);
 
 struct ProgressUpdate {
     stage: ProgressStage,
@@ -571,29 +696,47 @@ struct ProgressUpdate {
     message: Option<String>,
 }
 
+enum ExecutionUpdate {
+    Progress(ProgressUpdate),
+    Telemetry(TelemetryEvent),
+    ResultSnapshot(OptimizeRouteResponse),
+}
+
 struct ProgressForwarder {
-    progress_tx: mpsc::UnboundedSender<ProgressUpdate>,
+    update_tx: mpsc::UnboundedSender<ExecutionUpdate>,
 }
 
 impl OptimizationEventReporter for ProgressForwarder {
     fn progress(&self, stage: ProgressStage, progress: u8, message: Option<&str>) {
-        let _ = self.progress_tx.send(ProgressUpdate {
-            stage,
-            progress,
-            message: message.map(str::to_owned),
-        });
+        let _ = self
+            .update_tx
+            .send(ExecutionUpdate::Progress(ProgressUpdate {
+                stage,
+                progress,
+                message: message.map(str::to_owned),
+            }));
     }
 
     // Terminal payloads are written by JobRunner after execute returns. This
     // guarantees payload persistence precedes the terminal state transition.
     fn error(&self, _code: crate::events::OptimizationErrorCode, _message: &str, _detail: &str) {}
 
-    fn result(&self, _response: &OptimizeRouteResponse) {}
+    fn result(&self, response: &OptimizeRouteResponse) {
+        let _ = self
+            .update_tx
+            .send(ExecutionUpdate::ResultSnapshot(response.clone()));
+    }
+
+    fn solver_telemetry(&self, event: &TelemetryEvent) {
+        let _ = self
+            .update_tx
+            .send(ExecutionUpdate::Telemetry(event.clone()));
+    }
 }
 
 fn stored_error(
     error: &OptimizationServiceError,
-    suggestions: Vec<crate::failure::FailureSuggestion>,
+    suggestions: Vec<FailureSuggestion>,
     failure_detail: Option<FailureDetail>,
 ) -> StoredJobError {
     let (code, message, detail) = match error {
@@ -685,218 +828,4 @@ fn stored_error(
 }
 
 #[cfg(test)]
-mod tests {
-    use std::{
-        fs,
-        path::PathBuf,
-        sync::{
-            atomic::{AtomicBool, AtomicU64, Ordering},
-            Arc,
-        },
-        time::Duration,
-    };
-
-    use serde_json::json;
-
-    use super::*;
-    use crate::storage::FileJobStore;
-
-    static NEXT_DIRECTORY: AtomicU64 = AtomicU64::new(1);
-
-    struct TestDirectory(PathBuf);
-
-    impl TestDirectory {
-        fn new() -> Self {
-            let path = std::env::temp_dir().join(format!(
-                "troute-job-events-test-{}-{}",
-                std::process::id(),
-                NEXT_DIRECTORY.fetch_add(1, Ordering::Relaxed)
-            ));
-            fs::create_dir(&path).unwrap();
-            Self(path)
-        }
-    }
-
-    impl Drop for TestDirectory {
-        fn drop(&mut self) {
-            let _ = fs::remove_dir_all(&self.0);
-        }
-    }
-
-    struct FloodExecutor {
-        release: Arc<AtomicBool>,
-    }
-
-    impl JobExecutor for FloodExecutor {
-        fn execute(
-            &self,
-            _request: OptimizeRouteRequest,
-            reporter: &dyn OptimizationEventReporter,
-            _cancellation: &CancellationToken,
-        ) -> Result<OptimizeRouteResponse, OptimizationServiceError> {
-            while !self.release.load(Ordering::Acquire) {
-                std::thread::yield_now();
-            }
-            for progress in 0..300 {
-                reporter.progress(
-                    ProgressStage::OptimizingRoute,
-                    (progress % 100) as u8,
-                    Some("flooding a slow subscriber"),
-                );
-            }
-            Err(OptimizationServiceError::Solver(SolverError::Failed(
-                "expected test failure".to_owned(),
-            )))
-        }
-    }
-
-    fn request() -> OptimizeRouteRequest {
-        serde_json::from_value(json!({
-            "job_id": "slow-subscriber",
-            "locations": [
-                {"id":"A","place_id":"a","open_time":"00:00","close_time":"23:50","stay_minutes":0},
-                {"id":"B","place_id":"b","open_time":"00:00","close_time":"23:50","stay_minutes":0}
-            ],
-            "start_time": "09:00"
-        }))
-        .unwrap()
-    }
-
-    #[test]
-    fn canonical_event_envelope_snapshot_matches_the_serializer() {
-        let suggestion = serde_json::from_value(json!({
-            "type": "REMOVE_LOCATION",
-            "reason": "Remove the conflicting stop.",
-            "confidence": "heuristic",
-            "location_id": "B"
-        }))
-        .unwrap();
-        let envelope = JobEventEnvelope::from_stored_job(
-            17,
-            StoredJob {
-                request: request(),
-                state: JobState {
-                    job_id: "wire-contract".to_owned(),
-                    status: JobStatus::Failed,
-                    stage: Some(ProgressStage::OptimizingRoute),
-                    progress: 70,
-                    last_message: Some("No feasible route was found.".to_owned()),
-                    created_at: 100,
-                    updated_at: 123_456_789,
-                    completed_at: Some(123_456_789),
-                },
-                result: None,
-                error: Some(StoredJobError {
-                    code: "NO_FEASIBLE_ROUTE".to_owned(),
-                    message: "No feasible route was found.".to_owned(),
-                    detail: "solver found no feasible route".to_owned(),
-                    failure_detail: Some(FailureDetail::NoFeasibleRoute),
-                    suggestions: Some(vec![suggestion]),
-                }),
-            },
-        );
-
-        assert!(envelope.is_valid_for_event("snapshot"));
-        assert!(envelope.is_valid_for_event("failed"));
-        assert_eq!(
-            serde_json::to_value(envelope).unwrap(),
-            json!({
-                "sequence": 17,
-                "updated_at": 123_456_789,
-                "state": {
-                    "job_id": "wire-contract",
-                    "status": "failed",
-                    "stage": "optimizing_route",
-                    "progress": 70,
-                    "last_message": "No feasible route was found.",
-                    "result": null,
-                    "error": {
-                        "code": "NO_FEASIBLE_ROUTE",
-                        "message": "No feasible route was found.",
-                        "detail": "solver found no feasible route",
-                        "failure_detail": { "type": "NO_FEASIBLE_ROUTE" },
-                        "suggestions": [{
-                            "type": "REMOVE_LOCATION",
-                            "reason": "Remove the conflicting stop.",
-                            "confidence": "heuristic",
-                            "location_id": "B"
-                        }]
-                    }
-                }
-            })
-        );
-    }
-
-    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn slow_subscriber_never_blocks_worker_and_can_recover_from_store() {
-        let temporary = TestDirectory::new();
-        let store = Arc::new(FileJobStore::new(&temporary.0).unwrap());
-        let release = Arc::new(AtomicBool::new(false));
-        let runner = JobRunner::new(
-            Arc::new(FloodExecutor {
-                release: release.clone(),
-            }),
-            store.clone(),
-            None,
-        );
-        runner.submit(request()).unwrap();
-        let mut subscription = runner.subscribe("slow-subscriber").unwrap();
-        release.store(true, Ordering::Release);
-
-        tokio::time::timeout(Duration::from_secs(5), async {
-            loop {
-                let job = store.get_job("slow-subscriber").unwrap().unwrap();
-                if job.state.status == JobStatus::Failed {
-                    assert_eq!(job.state.stage, Some(ProgressStage::OptimizingRoute));
-                    assert_eq!(job.state.progress, 99);
-                    assert_eq!(job.error.unwrap().code, "SOLVER_ERROR");
-                    break;
-                }
-                tokio::time::sleep(Duration::from_millis(1)).await;
-            }
-        })
-        .await
-        .expect("worker must finish even though the subscriber is not reading");
-
-        assert!(matches!(
-            subscription.receiver.recv().await,
-            Err(broadcast::error::RecvError::Lagged(_))
-        ));
-        assert!(subscription.current_sequence() >= 300);
-    }
-
-    struct RoutingFailureExecutor;
-
-    impl JobExecutor for RoutingFailureExecutor {
-        fn execute(
-            &self,
-            _request: OptimizeRouteRequest,
-            reporter: &dyn OptimizationEventReporter,
-            _cancellation: &CancellationToken,
-        ) -> Result<OptimizeRouteResponse, OptimizationServiceError> {
-            reporter.progress(
-                ProgressStage::FetchingTravelTimes,
-                33,
-                Some("Fetched 3 / 10 travel-time pairs."),
-            );
-            Err(OptimizationServiceError::Routing(
-                crate::routing::RoutingError::Provider("expected routing failure".to_owned()),
-            ))
-        }
-    }
-
-    #[tokio::test]
-    async fn routing_failure_preserves_the_fetching_stage() {
-        let temporary = TestDirectory::new();
-        let store = Arc::new(FileJobStore::new(&temporary.0).unwrap());
-        let runner = JobRunner::new(Arc::new(RoutingFailureExecutor), store.clone(), None);
-        let submission = runner.submit_with_completion(request()).unwrap();
-
-        submission.completion.await.unwrap().unwrap();
-        let job = store.get_job("slow-subscriber").unwrap().unwrap();
-        assert_eq!(job.state.status, JobStatus::Failed);
-        assert_eq!(job.state.stage, Some(ProgressStage::FetchingTravelTimes));
-        assert_eq!(job.state.progress, 33);
-        assert_eq!(job.error.unwrap().code, "ROUTING_UNAVAILABLE");
-    }
-}
+mod tests;

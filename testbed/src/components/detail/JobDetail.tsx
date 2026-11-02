@@ -15,7 +15,9 @@ import {
 import type { TestbedJob } from "../../jobs";
 import { JobSummary } from "./JobSummary";
 import { OptimizationFailurePanel } from "./OptimizationFailurePanel";
+import { RouteVisualization } from "./RouteVisualization";
 import { SolverBenchmarkDialog } from "./SolverBenchmarkDialog";
+import { ExperimentDashboard } from "../experiments/ExperimentDashboard";
 
 function statusIntent(status: number) {
   if (status >= 500) return Intent.DANGER;
@@ -43,12 +45,14 @@ export function JobDetail({
   const [copyError, setCopyError] = useState("");
   const [confirmCancelOpen, setConfirmCancelOpen] = useState(false);
   const [benchmarkOpen, setBenchmarkOpen] = useState(false);
+  const [experimentOpen, setExperimentOpen] = useState(false);
 
   useEffect(() => {
     setCopied(false);
     setCopyError("");
     setConfirmCancelOpen(false);
     setBenchmarkOpen(false);
+    setExperimentOpen(false);
   }, [job?.id]);
 
   if (!job) {
@@ -70,6 +74,8 @@ export function JobDetail({
     : "";
 
   const cancellable = job.status === "pending" || job.status === "running";
+  const solverTelemetry = job.solverTelemetry ?? job.route?.solver_telemetry;
+  const solverEvents = job.solverEvents ?? solverTelemetry?.events ?? [];
 
   return (
     <>
@@ -77,8 +83,8 @@ export function JobDetail({
       <div className="detail-heading">
         <h1 className={Classes.HEADING}>Job 상세</h1>
         <div className="detail-actions">
-          <span className={Classes.TEXT_MUTED}>Timeline은 Task 3에서 제공</span>
-          {Boolean(job.route?.solver_candidates?.length) && (
+          {solverTelemetry && <Button icon="heat-grid" size="small" onClick={() => setExperimentOpen(true)}>정책 실험</Button>}
+          {Boolean(job.route?.solver_candidates?.length || solverEvents.length) && (
             <Button
               icon="comparison"
               intent={Intent.PRIMARY}
@@ -163,6 +169,7 @@ export function JobDetail({
                 )}
               </div>
             )}
+            <RouteVisualization request={job.request} result={job.route} />
             <div className="table-scroll">
               <table
                 className={`${Classes.HTML_TABLE} ${Classes.HTML_TABLE_BORDERED} ${Classes.HTML_TABLE_STRIPED}`}
@@ -289,10 +296,18 @@ export function JobDetail({
       <SolverBenchmarkDialog
         candidates={job.route?.solver_candidates ?? []}
         diagnostics={job.route?.solver_diagnostics}
+        telemetry={solverTelemetry}
+        events={solverEvents}
         locationCount={job.request.locations.length}
         dark={dark}
         isOpen={benchmarkOpen}
         onClose={() => setBenchmarkOpen(false)}
+      />
+      <ExperimentDashboard
+        current={solverTelemetry}
+        dark={dark}
+        isOpen={experimentOpen}
+        onClose={() => setExperimentOpen(false)}
       />
     </>
   );

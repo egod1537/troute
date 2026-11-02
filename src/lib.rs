@@ -14,6 +14,7 @@ pub mod failure;
 pub mod http;
 mod job_pacing;
 pub mod jobs;
+pub mod logging;
 pub mod matrix;
 pub mod observation;
 pub mod providers;

@@ -16,8 +16,10 @@ use crate::{
     api::{OptimizeRouteRequest, OptimizeRouteResponse},
     events::ProgressStage,
     failure::{FailureDetail, FailureSuggestion},
+    logging::logger,
     observation::{JobTimelineEntry, JobTimelineStore},
     routing::TravelMode,
+    solver::TelemetryEvent,
 };
 
 static NEXT_TEMP_FILE: AtomicU64 = AtomicU64::new(1);
@@ -103,6 +105,8 @@ struct JobIndex {
 
 #[derive(Debug, Error)]
 pub enum JobStoreError {
+    #[error("job admission capacity is full (maximum outstanding jobs: {maximum})")]
+    CapacityExceeded { maximum: usize },
     #[error("job already exists: {0}")]
     DuplicateJob(String),
     #[error("job does not exist: {0}")]
@@ -111,6 +115,8 @@ pub enum JobStoreError {
     JobNotCancellable { job_id: String, status: JobStatus },
     #[error("job state transition is not allowed from {status:?}: {job_id}")]
     InvalidTransition { job_id: String, status: JobStatus },
+    #[error("solver telemetry event has {actual} bytes; maximum is {maximum}")]
+    TelemetryEventTooLarge { actual: usize, maximum: usize },
     #[error("job storage I/O failed at {path}: {source}")]
     Io {
         path: PathBuf,
@@ -149,6 +155,23 @@ pub trait JobStore: Send + Sync {
     fn get_job(&self, job_id: &str) -> Result<Option<StoredJob>, JobStoreError>;
     fn list_recent(&self, limit: usize) -> Result<Vec<JobIndexEntry>, JobStoreError>;
     fn recover_interrupted(&self) -> Result<usize, JobStoreError>;
+
+    fn append_solver_event(
+        &self,
+        _job_id: &str,
+        _event: &TelemetryEvent,
+    ) -> Result<(), JobStoreError> {
+        Ok(())
+    }
+
+    fn list_solver_events(
+        &self,
+        _job_id: &str,
+        _after: u64,
+        _limit: usize,
+    ) -> Result<Vec<TelemetryEvent>, JobStoreError> {
+        Ok(Vec::new())
+    }
 
     /// Returns the last SSE sequence persisted for this Job. `None` supports
     /// custom stores and records created before sequence persistence existed.
@@ -201,6 +224,10 @@ impl FileJobStore {
 
     fn event_sequence_path(&self, job_id: &str) -> PathBuf {
         self.job_dir(job_id).join("event-sequence.json")
+    }
+
+    fn solver_telemetry_path(&self, job_id: &str) -> PathBuf {
+        self.job_dir(job_id).join("solver-telemetry.jsonl")
     }
 
     fn read_state(&self, job_id: &str) -> Result<JobState, JobStoreError> {
@@ -264,6 +291,46 @@ impl FileJobStore {
         }
         sort_index(&mut jobs);
         atomic_write_json(&self.index_path(), &JobIndex { jobs })
+    }
+
+    /// Validates the shared precondition for result/error terminal writes.
+    /// Callers hold the store lock across this check, payload persistence, and
+    /// the final state/index update so cancellation cannot interleave.
+    fn prepare_terminal_write(
+        &self,
+        job_id: &str,
+    ) -> Result<Option<(PathBuf, JobState)>, JobStoreError> {
+        let directory = self.job_dir(job_id);
+        if !directory.exists() {
+            return Err(JobStoreError::JobNotFound(job_id.to_owned()));
+        }
+        let state = self.read_state(job_id)?;
+        if state.status == JobStatus::Cancelled {
+            return Ok(None);
+        }
+        if state.status != JobStatus::Running {
+            return Err(JobStoreError::InvalidTransition {
+                job_id: job_id.to_owned(),
+                status: state.status,
+            });
+        }
+        Ok(Some((directory, state)))
+    }
+
+    fn commit_terminal_state(
+        &self,
+        mut state: JobState,
+        status: JobStatus,
+    ) -> Result<(), JobStoreError> {
+        let timestamp = now_ms();
+        state.status = status;
+        if status == JobStatus::Completed {
+            state.progress = 100;
+        }
+        state.updated_at = timestamp;
+        state.completed_at = Some(timestamp);
+        self.write_state(&state)?;
+        self.update_index_entry(&state)
     }
 }
 
@@ -354,29 +421,12 @@ impl JobStore for FileJobStore {
             .lock
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
-        let directory = self.job_dir(job_id);
-        if !directory.exists() {
-            return Err(JobStoreError::JobNotFound(job_id.to_owned()));
-        }
-        let mut state = self.read_state(job_id)?;
-        if state.status == JobStatus::Cancelled {
+        let Some((directory, state)) = self.prepare_terminal_write(job_id)? else {
             return Ok(TerminalWriteOutcome::Cancelled);
-        }
-        if state.status != JobStatus::Running {
-            return Err(JobStoreError::InvalidTransition {
-                job_id: job_id.to_owned(),
-                status: state.status,
-            });
-        }
+        };
         let path = directory.join("result.json");
         atomic_write_json(&path, result)?;
-        let timestamp = now_ms();
-        state.status = JobStatus::Completed;
-        state.progress = 100;
-        state.updated_at = timestamp;
-        state.completed_at = Some(timestamp);
-        self.write_state(&state)?;
-        self.update_index_entry(&state)?;
+        self.commit_terminal_state(state, JobStatus::Completed)?;
         Ok(TerminalWriteOutcome::Applied)
     }
 
@@ -389,28 +439,12 @@ impl JobStore for FileJobStore {
             .lock
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
-        let directory = self.job_dir(job_id);
-        if !directory.exists() {
-            return Err(JobStoreError::JobNotFound(job_id.to_owned()));
-        }
-        let mut state = self.read_state(job_id)?;
-        if state.status == JobStatus::Cancelled {
+        let Some((directory, state)) = self.prepare_terminal_write(job_id)? else {
             return Ok(TerminalWriteOutcome::Cancelled);
-        }
-        if state.status != JobStatus::Running {
-            return Err(JobStoreError::InvalidTransition {
-                job_id: job_id.to_owned(),
-                status: state.status,
-            });
-        }
+        };
         let path = directory.join("error.json");
         atomic_write_json(&path, error)?;
-        let timestamp = now_ms();
-        state.status = JobStatus::Failed;
-        state.updated_at = timestamp;
-        state.completed_at = Some(timestamp);
-        self.write_state(&state)?;
-        self.update_index_entry(&state)?;
+        self.commit_terminal_state(state, JobStatus::Failed)?;
         Ok(TerminalWriteOutcome::Applied)
     }
 
@@ -507,6 +541,91 @@ impl JobStore for FileJobStore {
         Ok(recovered)
     }
 
+    fn append_solver_event(
+        &self,
+        job_id: &str,
+        event: &TelemetryEvent,
+    ) -> Result<(), JobStoreError> {
+        const MAX_EVENT_BYTES: usize = 64 * 1024;
+        let _guard = self
+            .lock
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let directory = self.job_dir(job_id);
+        if !directory.is_dir() {
+            return Err(JobStoreError::JobNotFound(job_id.to_owned()));
+        }
+        let path = self.solver_telemetry_path(job_id);
+        let serialized = serde_json::to_vec(event).map_err(|source| JobStoreError::Json {
+            path: path.clone(),
+            source,
+        })?;
+        if serialized.len() > MAX_EVENT_BYTES {
+            return Err(JobStoreError::TelemetryEventTooLarge {
+                actual: serialized.len(),
+                maximum: MAX_EVENT_BYTES,
+            });
+        }
+        let file = OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(&path)
+            .map_err(|source| JobStoreError::Io {
+                path: path.clone(),
+                source,
+            })?;
+        let mut writer = BufWriter::new(file);
+        writer
+            .write_all(&serialized)
+            .and_then(|()| writer.write_all(b"\n"))
+            .and_then(|()| writer.flush())
+            .map_err(|source| JobStoreError::Io { path, source })
+    }
+
+    fn list_solver_events(
+        &self,
+        job_id: &str,
+        after: u64,
+        limit: usize,
+    ) -> Result<Vec<TelemetryEvent>, JobStoreError> {
+        let _guard = self
+            .lock
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let directory = self.job_dir(job_id);
+        if !directory.is_dir() {
+            return Err(JobStoreError::JobNotFound(job_id.to_owned()));
+        }
+        let path = self.solver_telemetry_path(job_id);
+        let file = match File::open(&path) {
+            Ok(file) => file,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
+            Err(source) => return Err(JobStoreError::Io { path, source }),
+        };
+        let mut events = Vec::new();
+        for line in BufReader::new(file).lines() {
+            let line = match line {
+                Ok(line) => line,
+                Err(source) => return Err(JobStoreError::Io { path, source }),
+            };
+            if line.trim().is_empty() {
+                continue;
+            }
+            let Ok(event) = serde_json::from_str::<TelemetryEvent>(&line) else {
+                // A crash may leave the final JSONL line incomplete. Earlier
+                // complete events remain authoritative.
+                continue;
+            };
+            if event.event_sequence > after {
+                events.push(event);
+                if events.len() >= limit.max(1) {
+                    break;
+                }
+            }
+        }
+        Ok(events)
+    }
+
     fn current_event_sequence(&self, job_id: &str) -> Result<Option<u64>, JobStoreError> {
         let _guard = self
             .lock
@@ -589,7 +708,7 @@ impl JobTimelineStore for FileJobTimelineStore {
                 })
         })();
         if let Err(error) = result {
-            eprintln!("job timeline append failed; job_id={job_id}; error={error}");
+            logger().job_operation_failed("job timeline append", job_id, &error);
         }
     }
 
@@ -603,7 +722,7 @@ impl JobTimelineStore for FileJobTimelineStore {
             Ok(file) => file,
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Vec::new(),
             Err(error) => {
-                eprintln!("job timeline read failed; job_id={job_id}; error={error}");
+                logger().job_operation_failed("job timeline read", job_id, &error);
                 return Vec::new();
             }
         };
@@ -614,14 +733,12 @@ impl JobTimelineStore for FileJobTimelineStore {
                 Ok(line) => match serde_json::from_str(&line) {
                     Ok(entry) => Some(entry),
                     Err(error) => {
-                        eprintln!(
-                            "ignoring malformed timeline line; job_id={job_id}; error={error}"
-                        );
+                        logger().malformed_timeline_line(job_id, &error);
                         None
                     }
                 },
                 Err(error) => {
-                    eprintln!("job timeline line read failed; job_id={job_id}; error={error}");
+                    logger().job_operation_failed("job timeline line read", job_id, &error);
                     None
                 }
             })
@@ -636,7 +753,7 @@ impl JobTimelineStore for FileJobTimelineStore {
         let path = self.timeline_path(job_id);
         if let Err(error) = fs::remove_file(&path) {
             if error.kind() != std::io::ErrorKind::NotFound {
-                eprintln!("job timeline clear failed; job_id={job_id}; error={error}");
+                logger().job_operation_failed("job timeline clear", job_id, &error);
             }
         }
     }
@@ -772,318 +889,4 @@ fn now_ms() -> i64 {
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::observation::{JobObservationRecorder, ObservationDirection, ObservationPeer};
-    use serde_json::json;
-
-    struct TestDirectory(PathBuf);
-
-    impl TestDirectory {
-        fn new() -> Self {
-            let path = std::env::temp_dir().join(format!(
-                "troute-storage-test-{}-{}",
-                std::process::id(),
-                NEXT_TEMP_FILE.fetch_add(1, Ordering::Relaxed)
-            ));
-            fs::create_dir(&path).unwrap();
-            Self(path)
-        }
-    }
-
-    impl Drop for TestDirectory {
-        fn drop(&mut self) {
-            let _ = fs::remove_dir_all(&self.0);
-        }
-    }
-
-    fn request(job_id: &str) -> OptimizeRouteRequest {
-        serde_json::from_value(json!({
-            "job_id": job_id,
-            "locations": [
-                {"id":"A","place_id":"place-a","open_time":"00:00","close_time":"23:50","stay_minutes":0},
-                {"id":"B","place_id":"place-b","open_time":"00:00","close_time":"23:50","stay_minutes":0}
-            ],
-            "start_time": "09:00"
-        }))
-        .unwrap()
-    }
-
-    fn response() -> OptimizeRouteResponse {
-        serde_json::from_value(json!({
-            "route": [
-                {"location_id":"A","order":0,"arrival_time":"09:00","departure_time":"09:00"},
-                {"location_id":"B","order":1,"arrival_time":"09:10"}
-            ],
-            "total_travel_minutes": 10
-        }))
-        .unwrap()
-    }
-
-    #[test]
-    fn creates_data_dir_and_persists_request_state_progress_and_result() {
-        let temporary = TestDirectory::new();
-        let data_dir = temporary.0.join("nested/data");
-        let store = FileJobStore::new(&data_dir).unwrap();
-        let initial = store.create_job(&request("job-001")).unwrap();
-        assert_eq!(initial.status, JobStatus::Pending);
-        assert!(data_dir.join("jobs/job-001/request.json").is_file());
-
-        store.mark_running("job-001").unwrap();
-        store
-            .update_progress(
-                "job-001",
-                ProgressStage::OptimizingRoute,
-                65,
-                Some("Optimizing route"),
-            )
-            .unwrap();
-        store.save_result("job-001", &response()).unwrap();
-
-        let job = store.get_job("job-001").unwrap().unwrap();
-        assert_eq!(job.state.status, JobStatus::Completed);
-        assert_eq!(job.state.progress, 100);
-        assert_eq!(job.result, Some(response()));
-        assert!(data_dir.join("index.json").is_file());
-    }
-
-    #[test]
-    fn saves_error_rejects_duplicates_and_encodes_unsafe_job_ids() {
-        let temporary = TestDirectory::new();
-        let store = FileJobStore::new(&temporary.0).unwrap();
-        let input = request("../job/unsafe");
-        store.create_job(&input).unwrap();
-        assert!(matches!(
-            store.create_job(&input),
-            Err(JobStoreError::DuplicateJob(_))
-        ));
-        store.mark_running(&input.job_id).unwrap();
-        store
-            .save_error(
-                &input.job_id,
-                &StoredJobError {
-                    code: "TEST_ERROR".to_owned(),
-                    message: "failed".to_owned(),
-                    detail: "detail".to_owned(),
-                    failure_detail: None,
-                    suggestions: None,
-                },
-            )
-            .unwrap();
-        let job = store.get_job(&input.job_id).unwrap().unwrap();
-        assert_eq!(job.state.status, JobStatus::Failed);
-        assert_eq!(job.error.unwrap().code, "TEST_ERROR");
-        assert!(!temporary.0.parent().unwrap().join("job").exists());
-    }
-
-    #[test]
-    fn stored_errors_without_failure_extensions_remain_compatible() {
-        let error: StoredJobError = serde_json::from_value(serde_json::json!({
-            "code": "LEGACY_ERROR",
-            "message": "legacy failure",
-            "detail": "written before suggestions were added"
-        }))
-        .unwrap();
-
-        assert_eq!(error.code, "LEGACY_ERROR");
-        assert!(error.failure_detail.is_none());
-        assert!(error.suggestions.is_none());
-    }
-
-    #[test]
-    fn restart_marks_only_non_terminal_jobs_failed() {
-        let temporary = TestDirectory::new();
-        let store = FileJobStore::new(&temporary.0).unwrap();
-        store.create_job(&request("pending")).unwrap();
-        store.create_job(&request("completed")).unwrap();
-        store.mark_running("completed").unwrap();
-        store.save_result("completed", &response()).unwrap();
-        drop(store);
-
-        let reopened = FileJobStore::new(&temporary.0).unwrap();
-        assert_eq!(reopened.recover_interrupted().unwrap(), 1);
-        let pending = reopened.get_job("pending").unwrap().unwrap();
-        assert_eq!(pending.state.status, JobStatus::Failed);
-        assert_eq!(pending.error.unwrap().code, "JOB_INTERRUPTED");
-        assert_eq!(
-            reopened.get_job("completed").unwrap().unwrap().state.status,
-            JobStatus::Completed
-        );
-    }
-
-    #[test]
-    fn pending_and_running_jobs_can_be_cancelled_without_error_files() {
-        let temporary = TestDirectory::new();
-        let store = FileJobStore::new(&temporary.0).unwrap();
-        store.create_job(&request("pending-cancel")).unwrap();
-        let pending = store
-            .cancel_job("pending-cancel", "Job cancelled by request")
-            .unwrap();
-        assert_eq!(pending.status, JobStatus::Cancelled);
-        assert!(pending.completed_at.is_some());
-        assert_eq!(pending.progress, 0);
-
-        store.create_job(&request("running-cancel")).unwrap();
-        store.mark_running("running-cancel").unwrap();
-        store
-            .update_progress(
-                "running-cancel",
-                ProgressStage::OptimizingRoute,
-                65,
-                Some("Optimizing route"),
-            )
-            .unwrap();
-        let running = store
-            .cancel_job("running-cancel", "Job cancelled by request")
-            .unwrap();
-        assert_eq!(running.status, JobStatus::Cancelled);
-        assert_eq!(running.progress, 65);
-        assert_eq!(running.stage, Some(ProgressStage::OptimizingRoute));
-        assert_eq!(
-            running.last_message.as_deref(),
-            Some("Job cancelled by request")
-        );
-        assert!(!temporary.0.join("jobs/running-cancel/error.json").exists());
-        assert!(!temporary.0.join("jobs/running-cancel/result.json").exists());
-    }
-
-    #[test]
-    fn terminal_jobs_reject_cancellation_and_cancelled_survives_restart() {
-        let temporary = TestDirectory::new();
-        let store = FileJobStore::new(&temporary.0).unwrap();
-
-        store.create_job(&request("completed")).unwrap();
-        store.mark_running("completed").unwrap();
-        store.save_result("completed", &response()).unwrap();
-        store.create_job(&request("failed")).unwrap();
-        store.mark_running("failed").unwrap();
-        store
-            .save_error(
-                "failed",
-                &StoredJobError {
-                    code: "TEST".to_owned(),
-                    message: "failed".to_owned(),
-                    detail: "detail".to_owned(),
-                    failure_detail: None,
-                    suggestions: None,
-                },
-            )
-            .unwrap();
-        store.create_job(&request("cancelled")).unwrap();
-        store
-            .cancel_job("cancelled", "Job cancelled by request")
-            .unwrap();
-
-        for (job_id, expected) in [
-            ("completed", JobStatus::Completed),
-            ("failed", JobStatus::Failed),
-            ("cancelled", JobStatus::Cancelled),
-        ] {
-            assert!(matches!(
-                store.cancel_job(job_id, "again"),
-                Err(JobStoreError::JobNotCancellable { status, .. }) if status == expected
-            ));
-        }
-        drop(store);
-
-        let reopened = FileJobStore::new(&temporary.0).unwrap();
-        assert_eq!(reopened.recover_interrupted().unwrap(), 0);
-        assert_eq!(
-            reopened.get_job("cancelled").unwrap().unwrap().state.status,
-            JobStatus::Cancelled
-        );
-    }
-
-    #[test]
-    fn result_and_cancel_race_has_exactly_one_terminal_winner() {
-        use std::sync::{Arc, Barrier};
-
-        for iteration in 0..20 {
-            let temporary = TestDirectory::new();
-            let store = Arc::new(FileJobStore::new(&temporary.0).unwrap());
-            let job_id = format!("race-{iteration}");
-            store.create_job(&request(&job_id)).unwrap();
-            store.mark_running(&job_id).unwrap();
-            let barrier = Arc::new(Barrier::new(3));
-
-            let result_store = store.clone();
-            let result_barrier = barrier.clone();
-            let result_job_id = job_id.clone();
-            let result_thread = std::thread::spawn(move || {
-                result_barrier.wait();
-                result_store.save_result(&result_job_id, &response())
-            });
-
-            let cancel_store = store.clone();
-            let cancel_barrier = barrier.clone();
-            let cancel_job_id = job_id.clone();
-            let cancel_thread = std::thread::spawn(move || {
-                cancel_barrier.wait();
-                cancel_store.cancel_job(&cancel_job_id, "Job cancelled by request")
-            });
-
-            barrier.wait();
-            let result_outcome = result_thread.join().unwrap();
-            let cancel_outcome = cancel_thread.join().unwrap();
-            let job = store.get_job(&job_id).unwrap().unwrap();
-            match job.state.status {
-                JobStatus::Completed => {
-                    assert_eq!(result_outcome.unwrap(), TerminalWriteOutcome::Applied);
-                    assert!(matches!(
-                        cancel_outcome,
-                        Err(JobStoreError::JobNotCancellable {
-                            status: JobStatus::Completed,
-                            ..
-                        })
-                    ));
-                    assert!(job.result.is_some());
-                }
-                JobStatus::Cancelled => {
-                    assert_eq!(result_outcome.unwrap(), TerminalWriteOutcome::Cancelled);
-                    assert!(cancel_outcome.is_ok());
-                    assert!(job.result.is_none());
-                }
-                status => panic!("unexpected race winner state: {status:?}"),
-            }
-        }
-    }
-
-    #[test]
-    fn timeline_is_append_only_json_lines_and_survives_reopen() {
-        let temporary = TestDirectory::new();
-        let store = FileJobTimelineStore::new(&temporary.0).unwrap();
-        let recorder = JobObservationRecorder::new(std::sync::Arc::new(store));
-        let mut first = recorder.entry(
-            "pair-1",
-            ObservationDirection::Request,
-            ObservationPeer::Testbed,
-            ObservationPeer::Troute,
-        );
-        first.method = Some("POST".to_owned());
-        recorder.append("job-1", first);
-        recorder.append(
-            "job-1",
-            recorder.entry(
-                "pair-1",
-                ObservationDirection::Response,
-                ObservationPeer::Troute,
-                ObservationPeer::Testbed,
-            ),
-        );
-
-        let reopened = JobObservationRecorder::new(std::sync::Arc::new(
-            FileJobTimelineStore::new(&temporary.0).unwrap(),
-        ));
-        assert_eq!(reopened.list("job-1").len(), 2);
-        let raw = fs::read_to_string(temporary.0.join("jobs/job-1/timeline.jsonl")).unwrap();
-        assert_eq!(raw.lines().count(), 2);
-    }
-
-    #[test]
-    fn runtime_data_directories_are_ignored_by_git() {
-        let ignore =
-            fs::read_to_string(Path::new(env!("CARGO_MANIFEST_DIR")).join(".gitignore")).unwrap();
-        assert!(ignore.lines().any(|line| line == ".local/"));
-        assert!(ignore.lines().any(|line| line == "runtime/"));
-    }
-}
+mod tests;

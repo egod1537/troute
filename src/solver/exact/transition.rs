@@ -7,7 +7,8 @@ pub(in crate::solver) struct InitialService {
 }
 
 /// Applies the start location's opening window and service duration to a
-/// candidate visit-start slot. The returned slot is the first departure slot.
+/// candidate visit-start minute. The returned value is the first departure
+/// minute. The historical `slot` names remain for Rust API compatibility.
 pub(in crate::solver) fn initial_service(
     input: &SolverInput<'_>,
     start_time_slot: u16,

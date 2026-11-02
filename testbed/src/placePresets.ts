@@ -1,8 +1,7 @@
-import type { TravelMode } from "./api";
+import type { StartPolicy, TravelMode, VisitPolicy } from "./api";
+import seoul10 from "../../tests/fixtures/places/seoul_10_places.json";
+import seoul3 from "../../tests/fixtures/places/seoul_3_places.json";
 import seoul5 from "../../tests/fixtures/places/seoul_5_places.json";
-import tokyo10 from "../../tests/fixtures/places/tokyo_10_places.json";
-import tokyo3 from "../../tests/fixtures/places/tokyo_3_places.json";
-import tokyo5 from "../../tests/fixtures/places/tokyo_5_places.json";
 
 export interface JobPresetLocation {
   id: string;
@@ -11,36 +10,78 @@ export interface JobPresetLocation {
   openTime: string;
   closeTime: string;
   stayMinutes: number;
+  required?: boolean;
+  priority?: number;
 }
 
 export interface JobPreset {
-  key: "tokyo-3" | "tokyo-5" | "tokyo-10" | "seoul-5" | "synthetic-8";
+  key:
+    | "seoul-3-quick"
+    | "seoul-5-core"
+    | "seoul-5-windows"
+    | "seoul-5-partial"
+    | "seoul-10-day"
+    | "synthetic-8";
   name: string;
+  description: string;
   kind: "places" | "synthetic";
   countryCode?: string;
   travelMode?: TravelMode;
+  startPolicy?: StartPolicy;
+  startTime?: string;
+  visitPolicy?: VisitPolicy;
   locations: JobPresetLocation[];
   travelTimeMatrix?: number[][];
 }
 
-interface PlaceFixture {
+interface PlaceFixtureLocation {
+  id: string;
   name: string;
-  locations: {
-    id: string;
-    name: string;
-    place_id: string;
-    latitude: number;
-    longitude: number;
-  }[];
+  place_id: string;
+  latitude: number;
+  longitude: number;
 }
 
-const EARTH_RADIUS_KILOMETERS = 6_371;
-const WALKING_ROUTE_FACTOR = 1.25;
-const WALKING_SPEED_KILOMETERS_PER_HOUR = 4.8;
+interface PlaceFixture {
+  locations: PlaceFixtureLocation[];
+}
 
-function estimatedWalkingMinutes(
-  from: PlaceFixture["locations"][number],
-  to: PlaceFixture["locations"][number],
+export interface SeoulLocationCoordinate {
+  name: string;
+  latitude: number;
+  longitude: number;
+}
+
+const SEOUL_LOCATION_NAMES: Record<string, string> = {
+  "seoul-station": "서울역",
+  "gangnam-station": "강남역",
+  "hongik-university-station": "홍대입구역",
+  "gyeongbokgung-palace": "경복궁",
+  "myeongdong-station": "명동역",
+  "dongdaemun-design-plaza": "동대문디자인플라자",
+  "jamsil-station": "잠실역",
+  "yeouido-station": "여의도역",
+  "itaewon-station": "이태원역",
+  "starfield-coex-mall": "스타필드 코엑스몰",
+};
+
+export const SEOUL_LOCATION_COORDINATES: Record<string, SeoulLocationCoordinate> =
+  Object.fromEntries(
+    seoul10.locations.map((location) => [
+      location.id,
+      {
+        name: SEOUL_LOCATION_NAMES[location.id] ?? location.name,
+        latitude: location.latitude,
+        longitude: location.longitude,
+      },
+    ]),
+  );
+
+const EARTH_RADIUS_KILOMETERS = 6_371;
+
+function distanceKilometers(
+  from: PlaceFixtureLocation,
+  to: PlaceFixtureLocation,
 ): number {
   const radians = (degrees: number) => degrees * Math.PI / 180;
   const latitudeDelta = radians(to.latitude - from.latitude);
@@ -51,54 +92,204 @@ function estimatedWalkingMinutes(
     Math.sin(latitudeDelta / 2) ** 2 +
     Math.cos(fromLatitude) * Math.cos(toLatitude) *
       Math.sin(longitudeDelta / 2) ** 2;
-  const straightLineKilometers =
-    2 * EARTH_RADIUS_KILOMETERS * Math.asin(Math.sqrt(haversine));
-  return Math.max(
-    1,
-    Math.ceil(
-      straightLineKilometers * WALKING_ROUTE_FACTOR /
-        WALKING_SPEED_KILOMETERS_PER_HOUR * 60,
-    ),
-  );
+  return 2 * EARTH_RADIUS_KILOMETERS * Math.asin(Math.sqrt(haversine));
 }
 
-function estimatedWalkingMatrix(
-  locations: PlaceFixture["locations"],
+function estimatedTravelMinutes(
+  from: PlaceFixtureLocation,
+  to: PlaceFixtureLocation,
+  mode: TravelMode,
+): number {
+  const distance = distanceKilometers(from, to);
+  if (mode === "WALKING") {
+    return Math.max(1, Math.ceil(distance * 1.25 / 4.8 * 60));
+  }
+  if (mode === "BICYCLING") {
+    return Math.max(1, Math.ceil(distance * 1.2 / 14 * 60));
+  }
+  if (mode === "DRIVING") {
+    return Math.max(1, Math.ceil(distance * 1.35 / 28 * 60 + 3));
+  }
+  // Offline demo estimate: access/transfer time plus an urban transit average.
+  return Math.max(1, Math.ceil(distance * 1.35 / 24 * 60 + 8));
+}
+
+function estimatedTravelMatrix(
+  locations: PlaceFixtureLocation[],
+  mode: TravelMode,
 ): number[][] {
   return locations.map((from, row) =>
     locations.map((to, column) =>
-      row === column ? 0 : estimatedWalkingMinutes(from, to),
+      row === column ? 0 : estimatedTravelMinutes(from, to, mode),
     ),
   );
 }
 
-function placePreset(
-  key: JobPreset["key"],
-  fixture: PlaceFixture,
-): JobPreset {
+interface PlacePresetOptions {
+  key: JobPreset["key"];
+  name: string;
+  description: string;
+  fixture: PlaceFixture;
+  locationOrder?: string[];
+  travelMode?: TravelMode;
+  startPolicy?: StartPolicy;
+  startTime?: string;
+  visitPolicy?: VisitPolicy;
+  schedule?: (
+    location: PlaceFixtureLocation,
+    index: number,
+    count: number,
+  ) => Partial<
+    Pick<
+      JobPresetLocation,
+      "openTime" | "closeTime" | "stayMinutes" | "required" | "priority"
+    >
+  >;
+}
+
+function placePreset(options: PlacePresetOptions): JobPreset {
+  const fixtureById = new Map(
+    options.fixture.locations.map((location) => [location.id, location]),
+  );
+  const locations = options.locationOrder
+    ? options.locationOrder.map((id) => {
+        const location = fixtureById.get(id);
+        if (!location) throw new Error(`Unknown Seoul fixture location: ${id}`);
+        return location;
+      })
+    : options.fixture.locations;
+  const travelMode = options.travelMode ?? "TRANSIT";
+
   return {
-    key,
-    name: fixture.name.replace(" Places", ""),
+    key: options.key,
+    name: options.name,
+    description: options.description,
     kind: "places",
-    countryCode: key.startsWith("tokyo") ? "JP" : "KR",
-    travelMode: "WALKING",
-    travelTimeMatrix: estimatedWalkingMatrix(fixture.locations),
-    locations: fixture.locations.map(({ id, name, place_id }, index) => ({
-      id,
-      name,
-      placeId: place_id,
+    countryCode: "KR",
+    travelMode,
+    startPolicy: options.startPolicy ?? "EARLIEST",
+    startTime: options.startTime ?? "09:00",
+    visitPolicy: options.visitPolicy,
+    travelTimeMatrix: estimatedTravelMatrix(locations, travelMode),
+    locations: locations.map((location, index) => ({
+      id: location.id,
+      name: SEOUL_LOCATION_NAMES[location.id] ?? location.name,
+      placeId: location.place_id,
       openTime: "00:00",
       closeTime: "23:50",
-      stayMinutes:
-        index === 0 || index === fixture.locations.length - 1 ? 0 : 30,
+      stayMinutes: index === 0 || index === locations.length - 1 ? 0 : 30,
+      ...options.schedule?.(location, index, locations.length),
     })),
   };
 }
 
+const SEOUL_3_QUICK = placePreset({
+  key: "seoul-3-quick",
+  name: "서울 빠른 확인 · 3",
+  description: "서울역·강남·홍대 기본 동작",
+  fixture: seoul3,
+});
+
+const SEOUL_5_CORE = placePreset({
+  key: "seoul-5-core",
+  name: "서울 핵심 명소 · 5",
+  description: "도심 주요 지점 경로 최적화",
+  fixture: seoul5,
+  schedule: (_location, index, count) => ({
+    stayMinutes: index === 0 || index === count - 1 ? 0 : 50,
+  }),
+});
+
+const SEOUL_5_WINDOWS = placePreset({
+  key: "seoul-5-windows",
+  name: "서울 시간 제약 · 5",
+  description: "운영시간·대기·체류 계산",
+  fixture: seoul5,
+  locationOrder: [
+    "seoul-station",
+    "gyeongbokgung-palace",
+    "myeongdong-station",
+    "hongik-university-station",
+    "gangnam-station",
+  ],
+  schedule: (location, index, count) => {
+    if (index === 0 || index === count - 1) return { stayMinutes: 0 };
+    if (location.id === "gyeongbokgung-palace") {
+      return { openTime: "09:00", closeTime: "17:00", stayMinutes: 90 };
+    }
+    if (location.id === "myeongdong-station") {
+      return { openTime: "10:00", closeTime: "21:00", stayMinutes: 60 };
+    }
+    return { openTime: "11:00", closeTime: "22:00", stayMinutes: 80 };
+  },
+});
+
+const SEOUL_5_PARTIAL = placePreset({
+  key: "seoul-5-partial",
+  name: "서울 전체 방문 불가 · 5",
+  description: "좁은 시간창에서 일부 장소 생략 검증",
+  fixture: seoul5,
+  visitPolicy: "BEST_EFFORT_ON_FAILURE",
+  startPolicy: "FIXED",
+  startTime: "09:00",
+  locationOrder: [
+    "seoul-station",
+    "gyeongbokgung-palace",
+    "myeongdong-station",
+    "hongik-university-station",
+    "gangnam-station",
+  ],
+  schedule: (_location, index, count) => {
+    const endpoint = index === 0 || index === count - 1;
+    if (endpoint) {
+      return {
+        openTime: "09:00",
+        closeTime: "23:50",
+        stayMinutes: 0,
+        required: true,
+        priority: 100,
+      };
+    }
+    return {
+      openTime: "09:00",
+      closeTime: "10:30",
+      stayMinutes: 60,
+      required: false,
+      priority: 100 - index * 10,
+    };
+  },
+});
+
+const SEOUL_10_DAY = placePreset({
+  key: "seoul-10-day",
+  name: "서울 종일 투어 · 10",
+  description: "10개 지점 성능·순서 비교",
+  fixture: seoul10,
+  startTime: "08:30",
+  schedule: (location, index, count) => {
+    if (index === 0) {
+      return { openTime: "08:30", closeTime: "23:50", stayMinutes: 0 };
+    }
+    if (index === count - 1) {
+      return { openTime: "09:00", closeTime: "22:00", stayMinutes: 0 };
+    }
+    if (location.id === "gyeongbokgung-palace") {
+      return { openTime: "09:00", closeTime: "17:00", stayMinutes: 60 };
+    }
+    if (location.id === "dongdaemun-design-plaza") {
+      return { openTime: "10:00", closeTime: "20:00", stayMinutes: 50 };
+    }
+    return { openTime: "09:00", closeTime: "22:00", stayMinutes: 40 };
+  },
+});
+
 const SYNTHETIC_8: JobPreset = {
   key: "synthetic-8",
   name: "Synthetic 8",
+  description: "비대칭 행렬 알고리즘 스트레스 테스트",
   kind: "synthetic",
+  startPolicy: "EARLIEST",
+  startTime: "08:00",
   locations: "ABCDEFGH".split("").map((id, index) => ({
     id,
     name:
@@ -126,9 +317,10 @@ const SYNTHETIC_8: JobPreset = {
 };
 
 export const JOB_PRESETS: JobPreset[] = [
-  placePreset("tokyo-3", tokyo3),
-  placePreset("tokyo-5", tokyo5),
-  placePreset("tokyo-10", tokyo10),
-  placePreset("seoul-5", seoul5),
+  SEOUL_3_QUICK,
+  SEOUL_5_CORE,
+  SEOUL_5_WINDOWS,
+  SEOUL_5_PARTIAL,
+  SEOUL_10_DAY,
   SYNTHETIC_8,
 ];

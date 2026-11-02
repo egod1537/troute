@@ -1,13 +1,28 @@
 use thiserror::Error;
 
-/// A row-major matrix where each value is travel time in minutes.
+mod service;
+
+pub use service::{MatrixService, MatrixSource};
+
+/// A row-major directed matrix where `None` is a known unreachable arc.
+///
+/// Zero remains a valid travel time, including on non-diagonal arcs, and is
+/// never used as an unreachable sentinel.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TravelTimeMatrix {
-    rows: Vec<Vec<u32>>,
+    rows: Vec<Vec<Option<u32>>>,
 }
 
 impl TravelTimeMatrix {
     pub fn new(rows: Vec<Vec<u32>>) -> Result<Self, MatrixError> {
+        Self::new_sparse(
+            rows.into_iter()
+                .map(|row| row.into_iter().map(Some).collect())
+                .collect(),
+        )
+    }
+
+    pub fn new_sparse(rows: Vec<Vec<Option<u32>>>) -> Result<Self, MatrixError> {
         if rows.is_empty() {
             return Err(MatrixError::Empty);
         }
@@ -25,6 +40,15 @@ impl TravelTimeMatrix {
             });
         }
 
+        for (index, row) in rows.iter().enumerate() {
+            if row[index] != Some(0) {
+                return Err(MatrixError::InvalidDiagonal {
+                    index,
+                    actual: row[index],
+                });
+            }
+        }
+
         Ok(Self { rows })
     }
 
@@ -33,10 +57,10 @@ impl TravelTimeMatrix {
     }
 
     pub fn travel_minutes(&self, from: usize, to: usize) -> Option<u32> {
-        self.rows.get(from)?.get(to).copied()
+        self.rows.get(from)?.get(to).copied().flatten()
     }
 
-    pub fn into_rows(self) -> Vec<Vec<u32>> {
+    pub fn into_rows(self) -> Vec<Vec<Option<u32>>> {
         self.rows
     }
 }
@@ -51,4 +75,9 @@ pub enum MatrixError {
         expected: usize,
         actual: usize,
     },
+    #[error("travel time matrix diagonal entry [{index}][{index}] must be 0; actual {actual:?}")]
+    InvalidDiagonal { index: usize, actual: Option<u32> },
 }
+
+#[cfg(test)]
+mod tests;

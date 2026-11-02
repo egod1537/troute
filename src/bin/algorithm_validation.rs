@@ -3,8 +3,9 @@ use std::{
     env,
     error::Error,
     fs::{self, File},
-    io::BufWriter,
+    io::{BufWriter, Write},
     path::{Path, PathBuf},
+    process::Command,
     time::{Duration, Instant},
 };
 
@@ -36,6 +37,64 @@ struct Config {
     output_dir: PathBuf,
     sizes: Option<Vec<usize>>,
     seeds: Vec<u64>,
+    budgets: Vec<Duration>,
+    enable_mip_scip: bool,
+    lkh3_executable: Option<PathBuf>,
+}
+
+#[derive(Clone, Copy, Debug, Serialize)]
+#[serde(rename_all = "snake_case")]
+enum QualityScenario {
+    DirectedTimeWindows,
+    SparseDirected,
+    ZeroMinuteArcs,
+    PartialVisit,
+    Infeasible,
+}
+
+#[derive(Debug, Serialize)]
+struct BenchmarkManifest {
+    generated_at: String,
+    commit_sha: Option<String>,
+    rustc_version: Option<String>,
+    target_arch: &'static str,
+    target_os: &'static str,
+    sizes: Vec<usize>,
+    seeds: Vec<u64>,
+    budgets_ms: Vec<u64>,
+    scenarios: Vec<QualityScenario>,
+    mip_scip_requested: bool,
+    mip_scip_compiled: bool,
+    lkh3_executable: Option<PathBuf>,
+    resource_accounting: &'static str,
+}
+
+#[derive(Debug, Serialize)]
+struct QualityBenchmarkRecord {
+    scenario: QualityScenario,
+    n: usize,
+    seed: u64,
+    budget_ms: u64,
+    strategy: String,
+    selected: bool,
+    feasible: bool,
+    visited_optional_count: Option<usize>,
+    visited_optional_priority: Option<u32>,
+    selected_start_minute: Option<u16>,
+    finish_minute: Option<u16>,
+    travel_minutes: Option<u32>,
+    wait_minutes: Option<u32>,
+    elapsed_ms: f64,
+    candidate_attempts: usize,
+    first_feasible_ms: Option<f64>,
+    outcome: Option<String>,
+    proof_status: Option<String>,
+    best_bound: Option<u64>,
+    relative_gap_ppm: Option<u64>,
+    thread_count: Option<usize>,
+    source_version: Option<String>,
+    timed_out: bool,
+    error: Option<String>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
@@ -144,6 +203,40 @@ fn main() -> Result<(), Box<dyn Error>> {
         &orchestrator,
     )?;
 
+    let quality = quality_benchmarks(&all_sizes, &config)?;
+    write_json(
+        &config.output_dir.join("solver-quality-results.json"),
+        &quality,
+    )?;
+    let scenarios = quality_scenarios();
+    let manifest = BenchmarkManifest {
+        generated_at: chrono::Utc::now().to_rfc3339(),
+        commit_sha: command_output("git", &["rev-parse", "HEAD"]),
+        rustc_version: command_output("rustc", &["--version"]),
+        target_arch: std::env::consts::ARCH,
+        target_os: std::env::consts::OS,
+        sizes: all_sizes.clone(),
+        seeds: config.seeds.clone(),
+        budgets_ms: config
+            .budgets
+            .iter()
+            .map(|budget| duration_ms(*budget))
+            .collect(),
+        scenarios,
+        mip_scip_requested: config.enable_mip_scip,
+        mip_scip_compiled: cfg!(feature = "solver-mip-scip"),
+        lkh3_executable: config.lkh3_executable.clone(),
+        resource_accounting: "wall time and configured solver thread count are recorded; process CPU and peak RSS require an external benchmark harness",
+    };
+    write_json(
+        &config.output_dir.join("benchmark-manifest.json"),
+        &manifest,
+    )?;
+    write_quality_report(
+        &config.output_dir.join("solver-quality-report.md"),
+        &quality,
+    )?;
+
     cross_check_matching(&config.seeds)?;
     println!("validation results: {}", config.output_dir.display());
     if exact_failed {
@@ -156,6 +249,13 @@ fn parse_args() -> Result<Config, Box<dyn Error>> {
     let mut output_dir = PathBuf::from("benchmark-results");
     let mut sizes = None;
     let mut seeds = DEFAULT_SEEDS.to_vec();
+    let mut budgets = vec![
+        Duration::from_secs(1),
+        Duration::from_secs(5),
+        Duration::from_secs(30),
+    ];
+    let mut enable_mip_scip = false;
+    let mut lkh3_executable = None;
     let args: Vec<_> = env::args().skip(1).collect();
     let mut index = 0;
     while index < args.len() {
@@ -179,9 +279,26 @@ fn parse_args() -> Result<Config, Box<dyn Error>> {
                 index += 1;
                 seeds = parse_csv(args.get(index).ok_or("--seed requires values")?)?;
             }
+            "--budget-seconds" => {
+                index += 1;
+                let values = parse_csv(args.get(index).ok_or("--budget-seconds requires values")?)?;
+                if values.is_empty() || values.contains(&0) {
+                    return Err("--budget-seconds values must be positive".into());
+                }
+                budgets = values.into_iter().map(Duration::from_secs).collect();
+            }
+            "--enable-mip" => enable_mip_scip = true,
+            "--lkh-executable" => {
+                index += 1;
+                lkh3_executable = Some(
+                    args.get(index)
+                        .ok_or("--lkh-executable requires a path")?
+                        .into(),
+                );
+            }
             "--help" | "-h" => {
                 println!(
-                    "Usage: algorithm_validation [--output-dir DIR] [--n 5,8,10] [--seed 42,1337]"
+                    "Usage: algorithm_validation [--output-dir DIR] [--n 5,8,10] [--seed 42,1337] [--budget-seconds 1,5,30] [--enable-mip] [--lkh-executable PATH]"
                 );
                 std::process::exit(0);
             }
@@ -196,6 +313,9 @@ fn parse_args() -> Result<Config, Box<dyn Error>> {
         output_dir,
         sizes,
         seeds,
+        budgets,
+        enable_mip_scip,
+        lkh3_executable,
     })
 }
 
@@ -235,6 +355,29 @@ fn elapsed_ms(elapsed: Duration) -> f64 {
     elapsed.as_secs_f64() * 1_000.0
 }
 
+fn duration_ms(duration: Duration) -> u64 {
+    u64::try_from(duration.as_millis()).unwrap_or(u64::MAX)
+}
+
+fn command_output(program: &str, arguments: &[&str]) -> Option<String> {
+    let output = Command::new(program).args(arguments).output().ok()?;
+    output
+        .status
+        .success()
+        .then(|| String::from_utf8_lossy(&output.stdout).trim().to_owned())
+        .filter(|value| !value.is_empty())
+}
+
+fn quality_scenarios() -> Vec<QualityScenario> {
+    vec![
+        QualityScenario::DirectedTimeWindows,
+        QualityScenario::SparseDirected,
+        QualityScenario::ZeroMinuteArcs,
+        QualityScenario::PartialVisit,
+        QualityScenario::Infeasible,
+    ]
+}
+
 fn generated_case(n: usize, seed: u64) -> GeneratedCase {
     let mut rng = StdRng::seed_from_u64(seed ^ ((n as u64) << 32));
     let locations: Vec<_> = (0..n)
@@ -270,6 +413,83 @@ fn generated_case(n: usize, seed: u64) -> GeneratedCase {
             .collect(),
     )
     .expect("generated matrices are square");
+    GeneratedCase {
+        problem: request.try_into().expect("generated problem is valid"),
+        matrix,
+    }
+}
+
+fn generated_quality_case(n: usize, seed: u64, scenario: QualityScenario) -> GeneratedCase {
+    let mut rng = StdRng::seed_from_u64(seed ^ ((n as u64) << 32) ^ scenario as u64);
+    let locations: Vec<_> = (0..n)
+        .map(|index| {
+            let endpoint = index == 0 || index + 1 == n;
+            let (open, close, stay) = match scenario {
+                QualityScenario::DirectedTimeWindows => {
+                    if endpoint {
+                        (0, 23 * 60 + 50, 0)
+                    } else {
+                        let open = rng.gen_range(8 * 6..=11 * 6) * 10;
+                        (open, 23 * 60 + 50, rng.gen_range(0..=2) * 10)
+                    }
+                }
+                QualityScenario::Infeasible if index == 1 => (0, 0, 0),
+                _ => (0, 23 * 60 + 50, if endpoint { 0 } else { 10 }),
+            };
+            let mut value = serde_json::json!({
+                "id": format!("location-{index}"),
+                "place_id": format!("place-{index}"),
+                "open_time": hhmm(open),
+                "close_time": hhmm(close),
+                "stay_minutes": stay,
+            });
+            if matches!(scenario, QualityScenario::PartialVisit) {
+                value["required"] = serde_json::json!(endpoint || index % 4 == 0);
+                value["priority"] = serde_json::json!(1 + ((index * 17 + seed as usize) % 100));
+            }
+            value
+        })
+        .collect();
+    let mut request = serde_json::json!({
+        "job_id": format!("quality-{scenario:?}-{n}-{seed}"),
+        "locations": locations,
+        "start_policy": if seed.is_multiple_of(2) { "FIXED" } else { "LATEST" },
+        "start_time": "08:00",
+    });
+    if matches!(scenario, QualityScenario::PartialVisit) {
+        request["visit_policy"] = serde_json::json!("BEST_EFFORT_ON_FAILURE");
+    }
+    let request: OptimizeRouteRequest =
+        serde_json::from_value(request).expect("generated quality request is valid");
+
+    let mut rows = vec![vec![None; n]; n];
+    for (index, row) in rows.iter_mut().enumerate() {
+        row[index] = Some(0);
+    }
+    for (from, row) in rows.iter_mut().enumerate() {
+        for (to, cell) in row.iter_mut().enumerate() {
+            if from == to {
+                continue;
+            }
+            let base = rng.gen_range(1..=45);
+            *cell = match scenario {
+                QualityScenario::SparseDirected if rng.gen_bool(0.55) => None,
+                QualityScenario::ZeroMinuteArcs
+                    if (from + to + seed as usize).is_multiple_of(7) =>
+                {
+                    Some(0)
+                }
+                QualityScenario::Infeasible if from == 0 => None,
+                _ => Some(base),
+            };
+        }
+    }
+    if matches!(scenario, QualityScenario::SparseDirected) {
+        for index in 0..n - 1 {
+            rows[index][index + 1] = Some(1 + (index as u32 % 9));
+        }
+    }
+    let matrix = TravelTimeMatrix::new_sparse(rows).expect("generated matrix is square");
     GeneratedCase {
         problem: request.try_into().expect("generated problem is valid"),
         matrix,
@@ -732,6 +952,226 @@ fn orchestrator_benchmarks(sizes: &[usize], seeds: &[u64]) -> Vec<BenchmarkRecor
     records
 }
 
+fn quality_benchmarks(
+    sizes: &[usize],
+    config: &Config,
+) -> Result<Vec<QualityBenchmarkRecord>, Box<dyn Error>> {
+    let mut records = Vec::new();
+    for scenario in quality_scenarios() {
+        for &n in sizes {
+            for &seed in &config.seeds {
+                let case = generated_quality_case(n, seed, scenario);
+                for &budget in &config.budgets {
+                    let cancellation = CancellationToken::new();
+                    let safety = Duration::from_millis(50).min(budget / 10);
+                    let solver = SolverOrchestrator::new(SolverOrchestratorConfig {
+                        max_cluster_size: 5,
+                        max_concurrency: 4,
+                        strategy_timeout: budget,
+                        total_budget: budget,
+                        sa_chunk: Duration::from_millis(250).min(budget / 2),
+                        deadline_safety_margin: safety.max(Duration::from_millis(1)),
+                        sa_config: SimulatedAnnealingConfig {
+                            seed: Some(seed),
+                            ..SimulatedAnnealingConfig::default()
+                        },
+                        sa_seeds: vec![seed],
+                        enable_mip_scip: config.enable_mip_scip,
+                        mip_scip_time_limit: budget,
+                        enable_lkh3: config.lkh3_executable.is_some(),
+                        lkh3_executable: config.lkh3_executable.clone(),
+                        lkh3_time_limit: budget,
+                        lkh3_seed: seed,
+                        compare_all: true,
+                        ..SolverOrchestratorConfig::default()
+                    })?;
+                    match solver.solve_detailed(input(&case, &cancellation)) {
+                        Ok(result) => {
+                            let selected = result.selected_strategy;
+                            let candidate_attempts = result.candidates.len();
+                            let first_feasible_ms = result
+                                .candidates
+                                .iter()
+                                .filter(|candidate| candidate.feasible)
+                                .map(|candidate| elapsed_ms(candidate.elapsed))
+                                .min_by(f64::total_cmp);
+                            let first_sa = result
+                                .candidates
+                                .iter()
+                                .position(|candidate| candidate.strategy.starts_with("sa_"));
+                            records.extend(result.candidates.into_iter().enumerate().filter_map(
+                                |(index, candidate)| {
+                                    let keep = !candidate.strategy.starts_with("sa_")
+                                        || candidate.strategy == selected
+                                        || Some(index) == first_sa;
+                                    keep.then(|| {
+                                        quality_candidate_row(
+                                            QualityRunContext {
+                                                scenario,
+                                                n,
+                                                seed,
+                                                budget,
+                                                candidate_attempts,
+                                                first_feasible_ms,
+                                            },
+                                            candidate,
+                                            &selected,
+                                        )
+                                    })
+                                },
+                            ));
+                        }
+                        Err(error) => records.push(QualityBenchmarkRecord {
+                            scenario,
+                            n,
+                            seed,
+                            budget_ms: duration_ms(budget),
+                            strategy: "orchestrator".to_owned(),
+                            selected: false,
+                            feasible: false,
+                            visited_optional_count: None,
+                            visited_optional_priority: None,
+                            selected_start_minute: None,
+                            finish_minute: None,
+                            travel_minutes: None,
+                            wait_minutes: None,
+                            elapsed_ms: 0.0,
+                            candidate_attempts: 0,
+                            first_feasible_ms: None,
+                            outcome: None,
+                            proof_status: None,
+                            best_bound: None,
+                            relative_gap_ppm: None,
+                            thread_count: None,
+                            source_version: None,
+                            timed_out: matches!(error, troute::solver::SolverError::TimedOut),
+                            error: Some(error.to_string()),
+                        }),
+                    }
+                }
+            }
+        }
+    }
+    Ok(records)
+}
+
+#[derive(Clone, Copy)]
+struct QualityRunContext {
+    scenario: QualityScenario,
+    n: usize,
+    seed: u64,
+    budget: Duration,
+    candidate_attempts: usize,
+    first_feasible_ms: Option<f64>,
+}
+
+fn quality_candidate_row(
+    context: QualityRunContext,
+    candidate: SolverCandidate,
+    selected_strategy: &str,
+) -> QualityBenchmarkRecord {
+    let QualityRunContext {
+        scenario,
+        n,
+        seed,
+        budget,
+        candidate_attempts,
+        first_feasible_ms,
+    } = context;
+    let score = candidate.objective_score;
+    QualityBenchmarkRecord {
+        scenario,
+        n,
+        seed,
+        budget_ms: duration_ms(budget),
+        selected: candidate.strategy == selected_strategy,
+        strategy: candidate.strategy,
+        feasible: candidate.feasible,
+        visited_optional_count: score.map(|value| value.visited_optional_count),
+        visited_optional_priority: score.map(|value| value.visited_optional_priority),
+        selected_start_minute: score.map(|value| value.start_time_slot),
+        finish_minute: score.map(|value| value.finish_time_slot),
+        travel_minutes: score.map(|value| value.travel_minutes),
+        wait_minutes: score.map(|value| value.wait_minutes),
+        elapsed_ms: elapsed_ms(candidate.elapsed),
+        candidate_attempts,
+        first_feasible_ms,
+        outcome: candidate
+            .metadata
+            .outcome
+            .map(|value| format!("{value:?}").to_ascii_lowercase()),
+        proof_status: candidate
+            .metadata
+            .proof_status
+            .map(|value| format!("{value:?}").to_ascii_lowercase()),
+        best_bound: candidate.metadata.best_bound,
+        relative_gap_ppm: candidate.metadata.relative_gap_ppm,
+        thread_count: candidate.metadata.thread_count,
+        source_version: candidate.metadata.source_version,
+        timed_out: candidate.metadata.timed_out,
+        error: candidate.metadata.error,
+    }
+}
+
+fn write_quality_report(
+    path: &Path,
+    records: &[QualityBenchmarkRecord],
+) -> Result<(), Box<dyn Error>> {
+    let mut writer = BufWriter::new(File::create(path)?);
+    writeln!(writer, "# Solver quality benchmark")?;
+    writeln!(writer)?;
+    writeln!(
+        writer,
+        "Selected feasible results at the 5-second wall-clock budget are shown below. Lexicographic objective components are reported separately; no percentage gap is invented when no proven reference exists."
+    )?;
+    writeln!(writer)?;
+    writeln!(
+        writer,
+        "| scenario | N | seed | strategy | coverage | priority | start | finish | travel | wait |"
+    )?;
+    writeln!(
+        writer,
+        "| --- | ---: | ---: | --- | ---: | ---: | ---: | ---: | ---: | ---: |"
+    )?;
+    for record in records
+        .iter()
+        .filter(|record| record.budget_ms == 5_000 && record.selected && record.feasible)
+    {
+        writeln!(
+            writer,
+            "| {:?} | {} | {} | {} | {} | {} | {} | {} | {} | {} |",
+            record.scenario,
+            record.n,
+            record.seed,
+            record.strategy,
+            record
+                .visited_optional_count
+                .map_or_else(|| "-".to_owned(), |value| value.to_string()),
+            record
+                .visited_optional_priority
+                .map_or_else(|| "-".to_owned(), |value| value.to_string()),
+            record
+                .selected_start_minute
+                .map_or_else(|| "-".to_owned(), |value| value.to_string()),
+            record
+                .finish_minute
+                .map_or_else(|| "-".to_owned(), |value| value.to_string()),
+            record
+                .travel_minutes
+                .map_or_else(|| "-".to_owned(), |value| value.to_string()),
+            record
+                .wait_minutes
+                .map_or_else(|| "-".to_owned(), |value| value.to_string()),
+        )?;
+    }
+    writeln!(writer)?;
+    writeln!(
+        writer,
+        "SCIP and LKH-3 rows appear only when explicitly enabled. LKH-3 remains an externally installed, non-redistributed executable. CPU time and peak RSS should be collected by the surrounding OS benchmark harness."
+    )?;
+    Ok(())
+}
+
 fn candidate_row(
     n: usize,
     seed: u64,
@@ -859,6 +1299,8 @@ fn independent_evaluate(
         if feasible {
             return Some(SolutionMetrics {
                 start_policy: case.problem.start_policy(),
+                visited_optional_count: 0,
+                visited_optional_priority: 0,
                 start_time_slot: start as u16,
                 finish_time_slot: slot as u16,
                 travel_minutes: travel_total,

@@ -5,6 +5,8 @@ import type {
   StoredJobError,
   StoredJobEvent,
   StoredJobRecord,
+  PortfolioTelemetrySummary,
+  SolverTelemetryEvent,
 } from "./api";
 
 export type TestbedJobStatus =
@@ -49,6 +51,8 @@ export interface TestbedJob {
   timeline: TimelineEntry[];
   response?: ApiResponse;
   route?: RouteResponse;
+  solverTelemetry?: PortfolioTelemetrySummary;
+  solverEvents?: SolverTelemetryEvent[];
   /** Last persisted version merged from the server; absent for browser-only jobs. */
   serverUpdatedAt?: number;
 }
@@ -83,6 +87,9 @@ export function mergeStoredJob(
     timeline: existing?.timeline ?? [],
     response: existing?.response,
     route: record.result ?? existing?.route,
+    solverTelemetry:
+      record.result?.solver_telemetry ?? existing?.solverTelemetry,
+    solverEvents: existing?.solverEvents,
     serverUpdatedAt: record.updated_at,
   };
 }
@@ -111,6 +118,8 @@ export function mergeStoredJobEvent(
     error,
     failure: state.error ?? existing.failure,
     route: state.result ?? existing.route,
+    solverTelemetry:
+      state.result?.solver_telemetry ?? existing.solverTelemetry,
     serverUpdatedAt: event.updated_at,
   };
 }

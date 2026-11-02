@@ -4,7 +4,12 @@ WORKDIR /app
 COPY Cargo.toml Cargo.lock ./
 COPY src ./src
 COPY benches ./benches
-RUN cargo build --locked --release --bin troute
+ARG TROUTE_CARGO_FEATURES=""
+RUN if [ -n "$TROUTE_CARGO_FEATURES" ]; then \
+      cargo build --locked --release --bin troute --features "$TROUTE_CARGO_FEATURES"; \
+    else \
+      cargo build --locked --release --bin troute; \
+    fi
 
 FROM debian:bookworm-slim AS runtime
 

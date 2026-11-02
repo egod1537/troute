@@ -1,4 +1,7 @@
 /target/
+/target-spec/
+/target-scip/
+/target-runtime/
 __pycache__/
 node_modules/
 /testbed/dist/

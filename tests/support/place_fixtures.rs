@@ -101,15 +101,22 @@ pub fn build_optimize_request_from_fixture(
                 open_time,
                 close_time,
                 stay_minutes: 0,
+                required: None,
+                priority: None,
             })
             .collect(),
+        visit_policy: None,
         start_policy: None,
         start_time: Some(start_time),
         travel_mode: None,
         country_code: None,
         route_provider: None,
         travel_time_matrix: None,
+        sparse_travel_time_matrix: None,
         debug: None::<DebugOptions>,
+        travel_date: None,
+        time_zone: None,
+        portfolio_experiment: None,
     })
 }
 

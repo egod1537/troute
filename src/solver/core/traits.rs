@@ -4,6 +4,8 @@ use crate::{
     matrix::TravelTimeMatrix,
 };
 
+use crate::solver::portfolio::{PortfolioCapabilities, PortfolioExperimentOptions};
+
 use super::{SolverError, SolverRunResult};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -51,6 +53,10 @@ pub struct SolverSolution {
 pub trait RouteSolver {
     fn solve(&self, input: SolverInput<'_>) -> Result<SolverSolution, SolverError>;
 
+    fn portfolio_capabilities(&self) -> Option<PortfolioCapabilities> {
+        None
+    }
+
     /// Runs the solver and optionally returns strategy-level diagnostics.
     /// Implementations that do not orchestrate multiple strategies retain the
     /// original `solve` behavior through this default implementation.
@@ -82,6 +88,23 @@ pub trait RouteSolver {
             observer.on_progress(SolverProgressEvent::SelectionStarted(1));
         }
         result
+    }
+
+    /// Applies an optional, server-capped portfolio experiment override.
+    /// Solvers that do not implement portfolio scheduling retain their normal
+    /// behavior when no override is supplied and reject an explicit override.
+    fn solve_with_portfolio_options(
+        &self,
+        input: SolverInput<'_>,
+        observer: &dyn SolverProgressObserver,
+        options: Option<&PortfolioExperimentOptions>,
+    ) -> Result<SolverRunResult, SolverError> {
+        if options.is_some() {
+            return Err(SolverError::Unsupported(
+                "portfolio experiments are unavailable for this solver".to_owned(),
+            ));
+        }
+        self.solve_with_diagnostics_and_progress(input, observer)
     }
 
     /// Selects the schedule departure represented by the solution. Existing

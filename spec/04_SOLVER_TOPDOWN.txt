@@ -1,0 +1,51 @@
+[작업 3] Solver / Orchestrator / Algorithm Top-down 정렬
+=========================================================
+
+대상 (우선순위)
+- src/solver.rs
+- src/solver/orchestrator.rs, src/solver/orchestrator/runner.rs,
+  src/solver/orchestrator/strategy.rs, selector.rs, diagnostics.rs, telemetry.rs
+- src/solver/portfolio/policy.rs, descriptor.rs, context.rs
+- src/solver/exact/bit_dp.rs, src/solver/mip/scip.rs
+- src/solver/external/lkh3.rs
+- src/solver/heuristic/annealing/solver.rs, src/solver/heuristic/clustered/solver.rs
+- src/solver/initial/** (필요한 파일만)
+
+목적
+- Solver 사용자 입장에서 타입/trait/공개 entrypoint를 먼저 확인할 수 있게 한다.
+- 주요 알고리즘에서는 `solve()`/`execute()`/`generate()`의 단계가 먼저 보이고
+  내부 스코어링/후보 생성/전이/후처리 함수는 아래에서 읽히게 한다.
+
+요구 사항
+1. `solver/orchestrator.rs`는 지금처럼 mod + pub use facade로 유지한다.
+   `pub use runner::SolverOrchestrator` 등을 구조체 정의로 중복 복제하지 않는다.
+2. `solver/orchestrator/runner.rs`: `SolverOrchestrator`의 필드 정의 뒤에
+   외부 공개 생성/설정/실행 API의 핵심 흐름이 먼저 읽히도록 배치.
+   private 전략 실행, 후보 평가, 로그/telemetry 헬퍼는 의미상 연결된 아래 구역으로.
+3. 각 Solver 구현 파일에서는 핵심 trait impl/solve 메서드가 먼저 보이는지 점검.
+   단, 공개 타입 또는 상태 구성 이해에 필요한 struct/enum/config는 그 앞에 둬도 된다.
+4. 긴 내부 함수는 책임이 분명하고 중첩이 가독성을 해칠 때만 작은 helper로 추출.
+   단순히 줄 수를 맞추기 위한 분할은 금지.
+5. `src/solver.rs`는 공개 API/대표 evaluator 동작/세부 평가 helper의 관계를
+   명확히 하되 `pub mod`, `pub use` 및 Blanket impl의 의미를 보존한다.
+6. 이미 분리된 테스트:
+   src/solver/orchestrator/tests.rs,
+   src/solver/orchestrator/tests/{execution,portfolio,selection}.rs 등은 그대로 유지.
+7. 테스트 전용 struct/fixture는 tests.rs 계층에 둔다. 프로덕션 코드로 옮기지 않는다.
+
+알고리즘 동작 불변 조건 (매우 중요)
+- TSP/Time Window 제약, 목적함수, feasible 판정, optional-location 우선순위
+- SIMD/성능 관련 코드, DP pruning/frontier, MIP SCIP 제한, LKH-3 프로세스 처리
+- Simulated Annealing의 RNG 시드, iterate/accept/cooling 순서
+- 동시 실행, timeout, cancellation, resource budget, incumbent exchange
+- 비교 정책 및 tie-break, 채택 후보 순서, telemetry event 타이밍
+- 계산 결과의 정확성뿐 아니라 결정론적 실행과 성능 특성도 변경하지 않는다.
+
+금지
+- 새로운 Solver trait이나 Registry/DI 구조를 만들지 않는다.
+- 대규모 알고리즘 변경, 제네릭 구체화, 새 trait object 도입 금지.
+- 단순 소스 배치를 위해 별도의 config/strategy/result API를 바꾸지 않는다.
+
+완료
+- Orchestrator 및 각 Solver의 대표 진입점부터 읽으면 실제 처리 단계가 드러난다.
+- 기존 모듈 경계와 테스트 및 계산 결과가 보존된다.

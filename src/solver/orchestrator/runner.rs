@@ -1,127 +1,42 @@
 use std::{
-    any::Any,
-    collections::{HashSet, VecDeque},
-    panic::{catch_unwind, AssertUnwindSafe},
-    sync::{
-        atomic::{AtomicU8, Ordering as AtomicOrdering},
-        mpsc, Arc, Mutex,
-    },
-    thread,
+    collections::HashSet,
+    sync::Arc,
     time::{Duration, Instant},
 };
 
 use crate::{
-    cancellation::CancellationToken,
     domain::TimeOfDay,
     solver::{
-        DefaultObjectivePolicy, ObjectiveEvaluator, RouteSolver, SolverCandidate,
-        SolverCandidateMetadata, SolverDiagnostics, SolverError, SolverInput, SolverProgressEvent,
-        SolverProgressObserver, SolverRunResult, SolverSolution,
+        DefaultObjectivePolicy, InstanceFeatures, InstancePolicyModel, InstancePolicySelection,
+        ObjectiveEvaluator, PortfolioExperimentOptions, PortfolioPolicy, ResourceLimits,
+        ResourceManager, RestartableArmSelector, RouteSolver, RuleBasedInstancePolicy,
+        SolverDiagnostics, SolverError, SolverInput, SolverProgressEvent, SolverProgressObserver,
+        SolverRegistry, SolverRunResult, SolverSolution, TelemetryMode,
     },
 };
 
 use super::{
+    candidate_accumulator::CandidateAccumulator,
     diagnostics::{annealing_strategy, built_in_strategies, SaInitializer},
+    initializer::{
+        deterministic_sa_seed, InitializerSelectionPolicy, RoundRobinInitializerSelectionPolicy,
+    },
+    result::{assign_run_identity, OrchestratorSolveResult, SolveResultBuilder, SolveResultStats},
+    strategy::{
+        duration_ms, execute_strategy, report_progress, resource_request, solver_id_for_strategy,
+        strategy_allowance, OrchestratedStrategy, StrategyBatchExecutor, StrategyTimeoutPolicy,
+    },
+    telemetry::PortfolioTelemetryBuilder,
     CandidateSelector, SolverOrchestratorConfig,
 };
-
-const TIMEOUT_POLL_INTERVAL: Duration = Duration::from_millis(2);
-
-fn report_progress(
-    observer: &dyn SolverProgressObserver,
-    event: impl FnOnce() -> SolverProgressEvent,
-) {
-    if observer.is_enabled() {
-        observer.on_progress(event());
-    }
-}
-
-/// Result produced by a strategy before common feasibility/objective
-/// evaluation is applied by the orchestrator.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct StrategyExecution {
-    pub solution: SolverSolution,
-    pub metadata: SolverCandidateMetadata,
-}
-
-/// Extension point for independently executable route strategies.
-pub trait OrchestratedStrategy: Send + Sync {
-    fn name(&self) -> &str;
-
-    fn is_applicable(&self, _location_count: usize) -> bool {
-        true
-    }
-
-    fn preserves_result_on_cancellation(&self) -> bool {
-        false
-    }
-
-    fn execute(&self, input: SolverInput<'_>) -> Result<StrategyExecution, SolverError>;
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct OrchestratorSolveResult {
-    pub solution: SolverSolution,
-    pub selected_strategy: String,
-    pub candidates: Vec<SolverCandidate>,
-    pub total_budget_ms: u64,
-    pub total_elapsed_ms: u64,
-    pub baseline_elapsed_ms: u64,
-    pub sa_elapsed_ms: u64,
-    pub sa_run_count: u64,
-    pub global_best_updates: u64,
-    pub termination_reason: String,
-}
-
-/// Replaceable ordering policy for SA initializers. The default guarantees the
-/// four baseline sources first, then interleaves warm starts and deterministic
-/// restarts.
-pub trait InitializerSelectionPolicy: Send + Sync {
-    fn select(&self, run_index: u64, has_global_best: bool) -> SaInitializer;
-}
-
-#[derive(Debug, Clone, Copy, Default)]
-pub struct RoundRobinInitializerSelectionPolicy;
-
-impl InitializerSelectionPolicy for RoundRobinInitializerSelectionPolicy {
-    fn select(&self, run_index: u64, has_global_best: bool) -> SaInitializer {
-        const BASELINES: [SaInitializer; 4] = [
-            SaInitializer::Greedy,
-            SaInitializer::MstDoubleTree,
-            SaInitializer::Christofides,
-            SaInitializer::Clustered,
-        ];
-        if run_index < BASELINES.len() as u64 {
-            return BASELINES[run_index as usize];
-        }
-        let restart = (run_index - BASELINES.len() as u64) % 5;
-        if restart == 0 && has_global_best {
-            SaInitializer::GlobalBest
-        } else {
-            BASELINES[restart.saturating_sub(1) as usize % BASELINES.len()]
-        }
-    }
-}
-
-pub fn deterministic_sa_seed(base_seed: u64, initializer: SaInitializer, round: u64) -> u64 {
-    let tag = match initializer {
-        SaInitializer::Greedy => 1_u64,
-        SaInitializer::MstDoubleTree => 2,
-        SaInitializer::Christofides => 3,
-        SaInitializer::Clustered => 4,
-        SaInitializer::GlobalBest => 5,
-    };
-    let mut value = base_seed ^ tag.wrapping_mul(0x9e37_79b9_7f4a_7c15) ^ round.rotate_left(17);
-    value = (value ^ (value >> 30)).wrapping_mul(0xbf58_476d_1ce4_e5b9);
-    value = (value ^ (value >> 27)).wrapping_mul(0x94d0_49bb_1331_11eb);
-    value ^ (value >> 31)
-}
 
 pub struct SolverOrchestrator<E = DefaultObjectivePolicy> {
     config: SolverOrchestratorConfig,
     evaluator: E,
     strategies: Vec<Arc<dyn OrchestratedStrategy>>,
     anytime: bool,
+    registry: SolverRegistry,
+    resources: ResourceManager,
 }
 
 impl Default for SolverOrchestrator<DefaultObjectivePolicy> {
@@ -134,12 +49,35 @@ impl Default for SolverOrchestrator<DefaultObjectivePolicy> {
 impl SolverOrchestrator<DefaultObjectivePolicy> {
     pub fn new(config: SolverOrchestratorConfig) -> Result<Self, SolverError> {
         let config = config.validate()?;
-        let strategies = built_in_strategies(&config)?;
+        let registry = SolverRegistry::built_in(&config)
+            .map_err(|error| SolverError::InvalidConfiguration(error.to_string()))?;
+        let mut strategies = built_in_strategies(&config)?;
+        strategies.retain(|strategy| {
+            let id = solver_id_for_strategy(strategy.name());
+            registry
+                .descriptor(&id)
+                .map_or(true, |descriptor| descriptor.unavailable_reason.is_none())
+        });
+        if let Some(enabled) = &config.enabled_solver_ids {
+            strategies.retain(|strategy| {
+                let id = solver_id_for_strategy(strategy.name());
+                enabled.contains(&id)
+            });
+        }
+        let resources = ResourceManager::new(ResourceLimits {
+            logical_cpu_slots: config.max_concurrency,
+            max_concurrent_runs: config.max_concurrency,
+            max_external_processes: config.max_external_processes,
+            memory_limit_bytes: config.memory_limit_bytes,
+        })
+        .map_err(|error| SolverError::InvalidConfiguration(error.to_string()))?;
         Ok(Self {
             config,
             evaluator: DefaultObjectivePolicy,
             strategies,
             anytime: true,
+            registry,
+            resources,
         })
     }
 }
@@ -154,16 +92,31 @@ impl<E: ObjectiveEvaluator> SolverOrchestrator<E> {
     ) -> Result<Self, SolverError> {
         let config = config.validate()?;
         validate_strategy_names(&strategies)?;
+        let registry = SolverRegistry::built_in(&config)
+            .map_err(|error| SolverError::InvalidConfiguration(error.to_string()))?;
+        let resources = ResourceManager::new(ResourceLimits {
+            logical_cpu_slots: config.max_concurrency,
+            max_concurrent_runs: config.max_concurrency,
+            max_external_processes: config.max_external_processes,
+            memory_limit_bytes: config.memory_limit_bytes,
+        })
+        .map_err(|error| SolverError::InvalidConfiguration(error.to_string()))?;
         Ok(Self {
             config,
             evaluator,
             strategies,
             anytime: false,
+            registry,
+            resources,
         })
     }
 
     pub fn config(&self) -> &SolverOrchestratorConfig {
         &self.config
+    }
+
+    pub fn registry(&self) -> &SolverRegistry {
+        &self.registry
     }
 
     pub fn solve_detailed(
@@ -172,7 +125,135 @@ impl<E: ObjectiveEvaluator> SolverOrchestrator<E> {
     ) -> Result<OrchestratorSolveResult, SolverError> {
         self.solve_detailed_with_progress(input, &crate::solver::NoopSolverProgressObserver)
     }
+}
 
+impl<E: ObjectiveEvaluator> RouteSolver for SolverOrchestrator<E> {
+    fn portfolio_capabilities(&self) -> Option<crate::solver::PortfolioCapabilities> {
+        Some(self.registry.capabilities(&self.config))
+    }
+
+    fn solve(&self, input: SolverInput<'_>) -> Result<SolverSolution, SolverError> {
+        self.solve_detailed(input).map(|result| result.solution)
+    }
+
+    fn solve_with_diagnostics(
+        &self,
+        input: SolverInput<'_>,
+    ) -> Result<SolverRunResult, SolverError> {
+        self.solve_detailed(input).map(|result| SolverRunResult {
+            solution: result.solution,
+            diagnostics: Some(SolverDiagnostics {
+                selected_strategy: result.selected_strategy,
+                candidates: result.candidates,
+                total_budget_ms: result.total_budget_ms,
+                total_elapsed_ms: result.total_elapsed_ms,
+                baseline_elapsed_ms: result.baseline_elapsed_ms,
+                sa_elapsed_ms: result.sa_elapsed_ms,
+                sa_run_count: result.sa_run_count,
+                global_best_updates: result.global_best_updates,
+                termination_reason: result.termination_reason,
+                portfolio_telemetry: result.portfolio_telemetry,
+            }),
+        })
+    }
+
+    fn solve_with_diagnostics_and_progress(
+        &self,
+        input: SolverInput<'_>,
+        observer: &dyn SolverProgressObserver,
+    ) -> Result<SolverRunResult, SolverError> {
+        self.solve_detailed_with_progress(input, observer)
+            .map(|result| SolverRunResult {
+                solution: result.solution,
+                diagnostics: Some(SolverDiagnostics {
+                    selected_strategy: result.selected_strategy,
+                    candidates: result.candidates,
+                    total_budget_ms: result.total_budget_ms,
+                    total_elapsed_ms: result.total_elapsed_ms,
+                    baseline_elapsed_ms: result.baseline_elapsed_ms,
+                    sa_elapsed_ms: result.sa_elapsed_ms,
+                    sa_run_count: result.sa_run_count,
+                    global_best_updates: result.global_best_updates,
+                    termination_reason: result.termination_reason,
+                    portfolio_telemetry: result.portfolio_telemetry,
+                }),
+            })
+    }
+
+    fn solve_with_portfolio_options(
+        &self,
+        input: SolverInput<'_>,
+        observer: &dyn SolverProgressObserver,
+        options: Option<&PortfolioExperimentOptions>,
+    ) -> Result<SolverRunResult, SolverError> {
+        let Some(options) = options else {
+            return self.solve_with_diagnostics_and_progress(input, observer);
+        };
+        if !self.config.experiment_override_enabled {
+            return Err(SolverError::Unsupported(
+                "per-request portfolio override requires TROUTE_PORTFOLIO_EXPERIMENT_ENABLED=true"
+                    .to_owned(),
+            ));
+        }
+        let mut config = self.config.clone();
+        config.portfolio.policy = options.policy;
+        if let Some(budget_ms) = options.total_budget_ms {
+            if budget_ms == 0 || budget_ms > duration_ms(self.config.total_budget) {
+                return Err(SolverError::InvalidConfiguration(format!(
+                    "requested portfolio budget must be between 1 and {} ms",
+                    duration_ms(self.config.total_budget)
+                )));
+            }
+            config.total_budget = Duration::from_millis(budget_ms);
+            config.strategy_timeout = config.strategy_timeout.min(config.total_budget);
+            if config.deadline_safety_margin >= config.total_budget {
+                config.deadline_safety_margin =
+                    Duration::from_millis(1).min(config.total_budget / 2);
+            }
+        }
+        if let Some(slots) = options.logical_cpu_slots {
+            if slots == 0 || slots > self.config.max_concurrency {
+                return Err(SolverError::InvalidConfiguration(format!(
+                    "requested portfolio slots must be between 1 and {}",
+                    self.config.max_concurrency
+                )));
+            }
+            config.max_concurrency = slots;
+        }
+        if let Some(seed) = options.seed {
+            config.portfolio.seed = seed;
+            config.sa_seeds = vec![seed];
+        }
+        if let Some(ids) = &options.solver_ids {
+            for id in ids {
+                self.registry
+                    .descriptor(id)
+                    .map_err(|error| SolverError::InvalidConfiguration(error.to_string()))?;
+            }
+            config.enabled_solver_ids = Some(ids.clone());
+        }
+        if options.detailed_trace == Some(true) {
+            config.telemetry_mode = TelemetryMode::Detailed;
+        }
+        let mut solver = SolverOrchestrator::new(config)?;
+        // Per-request policy/slot caps are local scheduling limits. Resource
+        // admission remains shared with ordinary and other experimental Jobs
+        // so an override cannot create an independent global CPU/process pool.
+        solver.resources = self.resources.clone();
+        solver.solve_with_diagnostics_and_progress(input, observer)
+    }
+
+    fn selected_start_time(
+        &self,
+        input: SolverInput<'_>,
+        solution: &SolverSolution,
+    ) -> Result<TimeOfDay, SolverError> {
+        let metrics = self.evaluator.evaluate(input, solution)?;
+        crate::solver::selected_start_time(input.problem, &metrics)
+    }
+}
+
+impl<E: ObjectiveEvaluator> SolverOrchestrator<E> {
     fn solve_detailed_with_progress(
         &self,
         input: SolverInput<'_>,
@@ -188,10 +269,18 @@ impl<E: ObjectiveEvaluator> SolverOrchestrator<E> {
                 locations: location_count,
             });
         }
-        if self.anytime {
-            return self.solve_anytime(input, observer);
-        }
-        self.solve_registered(input, observer)
+        let result = if self.anytime {
+            self.solve_anytime(input, observer)
+        } else {
+            self.solve_registered(input, observer)
+        };
+        result.map(|mut result| {
+            result.portfolio_telemetry = Some(
+                PortfolioTelemetryBuilder::new(&self.config, input.problem, input.matrix)
+                    .build(&result),
+            );
+            result
+        })
     }
 
     fn solve_registered(
@@ -200,72 +289,43 @@ impl<E: ObjectiveEvaluator> SolverOrchestrator<E> {
         observer: &dyn SolverProgressObserver,
     ) -> Result<OrchestratorSolveResult, SolverError> {
         let started = Instant::now();
-        let location_count = input.problem.locations().len();
         let applicable: Vec<_> = self
             .strategies
             .iter()
             .enumerate()
-            .filter(|(_, strategy)| strategy.is_applicable(location_count))
+            .filter(|(_, strategy)| strategy.is_applicable_to(input.problem))
             .map(|(index, strategy)| (index, Arc::clone(strategy)))
             .collect();
         if applicable.is_empty() {
             return Err(SolverError::NoFeasibleRoute);
         }
 
-        let queue = Mutex::new(VecDeque::from(applicable));
         let worker_count = self
             .config
             .max_concurrency
             .min(self.strategies.len())
             .max(1);
-        let (result_tx, result_rx) = mpsc::channel();
-        thread::scope(|scope| {
-            for _ in 0..worker_count {
-                let result_tx = result_tx.clone();
-                let queue = &queue;
-                let evaluator = &self.evaluator;
-                let timeout = self.config.strategy_timeout;
-                scope.spawn(move || loop {
-                    let task = queue
-                        .lock()
-                        .expect("strategy queue mutex was poisoned")
-                        .pop_front();
-                    let Some((index, strategy)) = task else {
-                        break;
-                    };
-                    report_progress(observer, || {
-                        SolverProgressEvent::StrategyStarted(strategy.name().to_owned())
-                    });
-                    let candidate = execute_strategy(
-                        strategy.as_ref(),
-                        evaluator,
-                        SolverInput {
-                            matrix: input.matrix,
-                            problem: input.problem,
-                            cancellation: input.cancellation,
-                        },
-                        timeout,
-                    );
-                    report_progress(observer, || {
-                        SolverProgressEvent::StrategyCompleted(strategy.name().to_owned())
-                    });
-                    if result_tx.send((index, candidate)).is_err() {
-                        break;
-                    }
-                });
-            }
-        });
-        drop(result_tx);
+        let execution = StrategyBatchExecutor {
+            input,
+            observer,
+            evaluator: &self.evaluator,
+            resources: &self.resources,
+            config: &self.config,
+            started,
+            timeout_policy: StrategyTimeoutPolicy::Fixed(self.config.strategy_timeout),
+        };
+        let indexed = execution.execute(applicable, worker_count);
 
         if input.cancellation.is_cancelled() {
             return Err(SolverError::Cancelled);
         }
-        let mut indexed: Vec<_> = result_rx.into_iter().collect();
-        indexed.sort_by_key(|(index, _)| *index);
-        let mut candidates: Vec<_> = indexed
-            .into_iter()
-            .map(|(_, candidate)| candidate)
-            .collect();
+        let mut accumulator = CandidateAccumulator::with_capacity(indexed.len());
+        for (_, mut candidate) in indexed {
+            accumulator.consider(&self.evaluator, &mut candidate);
+            accumulator.push(candidate);
+        }
+        let (mut candidates, global_best_updates) = accumulator.into_parts();
+        assign_run_identity(&mut candidates);
         report_progress(observer, || {
             SolverProgressEvent::SelectionStarted(candidates.len())
         });
@@ -282,8 +342,9 @@ impl<E: ObjectiveEvaluator> SolverOrchestrator<E> {
             baseline_elapsed_ms: duration_ms(started.elapsed()),
             sa_elapsed_ms: 0,
             sa_run_count: 0,
-            global_best_updates: 1,
+            global_best_updates,
             termination_reason: "exhausted".to_owned(),
+            portfolio_telemetry: None,
         })
     }
 
@@ -294,13 +355,19 @@ impl<E: ObjectiveEvaluator> SolverOrchestrator<E> {
     ) -> Result<OrchestratorSolveResult, SolverError> {
         let started = Instant::now();
         let deadline = started + self.config.total_budget;
-        let location_count = input.problem.locations().len();
-        let mut candidates = Vec::new();
-        let mut best_index = None;
-        let mut global_best_updates = 0_u64;
+        let mut accumulator = CandidateAccumulator::new();
+        let instance_selection = (self.config.portfolio.policy == PortfolioPolicy::InstanceAware)
+            .then(|| {
+                RuleBasedInstancePolicy.select(
+                    &InstanceFeatures::extract(input.problem, input.matrix),
+                    self.registry.descriptors(),
+                )
+            });
 
         if let Some(exact) = self.strategies.iter().find(|strategy| {
-            strategy.name() == "exact_bit_dp" && strategy.is_applicable(location_count)
+            strategy.name() == "exact_bit_dp"
+                && strategy.is_applicable_to(input.problem)
+                && instance_policy_allows(instance_selection.as_ref(), strategy.name())
         }) {
             if let Some(timeout) = strategy_allowance(
                 deadline,
@@ -310,7 +377,7 @@ impl<E: ObjectiveEvaluator> SolverOrchestrator<E> {
                 report_progress(observer, || {
                     SolverProgressEvent::StrategyStarted(exact.name().to_owned())
                 });
-                let candidate = execute_strategy(
+                let mut candidate = execute_strategy(
                     exact.as_ref(),
                     &self.evaluator,
                     SolverInput {
@@ -319,31 +386,29 @@ impl<E: ObjectiveEvaluator> SolverOrchestrator<E> {
                         cancellation: input.cancellation,
                     },
                     timeout,
+                    started,
+                    &self.resources,
+                    resource_request(&self.config, exact.name()),
                 );
                 report_progress(observer, || {
                     SolverProgressEvent::StrategyCompleted(exact.name().to_owned())
                 });
-                update_global_best(
-                    &self.evaluator,
-                    &candidates,
-                    &candidate,
-                    &mut best_index,
-                    &mut global_best_updates,
-                );
+                accumulator.consider(&self.evaluator, &mut candidate);
                 let exact_optimum = candidate.feasible && candidate.route.is_some();
-                candidates.push(candidate);
-                if exact_optimum {
-                    return build_result(
-                        &self.evaluator,
-                        self.config.total_budget,
-                        started,
-                        started.elapsed(),
-                        Duration::ZERO,
-                        0,
-                        global_best_updates,
-                        "exact_optimum",
+                accumulator.push(candidate);
+                if exact_optimum && !self.config.compare_all {
+                    let (candidates, global_best_updates) = accumulator.into_parts();
+                    return SolveResultBuilder::new(&self.evaluator, observer).build(
                         candidates,
-                        observer,
+                        SolveResultStats {
+                            total_budget: self.config.total_budget,
+                            started,
+                            baseline_elapsed: started.elapsed(),
+                            sa_elapsed: Duration::ZERO,
+                            sa_run_count: 0,
+                            global_best_updates,
+                            termination_reason: "exact_optimum",
+                        },
                     );
                 }
             }
@@ -357,7 +422,9 @@ impl<E: ObjectiveEvaluator> SolverOrchestrator<E> {
             .strategies
             .iter()
             .filter(|strategy| {
-                strategy.name() != "exact_bit_dp" && strategy.is_applicable(location_count)
+                strategy.name() != "exact_bit_dp"
+                    && strategy.is_applicable_to(input.problem)
+                    && instance_policy_allows(instance_selection.as_ref(), strategy.name())
             })
             .cloned()
             .collect();
@@ -367,93 +434,114 @@ impl<E: ObjectiveEvaluator> SolverOrchestrator<E> {
             self.config.strategy_timeout,
         );
         if allowance.is_some() {
-            let queue = Mutex::new(VecDeque::from(
-                baseline_strategies
-                    .into_iter()
-                    .enumerate()
-                    .collect::<Vec<_>>(),
-            ));
             let worker_count = self
                 .config
                 .max_concurrency
                 .min(self.strategies.len())
                 .max(1);
-            let (result_tx, result_rx) = mpsc::channel();
-            thread::scope(|scope| {
-                for _ in 0..worker_count {
-                    let result_tx = result_tx.clone();
-                    let queue = &queue;
-                    let evaluator = &self.evaluator;
-                    scope.spawn(move || loop {
-                        if input.cancellation.is_cancelled() {
-                            break;
-                        }
-                        let task = queue
-                            .lock()
-                            .expect("strategy queue mutex was poisoned")
-                            .pop_front();
-                        let Some((index, strategy)) = task else { break };
-                        let Some(timeout) = strategy_allowance(
-                            deadline,
-                            self.config.deadline_safety_margin,
-                            self.config.strategy_timeout,
-                        ) else {
-                            break;
-                        };
-                        report_progress(observer, || {
-                            SolverProgressEvent::StrategyStarted(strategy.name().to_owned())
-                        });
-                        let candidate = execute_strategy(
-                            strategy.as_ref(),
-                            evaluator,
-                            SolverInput {
-                                matrix: input.matrix,
-                                problem: input.problem,
-                                cancellation: input.cancellation,
-                            },
-                            timeout,
-                        );
-                        report_progress(observer, || {
-                            SolverProgressEvent::StrategyCompleted(strategy.name().to_owned())
-                        });
-                        if result_tx.send((index, candidate)).is_err() {
-                            break;
-                        }
-                    });
-                }
-            });
-            drop(result_tx);
-            let mut baseline_results: Vec<_> = result_rx.into_iter().collect();
-            baseline_results.sort_by_key(|(index, _)| *index);
-            for (_, candidate) in baseline_results {
-                update_global_best(
-                    &self.evaluator,
-                    &candidates,
-                    &candidate,
-                    &mut best_index,
-                    &mut global_best_updates,
-                );
-                candidates.push(candidate);
+            let execution = StrategyBatchExecutor {
+                input,
+                observer,
+                evaluator: &self.evaluator,
+                resources: &self.resources,
+                config: &self.config,
+                started,
+                timeout_policy: StrategyTimeoutPolicy::RemainingBudget {
+                    deadline,
+                    safety_margin: self.config.deadline_safety_margin,
+                    cap: self.config.strategy_timeout,
+                },
+            };
+            let baseline_results = execution.execute(
+                baseline_strategies.into_iter().enumerate().collect(),
+                worker_count,
+            );
+            for (_, mut candidate) in baseline_results {
+                accumulator.consider(&self.evaluator, &mut candidate);
+                accumulator.push(candidate);
             }
         }
         let baseline_elapsed = started.elapsed();
         let sa_started = Instant::now();
         let policy = RoundRobinInitializerSelectionPolicy;
+        let mut adaptive_config = self.config.portfolio.clone();
+        if adaptive_config.policy == PortfolioPolicy::InstanceAware
+            && adaptive_config.weights.is_empty()
+        {
+            let features = InstanceFeatures::extract(input.problem, input.matrix);
+            if features.location_count >= 30 {
+                adaptive_config.weights.extend([
+                    ("greedy".to_owned(), 1.0),
+                    ("mst_double_tree".to_owned(), 1.0),
+                    ("christofides".to_owned(), 1.0),
+                    ("clustered".to_owned(), 4.0),
+                ]);
+            } else if features.reachable_arc_ratio < 0.8 {
+                adaptive_config
+                    .weights
+                    .extend([("greedy".to_owned(), 2.0), ("clustered".to_owned(), 3.0)]);
+            }
+        }
+        let mut adaptive_policy = (self.config.portfolio.policy != PortfolioPolicy::Current)
+            .then(|| {
+                RestartableArmSelector::new(
+                    adaptive_config,
+                    vec![
+                        SaInitializer::Greedy.label().to_owned(),
+                        SaInitializer::MstDoubleTree.label().to_owned(),
+                        SaInitializer::Christofides.label().to_owned(),
+                        SaInitializer::Clustered.label().to_owned(),
+                    ],
+                )
+                .map_err(|error| SolverError::InvalidConfiguration(error.to_string()))
+            })
+            .transpose()?;
         let mut sa_run_count = 0_u64;
         let mut exhausted = false;
 
-        while !input.cancellation.is_cancelled() {
+        while !input.cancellation.is_cancelled()
+            && solver_enabled(&self.config, "sa")
+            && instance_policy_allows(instance_selection.as_ref(), "sa")
+        {
             let remaining = deadline.saturating_duration_since(Instant::now());
             if remaining <= self.config.deadline_safety_margin {
                 break;
             }
             let usable = remaining - self.config.deadline_safety_margin;
-            let chunk = self.config.sa_chunk.min(usable);
+            let policy_quantum = self.config.portfolio.quantum();
+            if self.config.portfolio.policy != PortfolioPolicy::Current && usable < policy_quantum {
+                break;
+            }
+            let requested_chunk = if self.config.portfolio.policy == PortfolioPolicy::Current {
+                self.config.sa_chunk
+            } else {
+                self.config.sa_chunk.max(policy_quantum)
+            };
+            let chunk = requested_chunk.min(usable);
             if chunk.is_zero() {
                 break;
             }
-            let initializer = policy.select(sa_run_count, best_index.is_some());
-            let warm_start = best_index.and_then(|index| candidates[index].route.clone());
+            let arm_selection = adaptive_policy
+                .as_mut()
+                .map(|selector| selector.select())
+                .transpose()
+                .map_err(|error| SolverError::InvalidConfiguration(error.to_string()))?;
+            let initializer = match arm_selection
+                .as_ref()
+                .map(|selection| selection.arm_id.as_str())
+            {
+                Some("greedy") => SaInitializer::Greedy,
+                Some("mst_double_tree") => SaInitializer::MstDoubleTree,
+                Some("christofides") => SaInitializer::Christofides,
+                Some("clustered") => SaInitializer::Clustered,
+                Some(other) => {
+                    return Err(SolverError::InvalidConfiguration(format!(
+                        "unknown SA policy arm: {other}"
+                    )))
+                }
+                None => policy.select(sa_run_count, accumulator.has_best()),
+            };
+            let warm_start = accumulator.warm_start();
             let round = sa_run_count / 4;
             let base_seed = self.config.sa_seeds[(round as usize) % self.config.sa_seeds.len()];
             let seed = deterministic_sa_seed(base_seed, initializer, round);
@@ -480,6 +568,9 @@ impl<E: ObjectiveEvaluator> SolverOrchestrator<E> {
                     cancellation: input.cancellation,
                 },
                 chunk,
+                started,
+                &self.resources,
+                resource_request(&self.config, strategy.name()),
             );
             report_progress(observer, || {
                 SolverProgressEvent::StrategyCompleted(strategy.name().to_owned())
@@ -490,16 +581,27 @@ impl<E: ObjectiveEvaluator> SolverOrchestrator<E> {
                 .initial_strategy
                 .get_or_insert_with(|| initializer.label().to_owned());
             candidate.metadata.seed.get_or_insert(seed);
-            let improved = update_global_best(
-                &self.evaluator,
-                &candidates,
-                &candidate,
-                &mut best_index,
-                &mut global_best_updates,
-            );
-            candidate.metadata.improved_global_best = Some(improved);
+            let improved = accumulator.consider(&self.evaluator, &mut candidate);
+            if let Some(selection) = &arm_selection {
+                candidate.metadata.scheduler_reason = Some(selection.reason.clone());
+                candidate.metadata.scheduler_score = selection.score.map(|score| score.to_string());
+            }
+            if let Some(selector) = adaptive_policy.as_mut() {
+                let eliminated = selector
+                    .observe(
+                        initializer.label(),
+                        if improved { 1.0 } else { 0.0 },
+                        duration_ms(candidate.elapsed),
+                        candidate.metadata.reserved_slot_ms.unwrap_or(0),
+                        duration_ms(started.elapsed()),
+                    )
+                    .map_err(|error| SolverError::InvalidConfiguration(error.to_string()))?;
+                if !eliminated.is_empty() {
+                    candidate.metadata.scheduler_eliminations = Some(eliminated);
+                }
+            }
             let no_iterations = candidate.metadata.iteration_count == Some(0);
-            candidates.push(candidate);
+            accumulator.push(candidate);
             if no_iterations {
                 exhausted = true;
                 break;
@@ -520,17 +622,18 @@ impl<E: ObjectiveEvaluator> SolverOrchestrator<E> {
             "exhausted"
         };
         let sa_elapsed = sa_started.elapsed();
-        build_result(
-            &self.evaluator,
-            self.config.total_budget,
-            started,
-            baseline_elapsed,
-            sa_elapsed,
-            sa_run_count,
-            global_best_updates,
-            termination_reason,
+        let (candidates, global_best_updates) = accumulator.into_parts();
+        SolveResultBuilder::new(&self.evaluator, observer).build(
             candidates,
-            observer,
+            SolveResultStats {
+                total_budget: self.config.total_budget,
+                started,
+                baseline_elapsed,
+                sa_elapsed,
+                sa_run_count,
+                global_best_updates,
+                termination_reason,
+            },
         )
     }
 }
@@ -549,282 +652,15 @@ fn validate_strategy_names(
     Ok(())
 }
 
-impl<E: ObjectiveEvaluator> RouteSolver for SolverOrchestrator<E> {
-    fn solve(&self, input: SolverInput<'_>) -> Result<SolverSolution, SolverError> {
-        self.solve_detailed(input).map(|result| result.solution)
-    }
-
-    fn solve_with_diagnostics(
-        &self,
-        input: SolverInput<'_>,
-    ) -> Result<SolverRunResult, SolverError> {
-        self.solve_detailed(input).map(|result| SolverRunResult {
-            solution: result.solution,
-            diagnostics: Some(SolverDiagnostics {
-                selected_strategy: result.selected_strategy,
-                candidates: result.candidates,
-                total_budget_ms: result.total_budget_ms,
-                total_elapsed_ms: result.total_elapsed_ms,
-                baseline_elapsed_ms: result.baseline_elapsed_ms,
-                sa_elapsed_ms: result.sa_elapsed_ms,
-                sa_run_count: result.sa_run_count,
-                global_best_updates: result.global_best_updates,
-                termination_reason: result.termination_reason,
-            }),
-        })
-    }
-
-    fn solve_with_diagnostics_and_progress(
-        &self,
-        input: SolverInput<'_>,
-        observer: &dyn SolverProgressObserver,
-    ) -> Result<SolverRunResult, SolverError> {
-        self.solve_detailed_with_progress(input, observer)
-            .map(|result| SolverRunResult {
-                solution: result.solution,
-                diagnostics: Some(SolverDiagnostics {
-                    selected_strategy: result.selected_strategy,
-                    candidates: result.candidates,
-                    total_budget_ms: result.total_budget_ms,
-                    total_elapsed_ms: result.total_elapsed_ms,
-                    baseline_elapsed_ms: result.baseline_elapsed_ms,
-                    sa_elapsed_ms: result.sa_elapsed_ms,
-                    sa_run_count: result.sa_run_count,
-                    global_best_updates: result.global_best_updates,
-                    termination_reason: result.termination_reason,
-                }),
-            })
-    }
-
-    fn selected_start_time(
-        &self,
-        input: SolverInput<'_>,
-        solution: &SolverSolution,
-    ) -> Result<TimeOfDay, SolverError> {
-        let metrics = self.evaluator.evaluate(input, solution)?;
-        crate::solver::selected_start_time(input.problem, &metrics)
-    }
-}
-
-fn strategy_allowance(
-    deadline: Instant,
-    safety_margin: Duration,
-    strategy_timeout: Duration,
-) -> Option<Duration> {
-    let remaining = deadline.saturating_duration_since(Instant::now());
-    (remaining > safety_margin).then(|| strategy_timeout.min(remaining - safety_margin))
-}
-
-fn update_global_best<E: ObjectiveEvaluator>(
-    evaluator: &E,
-    candidates: &[SolverCandidate],
-    candidate: &SolverCandidate,
-    best_index: &mut Option<usize>,
-    updates: &mut u64,
-) -> bool {
-    if !candidate.feasible || candidate.route.is_none() {
-        return false;
-    }
-    let Some(metrics) = candidate.objective_score.as_ref() else {
-        return false;
-    };
-    let improves = match *best_index {
-        Some(index) => candidates[index]
-            .objective_score
-            .as_ref()
-            .is_none_or(|best| evaluator.compare(metrics, best).is_lt()),
-        None => true,
-    };
-    if improves {
-        *best_index = Some(candidates.len());
-        *updates += 1;
-    }
-    improves
-}
-
-#[allow(clippy::too_many_arguments)]
-fn build_result<E: ObjectiveEvaluator>(
-    evaluator: &E,
-    total_budget: Duration,
-    started: Instant,
-    baseline_elapsed: Duration,
-    sa_elapsed: Duration,
-    sa_run_count: u64,
-    global_best_updates: u64,
-    termination_reason: &str,
-    mut candidates: Vec<SolverCandidate>,
-    observer: &dyn SolverProgressObserver,
-) -> Result<OrchestratorSolveResult, SolverError> {
-    report_progress(observer, || {
-        SolverProgressEvent::SelectionStarted(candidates.len())
-    });
-    let selector = CandidateSelector::new(evaluator);
-    selector.rank(&mut candidates);
-    let selected = selector.select(&candidates)?;
-    let solution = selected.route.clone().ok_or(SolverError::NoFeasibleRoute)?;
-    let selected_strategy = selected.strategy.clone();
-    Ok(OrchestratorSolveResult {
-        solution,
-        selected_strategy,
-        candidates,
-        total_budget_ms: duration_ms(total_budget),
-        total_elapsed_ms: duration_ms(started.elapsed()),
-        baseline_elapsed_ms: duration_ms(baseline_elapsed),
-        sa_elapsed_ms: duration_ms(sa_elapsed),
-        sa_run_count,
-        global_best_updates,
-        termination_reason: termination_reason.to_owned(),
+fn solver_enabled(config: &SolverOrchestratorConfig, solver_id: &str) -> bool {
+    config.enabled_solver_ids.as_ref().is_none_or(|enabled| {
+        enabled
+            .iter()
+            .any(|configured| configured.as_str() == solver_id)
     })
 }
 
-fn duration_ms(duration: Duration) -> u64 {
-    u64::try_from(duration.as_millis()).unwrap_or(u64::MAX)
-}
-
-fn execute_strategy<E: ObjectiveEvaluator>(
-    strategy: &dyn OrchestratedStrategy,
-    evaluator: &E,
-    input: SolverInput<'_>,
-    timeout: Duration,
-) -> SolverCandidate {
-    let started = Instant::now();
-    let child_cancellation = CancellationToken::new();
-    let timeout_reason = AtomicU8::new(0);
-    let (done_tx, done_rx) = mpsc::channel();
-
-    let outcome = thread::scope(|scope| {
-        let parent_cancellation = input.cancellation;
-        let watcher_cancellation = child_cancellation.clone();
-        let timeout_reason = &timeout_reason;
-        let watcher = scope.spawn(move || {
-            let watcher_started = Instant::now();
-            loop {
-                if parent_cancellation.is_cancelled() {
-                    timeout_reason.store(2, AtomicOrdering::Release);
-                    watcher_cancellation.cancel();
-                    break;
-                }
-                let elapsed = watcher_started.elapsed();
-                if elapsed >= timeout {
-                    timeout_reason.store(1, AtomicOrdering::Release);
-                    watcher_cancellation.cancel();
-                    break;
-                }
-                let wait = timeout.saturating_sub(elapsed).min(TIMEOUT_POLL_INTERVAL);
-                match done_rx.recv_timeout(wait) {
-                    Ok(()) | Err(mpsc::RecvTimeoutError::Disconnected) => break,
-                    Err(mpsc::RecvTimeoutError::Timeout) => {}
-                }
-            }
-        });
-        let result = catch_unwind(AssertUnwindSafe(|| {
-            let execution = strategy.execute(SolverInput {
-                matrix: input.matrix,
-                problem: input.problem,
-                cancellation: &child_cancellation,
-            })?;
-            let validation_cancellation = CancellationToken::new();
-            let evaluation_cancellation = if strategy.preserves_result_on_cancellation()
-                && child_cancellation.is_cancelled()
-            {
-                &validation_cancellation
-            } else {
-                &child_cancellation
-            };
-            let evaluated = evaluator.evaluate(
-                SolverInput {
-                    matrix: input.matrix,
-                    problem: input.problem,
-                    cancellation: evaluation_cancellation,
-                },
-                &execution.solution,
-            );
-            Ok::<_, SolverError>((execution, evaluated))
-        }));
-        let _ = done_tx.send(());
-        let _ = watcher.join();
-        result
-    });
-
-    let elapsed = started.elapsed();
-    let reason = timeout_reason.load(AtomicOrdering::Acquire);
-    if reason == 1 && !strategy.preserves_result_on_cancellation() {
-        return failed_candidate(
-            strategy.name(),
-            elapsed,
-            true,
-            "strategy timed out".to_owned(),
-        );
-    }
-    if reason == 2 && !strategy.preserves_result_on_cancellation() {
-        return failed_candidate(
-            strategy.name(),
-            elapsed,
-            false,
-            SolverError::Cancelled.to_string(),
-        );
-    }
-    match outcome {
-        Err(payload) => failed_candidate(
-            strategy.name(),
-            elapsed,
-            false,
-            format!("strategy panicked: {}", panic_message(payload)),
-        ),
-        Ok(Err(error)) => failed_candidate(strategy.name(), elapsed, false, error.to_string()),
-        Ok(Ok((execution, Ok(metrics)))) => {
-            let mut metadata = execution.metadata;
-            metadata.timed_out = reason == 1;
-            SolverCandidate {
-                strategy: strategy.name().to_owned(),
-                route: Some(execution.solution),
-                feasible: true,
-                objective_score: Some(metrics),
-                elapsed,
-                metadata,
-            }
-        }
-        Ok(Ok((execution, Err(error)))) => {
-            let mut metadata = execution.metadata;
-            metadata.error = Some(error.to_string());
-            SolverCandidate {
-                strategy: strategy.name().to_owned(),
-                route: Some(execution.solution),
-                feasible: false,
-                objective_score: None,
-                elapsed,
-                metadata,
-            }
-        }
-    }
-}
-
-fn failed_candidate(
-    strategy: &str,
-    elapsed: Duration,
-    timed_out: bool,
-    error: String,
-) -> SolverCandidate {
-    SolverCandidate {
-        strategy: strategy.to_owned(),
-        route: None,
-        feasible: false,
-        objective_score: None,
-        elapsed,
-        metadata: SolverCandidateMetadata {
-            timed_out,
-            error: Some(error),
-            ..SolverCandidateMetadata::default()
-        },
-    }
-}
-
-fn panic_message(payload: Box<dyn Any + Send>) -> String {
-    if let Some(message) = payload.downcast_ref::<&str>() {
-        (*message).to_owned()
-    } else if let Some(message) = payload.downcast_ref::<String>() {
-        message.clone()
-    } else {
-        "unknown panic payload".to_owned()
-    }
+fn instance_policy_allows(selection: Option<&InstancePolicySelection>, strategy: &str) -> bool {
+    let solver_id = solver_id_for_strategy(strategy);
+    selection.is_none_or(|selection| selection.selected_solver_ids.contains(&solver_id))
 }

@@ -1,6 +1,30 @@
 use std::time::Duration;
 
+use serde::{Deserialize, Serialize};
+
+use crate::solver::portfolio::{ArmElimination, PortfolioTelemetrySummary};
+
 use super::{SolutionMetrics, SolverSolution};
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "SCREAMING_SNAKE_CASE")]
+pub enum SolverOutcomeKind {
+    Completed,
+    Timeout,
+    Cancelled,
+    Unsupported,
+    Failed,
+    Infeasible,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "SCREAMING_SNAKE_CASE")]
+pub enum SolverProofStatus {
+    Optimal,
+    Infeasible,
+    Feasible,
+    Unknown,
+}
 
 /// Common result returned by every orchestrated strategy.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -15,6 +39,29 @@ pub struct SolverCandidate {
 
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct SolverCandidateMetadata {
+    pub solver_id: Option<String>,
+    pub run_id: Option<u64>,
+    pub job_queued_at_ms: Option<u64>,
+    pub job_started_at_ms: Option<u64>,
+    pub job_finished_at_ms: Option<u64>,
+    pub queued_ms: Option<u64>,
+    pub reserved_slot_ms: Option<u64>,
+    pub cpu_ms: Option<u64>,
+    pub peak_rss_bytes: Option<u64>,
+    pub memory_hint_bytes: Option<u64>,
+    pub scheduler_reason: Option<String>,
+    pub scheduler_score: Option<String>,
+    pub scheduler_eliminations: Option<Vec<ArmElimination>>,
+    pub outcome: Option<SolverOutcomeKind>,
+    pub proof_status: Option<SolverProofStatus>,
+    pub objective_phase: Option<String>,
+    pub best_bound: Option<u64>,
+    pub relative_gap_ppm: Option<u64>,
+    pub thread_count: Option<usize>,
+    pub source_version: Option<String>,
+    pub native_status: Option<String>,
+    pub child_process_id: Option<u32>,
+    pub exit_code: Option<i32>,
     pub state_count: Option<usize>,
     pub frontier_state_count: Option<usize>,
     pub frontier_cell_count: Option<usize>,
@@ -52,6 +99,9 @@ pub struct SolverCandidateMetadata {
     pub swap_move_count: Option<u64>,
     pub relocate_move_count: Option<u64>,
     pub two_opt_move_count: Option<u64>,
+    pub insert_optional_move_count: Option<u64>,
+    pub remove_optional_move_count: Option<u64>,
+    pub replace_optional_move_count: Option<u64>,
     pub accepted_worse_moves: Option<u64>,
     pub infeasible_candidates: Option<u64>,
     pub accepted_infeasible_moves: Option<u64>,
@@ -103,6 +153,7 @@ pub struct SolverDiagnostics {
     pub sa_run_count: u64,
     pub global_best_updates: u64,
     pub termination_reason: String,
+    pub portfolio_telemetry: Option<PortfolioTelemetrySummary>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

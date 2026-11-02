@@ -20,16 +20,12 @@ fn directed_pair(
     left: usize,
     right: usize,
 ) -> Result<(u32, u32), SolverError> {
-    let forward = matrix.travel_minutes(left, right).ok_or_else(|| {
-        SolverError::InvalidConfiguration(format!(
-            "symmetric distance index {left}->{right} is outside the matrix"
-        ))
-    })?;
-    let reverse = matrix.travel_minutes(right, left).ok_or_else(|| {
-        SolverError::InvalidConfiguration(format!(
-            "symmetric distance index {right}->{left} is outside the matrix"
-        ))
-    })?;
+    let forward = matrix
+        .travel_minutes(left, right)
+        .ok_or(SolverError::NoFeasibleRoute)?;
+    let reverse = matrix
+        .travel_minutes(right, left)
+        .ok_or(SolverError::NoFeasibleRoute)?;
     Ok((forward, reverse))
 }
 

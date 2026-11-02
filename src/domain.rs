@@ -15,6 +15,16 @@ pub enum StartPolicy {
     Latest,
 }
 
+/// Controls whether intermediate locations may be omitted from a successful
+/// itinerary. The legacy default keeps every location required.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, Default)]
+#[serde(rename_all = "SCREAMING_SNAKE_CASE")]
+pub enum VisitPolicy {
+    #[default]
+    AllRequired,
+    BestEffortOnFailure,
+}
+
 /// A local wall-clock time in the single-day v0 model.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct TimeOfDay(u16);
@@ -128,6 +138,8 @@ pub struct Location {
     routing_reference: RoutingReference,
     time_window: TimeWindow,
     stay_minutes: u32,
+    required: bool,
+    priority: u8,
 }
 
 impl Location {
@@ -142,7 +154,15 @@ impl Location {
             routing_reference,
             time_window,
             stay_minutes,
+            required: true,
+            priority: 1,
         }
+    }
+
+    pub(crate) fn with_visit_metadata(mut self, required: bool, priority: u8) -> Self {
+        self.required = required;
+        self.priority = priority;
+        self
     }
 
     pub fn id(&self) -> &str {
@@ -160,6 +180,14 @@ impl Location {
     pub fn stay_minutes(&self) -> u32 {
         self.stay_minutes
     }
+
+    pub fn required(&self) -> bool {
+        self.required
+    }
+
+    pub fn priority(&self) -> u8 {
+        self.priority
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -167,6 +195,7 @@ pub struct OptimizationProblem {
     locations: Vec<Location>,
     start_time: TimeOfDay,
     start_policy: StartPolicy,
+    visit_policy: VisitPolicy,
 }
 
 impl OptimizationProblem {
@@ -180,11 +209,26 @@ impl OptimizationProblem {
         start_time: TimeOfDay,
         start_policy: StartPolicy,
     ) -> Self {
+        Self::with_policies(
+            locations,
+            start_time,
+            start_policy,
+            VisitPolicy::AllRequired,
+        )
+    }
+
+    pub(crate) fn with_policies(
+        locations: Vec<Location>,
+        start_time: TimeOfDay,
+        start_policy: StartPolicy,
+        visit_policy: VisitPolicy,
+    ) -> Self {
         debug_assert!(!locations.is_empty());
         Self {
             locations,
             start_time,
             start_policy,
+            visit_policy,
         }
     }
 
@@ -227,6 +271,10 @@ impl OptimizationProblem {
     pub fn start_policy(&self) -> StartPolicy {
         self.start_policy
     }
+
+    pub fn visit_policy(&self) -> VisitPolicy {
+        self.visit_policy
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -252,31 +300,4 @@ pub enum DomainError {
 }
 
 #[cfg(test)]
-mod tests {
-    use super::TimeOfDay;
-
-    #[test]
-    fn time_of_day_serializes_as_hhmm() {
-        let time = TimeOfDay::from_minutes(13 * 60 + 45).unwrap();
-        assert_eq!(serde_json::to_string(&time).unwrap(), r#""13:45""#);
-    }
-
-    #[test]
-    fn time_of_day_deserializes_valid_hhmm() {
-        for (json, expected_minutes) in [
-            (r#""00:00""#, 0),
-            (r#""09:30""#, 9 * 60 + 30),
-            (r#""23:59""#, 23 * 60 + 59),
-        ] {
-            let time: TimeOfDay = serde_json::from_str(json).unwrap();
-            assert_eq!(time.minutes(), expected_minutes);
-        }
-    }
-
-    #[test]
-    fn time_of_day_rejects_invalid_wire_values() {
-        for json in [r#""9:30""#, r#""24:00""#, r#""09:60""#, "570"] {
-            assert!(serde_json::from_str::<TimeOfDay>(json).is_err(), "{json}");
-        }
-    }
-}
+mod tests;

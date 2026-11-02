@@ -3,12 +3,13 @@ use std::sync::Arc;
 use rand::{rngs::StdRng, SeedableRng};
 
 use crate::solver::{
-    AutoPerfectMatching, AverageSymmetricDistance, ChristofidesInitialRoute, ClusterDiagnostic,
-    ClusteredInitialRoute, ClusteredSolver, ClusteredSolverConfig, DefaultObjectivePolicy,
-    ExactBitDpSolver, FixedInitialRoute, GreedyInitialRoute, InitialRouteStrategy,
-    MatchingPairDiagnostic, MixedNeighborhoodStrategy, MstDoubleTreeInitialRoute,
-    MstEdgeDiagnostic, SimulatedAnnealingConfig, SimulatedAnnealingSolver, SolverCandidateMetadata,
-    SolverError, SolverInput, SolverSolution,
+    evaluate_solution, AutoPerfectMatching, AverageSymmetricDistance, ChristofidesInitialRoute,
+    ClusterDiagnostic, ClusteredInitialRoute, ClusteredSolver, ClusteredSolverConfig,
+    DefaultObjectivePolicy, ExactBitDpSolver, FixedInitialRoute, GreedyInitialRoute,
+    InitialRouteStrategy, Lkh3Config, Lkh3Strategy, MatchingPairDiagnostic,
+    MixedNeighborhoodStrategy, MstDoubleTreeInitialRoute, MstEdgeDiagnostic,
+    SimulatedAnnealingConfig, SimulatedAnnealingSolver, SolverCandidateMetadata, SolverError,
+    SolverInput, SolverSolution,
 };
 
 use super::{OrchestratedStrategy, SolverOrchestratorConfig, StrategyExecution};
@@ -18,26 +19,71 @@ pub(super) fn built_in_strategies(
 ) -> Result<Vec<Arc<dyn OrchestratedStrategy>>, SolverError> {
     let cluster_config = ClusteredSolverConfig::new(config.max_cluster_size)?;
     let matching = AutoPerfectMatching::new(config.matching)?;
-    let strategies: Vec<Arc<dyn OrchestratedStrategy>> = vec![
-        Arc::new(ExactStrategy {
-            exact_limit: config.exact_limit,
-            solver: ExactBitDpSolver::default(),
-        }),
+    let mut strategies: Vec<Arc<dyn OrchestratedStrategy>> = vec![Arc::new(ExactStrategy {
+        exact_limit: config.exact_limit,
+        solver: ExactBitDpSolver::default(),
+    })];
+    if config.enable_mip_scip {
+        #[cfg(feature = "solver-mip-scip")]
+        strategies.push(Arc::new(crate::solver::ScipMipStrategy::new(
+            crate::solver::ScipMipConfig {
+                time_limit: config.mip_scip_time_limit,
+                threads: config.mip_scip_threads,
+                memory_mb: config.mip_scip_memory_mb,
+                seed: config.sa_seeds.first().copied().unwrap_or(42),
+            },
+        )?));
+        #[cfg(not(feature = "solver-mip-scip"))]
+        strategies.push(Arc::new(ScipUnavailableStrategy));
+    }
+    if config.enable_lkh3
+        && config
+            .lkh3_executable
+            .as_deref()
+            .is_some_and(std::path::Path::is_file)
+    {
+        strategies.push(Arc::new(Lkh3Strategy::new(Lkh3Config {
+            executable: config
+                .lkh3_executable
+                .clone()
+                .expect("validated enabled LKH-3 executable"),
+            time_limit: config.lkh3_time_limit,
+            seed: config.lkh3_seed,
+        })?));
+    }
+    strategies.extend([
         Arc::new(ClusteredStrategy {
             solver: ClusteredSolver::with_config(cluster_config),
-        }),
+        }) as Arc<dyn OrchestratedStrategy>,
+        Arc::new(PartialGreedyStrategy) as Arc<dyn OrchestratedStrategy>,
         Arc::new(GreedyStrategy {
             generator: GreedyInitialRoute,
-        }),
+        }) as Arc<dyn OrchestratedStrategy>,
         Arc::new(MstDoubleTreeStrategy {
             generator: MstDoubleTreeInitialRoute::default(),
-        }),
+        }) as Arc<dyn OrchestratedStrategy>,
         Arc::new(ChristofidesStrategy {
             generator: ChristofidesInitialRoute::new(AverageSymmetricDistance, matching),
-        }),
-    ];
+        }) as Arc<dyn OrchestratedStrategy>,
+    ]);
 
     Ok(strategies)
+}
+
+#[cfg(not(feature = "solver-mip-scip"))]
+struct ScipUnavailableStrategy;
+
+#[cfg(not(feature = "solver-mip-scip"))]
+impl OrchestratedStrategy for ScipUnavailableStrategy {
+    fn name(&self) -> &str {
+        "mip_scip"
+    }
+
+    fn execute(&self, _input: SolverInput<'_>) -> Result<StrategyExecution, SolverError> {
+        Err(SolverError::Unsupported(
+            "build troute with --features solver-mip-scip".to_owned(),
+        ))
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -168,6 +214,74 @@ struct ClusteredStrategy {
 
 struct GreedyStrategy {
     generator: GreedyInitialRoute,
+}
+
+struct PartialGreedyStrategy;
+
+impl OrchestratedStrategy for PartialGreedyStrategy {
+    fn name(&self) -> &str {
+        "partial_greedy_insertion"
+    }
+
+    fn is_applicable_to(&self, problem: &crate::domain::OptimizationProblem) -> bool {
+        problem.visit_policy() == crate::domain::VisitPolicy::BestEffortOnFailure
+    }
+
+    fn execute(&self, input: SolverInput<'_>) -> Result<StrategyExecution, SolverError> {
+        let end = input.problem.end_location_index();
+        let mut route = vec![input.problem.start_location_index()];
+        route.extend((1..end).filter(|&index| input.problem.locations()[index].required()));
+        route.push(end);
+
+        let objective = DefaultObjectivePolicy;
+        let required_solution = SolverSolution { visit_order: route };
+        let mut best_metrics = evaluate_solution(&objective, input, &required_solution)?;
+        let mut best_solution = required_solution;
+        let mut remaining: Vec<_> = (1..end)
+            .filter(|&index| !input.problem.locations()[index].required())
+            .collect();
+
+        loop {
+            if input.cancellation.is_cancelled() {
+                return Err(SolverError::Cancelled);
+            }
+            let mut best_insertion = None;
+            for &location in &remaining {
+                for position in 1..best_solution.visit_order.len() {
+                    let mut order = best_solution.visit_order.clone();
+                    order.insert(position, location);
+                    let candidate = SolverSolution { visit_order: order };
+                    let Ok(metrics) = evaluate_solution(&objective, input, &candidate) else {
+                        continue;
+                    };
+                    let improves = best_insertion
+                        .as_ref()
+                        .map(|(_, current, _)| {
+                            crate::solver::ObjectivePolicy::compare(&objective, &metrics, current)
+                                .is_lt()
+                        })
+                        .unwrap_or(true);
+                    if improves {
+                        best_insertion = Some((candidate, metrics, location));
+                    }
+                }
+            }
+            let Some((solution, metrics, inserted)) = best_insertion else {
+                break;
+            };
+            best_solution = solution;
+            best_metrics = metrics;
+            remaining.retain(|&location| location != inserted);
+        }
+
+        Ok(StrategyExecution {
+            solution: best_solution,
+            metadata: SolverCandidateMetadata {
+                final_score: Some(best_metrics.score),
+                ..SolverCandidateMetadata::default()
+            },
+        })
+    }
 }
 
 impl OrchestratedStrategy for GreedyStrategy {
@@ -462,6 +576,9 @@ impl<I: InitialRouteStrategy> OrchestratedStrategy for AnnealingStrategy<I> {
                 swap_move_count: Some(result.stats.swap_moves),
                 relocate_move_count: Some(result.stats.relocate_moves),
                 two_opt_move_count: Some(result.stats.two_opt_moves),
+                insert_optional_move_count: Some(result.stats.insert_optional_moves),
+                remove_optional_move_count: Some(result.stats.remove_optional_moves),
+                replace_optional_move_count: Some(result.stats.replace_optional_moves),
                 accepted_worse_moves: Some(result.stats.accepted_worse_moves),
                 infeasible_candidates: Some(result.stats.infeasible_candidates),
                 accepted_infeasible_moves: Some(result.stats.accepted_infeasible_moves),

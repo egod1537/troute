@@ -14,14 +14,17 @@ use crate::{
         FailureSuggestion, DEFAULT_MAX_FAILURE_SUGGESTIONS,
     },
     jobs::{JobEventEnvelope, JobEventKind, JobExecutor, JobRunner},
+    logging::logger,
     observation::{
         allowlisted_headers, JobObservationRecorder, JobTimelineEntry, ObservationDirection,
         ObservationHeaders, ObservationPeer,
     },
-    routing::{RouteProviderPolicyDiagnostics, RoutingError, RoutingProvider},
+    routing::{RouteProviderSelectionDiagnostics, RoutingError, RoutingProvider},
     schedule::ScheduleError,
     service::{OptimizationServiceError, RouteOptimizationService},
-    solver::{RouteSolver, SolverError},
+    solver::{
+        PortfolioCapabilities, PortfolioTelemetrySummary, RouteSolver, SolverError, TelemetryEvent,
+    },
     storage::{JobIndexEntry, JobStatus, JobStore, JobStoreError, StoredJob},
 };
 use axum::{
@@ -37,9 +40,51 @@ use axum::{
 };
 use serde::{Deserialize, Serialize};
 use serde_json::json;
+use tokio::sync::Semaphore;
+
+mod error;
+mod handlers;
+mod router;
+use error::{ApiError, ErrorEnvelope};
+use router::enforce_routing_pair_limit;
+pub use router::{
+    router, router_with_observation, router_with_storage, router_with_storage_and_limit,
+    router_with_storage_options, router_with_storage_runtime_options,
+};
 
 const MAX_REQUEST_BODY_BYTES: usize = 1024 * 1024;
-const DEFAULT_SSE_HEARTBEAT_INTERVAL: Duration = Duration::from_secs(15);
+pub const DEFAULT_SSE_HEARTBEAT_INTERVAL: Duration = Duration::from_secs(15);
+pub const DEFAULT_MAX_CONCURRENT_JOBS: usize = 4;
+pub const DEFAULT_MAX_OUTSTANDING_JOBS: usize = 100;
+pub const DEFAULT_MAX_CONCURRENT_MATRIX_PREVIEWS: usize = 2;
+pub const DEFAULT_MAX_ROUTING_PAIRS: usize = 10_000;
+
+/// Explicit process-level limits used when assembling the production router.
+///
+/// Compatibility router constructors still read their historical environment
+/// variables. The server startup path supplies this value from its validated
+/// application configuration so request handling never consults the process
+/// environment.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RouterRuntimeOptions {
+    pub max_concurrent_jobs: Option<usize>,
+    pub max_outstanding_jobs: Option<usize>,
+    pub max_concurrent_matrix_previews: usize,
+    pub max_routing_pairs: usize,
+    pub sse_heartbeat_interval: Duration,
+}
+
+impl Default for RouterRuntimeOptions {
+    fn default() -> Self {
+        Self {
+            max_concurrent_jobs: Some(DEFAULT_MAX_CONCURRENT_JOBS),
+            max_outstanding_jobs: Some(DEFAULT_MAX_OUTSTANDING_JOBS),
+            max_concurrent_matrix_previews: DEFAULT_MAX_CONCURRENT_MATRIX_PREVIEWS,
+            max_routing_pairs: DEFAULT_MAX_ROUTING_PAIRS,
+            sse_heartbeat_interval: DEFAULT_SSE_HEARTBEAT_INTERVAL,
+        }
+    }
+}
 
 #[derive(Clone)]
 struct AppState {
@@ -48,6 +93,8 @@ struct AppState {
     observation: Option<JobObservationRecorder>,
     job_store: Option<Arc<dyn JobStore>>,
     sse_heartbeat_interval: Duration,
+    matrix_permits: Arc<Semaphore>,
+    max_routing_pairs: usize,
 }
 
 #[derive(Debug, Serialize)]
@@ -86,1127 +133,108 @@ struct CancelJobResponse {
 
 #[derive(Debug, Serialize)]
 struct MatrixPreviewResponse {
-    travel_time_matrix: Vec<Vec<u32>>,
+    travel_time_matrix: Vec<Vec<Option<u32>>>,
+}
+
+#[derive(Debug, Deserialize)]
+struct SolverTelemetryQuery {
+    after: Option<u64>,
+    limit: Option<usize>,
 }
 
 #[derive(Debug, Serialize)]
-struct ErrorEnvelope {
-    error: ErrorBody,
-}
-
-#[derive(Debug, Serialize)]
-struct ErrorBody {
-    code: &'static str,
-    message: &'static str,
+struct SolverTelemetryResponse {
+    schema_version: u16,
+    job_id: String,
+    collected: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
-    detail: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    failure_detail: Option<FailureDetail>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    suggestions: Option<Vec<FailureSuggestion>>,
+    summary: Option<PortfolioTelemetrySummary>,
+    events: Vec<TelemetryEvent>,
+    next_after: u64,
+    has_more: bool,
 }
 
-#[derive(Debug)]
-struct ApiError {
-    status: StatusCode,
-    code: &'static str,
-    message: &'static str,
-    reason: String,
-    detail: Option<String>,
-    failure_detail: Option<Box<FailureDetail>>,
-    suggestions: Vec<FailureSuggestion>,
-}
-
-impl ApiError {
-    fn new(
-        status: StatusCode,
-        code: &'static str,
-        message: &'static str,
-        reason: impl Into<String>,
-    ) -> Self {
-        Self {
-            status,
-            code,
-            message,
-            reason: reason.into(),
-            detail: None,
-            failure_detail: None,
-            suggestions: Vec::new(),
-        }
-    }
-
-    fn with_detail(mut self, detail: impl Into<String>) -> Self {
-        self.detail = Some(detail.into());
-        self
-    }
-
-    fn from_json_rejection(rejection: JsonRejection) -> Self {
-        let status = rejection.status();
-        if status == StatusCode::UNSUPPORTED_MEDIA_TYPE {
-            return Self::new(
-                StatusCode::UNSUPPORTED_MEDIA_TYPE,
-                "UNSUPPORTED_MEDIA_TYPE",
-                "Content-Type must be application/json.",
-                rejection.body_text(),
-            );
-        }
-        if status == StatusCode::PAYLOAD_TOO_LARGE {
-            return Self::new(
-                StatusCode::PAYLOAD_TOO_LARGE,
-                "REQUEST_TOO_LARGE",
-                "Request body must not exceed 1 MiB.",
-                rejection.body_text(),
-            );
-        }
-        Self::new(
-            StatusCode::BAD_REQUEST,
-            "INVALID_REQUEST",
-            "Request body must be valid JSON matching the optimize contract.",
-            rejection.body_text(),
-        )
-    }
-
-    fn from_service(error: OptimizationServiceError) -> Self {
-        Self::from_service_with_request(error, None)
-    }
-
-    fn from_service_with_request(
-        error: OptimizationServiceError,
-        request: Option<&OptimizeRouteRequest>,
-    ) -> Self {
-        let failure_detail = service_failure_detail(&error, request);
-        let suggestions = rank_failure_suggestions(
-            service_suggestions(&error, request),
-            DEFAULT_MAX_FAILURE_SUGGESTIONS,
-        );
-        let mut api_error = match error {
-            OptimizationServiceError::Cancelled => Self::new(
-                StatusCode::CONFLICT,
-                "JOB_CANCELLED",
-                "The optimization job was cancelled.",
-                "cancellation was requested before optimization completed",
-            ),
-            OptimizationServiceError::InvalidRequest(source) => Self::new(
-                StatusCode::BAD_REQUEST,
-                "INVALID_REQUEST",
-                "The optimize request is invalid.",
-                source.to_string(),
-            ),
-            OptimizationServiceError::Routing(source) => match source {
-                RoutingError::Provider(reason) => Self::new(
-                    StatusCode::SERVICE_UNAVAILABLE,
-                    "ROUTING_UNAVAILABLE",
-                    "Travel-time routing is temporarily unavailable.",
-                    reason,
-                ),
-                RoutingError::ProviderResolution(reason) => Self::new(
-                    StatusCode::SERVICE_UNAVAILABLE,
-                    "ROUTE_PROVIDER_RESOLUTION_ERROR",
-                    "No route provider could be selected.",
-                    reason,
-                ),
-                RoutingError::ProviderOverrideDisabled => Self::new(
-                    StatusCode::BAD_REQUEST,
-                    "PROVIDER_OVERRIDE_DISABLED",
-                    "Request-level route provider override is disabled.",
-                    "ROUTE_PROVIDER_OVERRIDE_ENABLED is false",
-                ),
-                source @ RoutingError::ProviderNotConfigured { .. } => Self::new(
-                    StatusCode::SERVICE_UNAVAILABLE,
-                    "PROVIDER_NOT_CONFIGURED",
-                    "The selected route provider is not configured.",
-                    source.to_string(),
-                ),
-                source @ RoutingError::UnsupportedProviderCapability { .. } => Self::new(
-                    StatusCode::BAD_REQUEST,
-                    "UNSUPPORTED_PROVIDER_CAPABILITY",
-                    "The selected route provider does not support this travel mode.",
-                    source.to_string(),
-                ),
-                source @ RoutingError::MatrixBuild { .. } => Self::new(
-                    StatusCode::SERVICE_UNAVAILABLE,
-                    "ROUTING_PAIR_FAILED",
-                    "A route could not be found for one location pair.",
-                    source.to_string(),
-                ),
-                other => Self::new(
-                    StatusCode::INTERNAL_SERVER_ERROR,
-                    "ROUTING_MATRIX_ERROR",
-                    "Travel-time routing returned an invalid matrix.",
-                    other.to_string(),
-                ),
-            },
-            OptimizationServiceError::Solver(SolverError::NoFeasibleRoute) => {
-                if matches!(&failure_detail, FailureDetail::StartPolicyInfeasible { .. }) {
-                    Self::new(
-                        StatusCode::UNPROCESSABLE_ENTITY,
-                        "START_POLICY_INFEASIBLE",
-                        "The selected start policy cannot produce a feasible route.",
-                        "the route requires an earlier start",
-                    )
-                } else {
-                    Self::new(
-                        StatusCode::UNPROCESSABLE_ENTITY,
-                        "NO_FEASIBLE_ROUTE",
-                        "No feasible route was found.",
-                        "solver found no feasible route",
-                    )
-                }
-            }
-            OptimizationServiceError::Schedule(
-                source @ (ScheduleError::OutsideSingleDay
-                | ScheduleError::TimeWindowViolation { .. }),
-            ) => {
-                let (code, message) = match &failure_detail {
-                    FailureDetail::StartPolicyInfeasible { .. } => (
-                        "START_POLICY_INFEASIBLE",
-                        "The selected start policy cannot produce a feasible route.",
-                    ),
-                    FailureDetail::TimeWindowViolation { .. } => (
-                        "TIME_WINDOW_VIOLATION",
-                        "A location cannot be visited within its opening window.",
-                    ),
-                    _ => ("NO_FEASIBLE_ROUTE", "No feasible route was found."),
-                };
-                Self::new(
-                    StatusCode::UNPROCESSABLE_ENTITY,
-                    code,
-                    message,
-                    source.to_string(),
-                )
-            }
-            OptimizationServiceError::Solver(source) => Self::new(
-                StatusCode::INTERNAL_SERVER_ERROR,
-                "INTERNAL_ERROR",
-                "Route optimization failed unexpectedly.",
-                source.to_string(),
-            ),
-            OptimizationServiceError::Schedule(source) => Self::new(
-                StatusCode::INTERNAL_SERVER_ERROR,
-                "INTERNAL_ERROR",
-                "Route scheduling failed unexpectedly.",
-                source.to_string(),
-            ),
-        };
-        api_error.detail = Some(api_error.reason.clone());
-        api_error.failure_detail = Some(Box::new(failure_detail));
-        api_error.suggestions = suggestions;
-        api_error
-    }
-
-    fn from_storage(error: JobStoreError) -> Self {
-        match error {
-            JobStoreError::DuplicateJob(job_id) => Self::new(
-                StatusCode::CONFLICT,
-                "DUPLICATE_JOB_ID",
-                "A job with this job_id already exists.",
-                job_id,
-            ),
-            source => Self::new(
-                StatusCode::INTERNAL_SERVER_ERROR,
-                "STORAGE_ERROR",
-                "Job records could not be stored.",
-                source.to_string(),
-            ),
-        }
-    }
-
-    fn body(&self) -> ErrorBody {
-        ErrorBody {
-            code: self.code,
-            message: self.message,
-            detail: self.detail.clone(),
-            failure_detail: self.failure_detail.as_deref().cloned(),
-            suggestions: (!self.suggestions.is_empty()).then(|| self.suggestions.clone()),
-        }
-    }
-}
-
-impl IntoResponse for ApiError {
-    fn into_response(self) -> Response {
-        eprintln!(
-            "HTTP request failed; code={}; status={}; reason={}",
-            self.code,
-            self.status.as_u16(),
-            self.reason
-        );
-        (self.status, Json(ErrorEnvelope { error: self.body() })).into_response()
-    }
-}
-
-/// Builds the HTTP application around an existing optimization service.
-pub fn router<P, S>(optimizer: RouteOptimizationService<P, S>) -> Router
-where
-    P: RoutingProvider + Send + Sync + 'static,
-    S: RouteSolver + Send + Sync + 'static,
-{
-    router_with_storage(optimizer, None, None)
-}
-
-/// Builds the HTTP application with optional testbed observation support.
-pub fn router_with_observation<P, S>(
-    optimizer: RouteOptimizationService<P, S>,
-    observation: Option<JobObservationRecorder>,
-) -> Router
-where
-    P: RoutingProvider + Send + Sync + 'static,
-    S: RouteSolver + Send + Sync + 'static,
-{
-    router_with_storage(optimizer, observation, None)
-}
-
-/// Builds the HTTP application with persistent job and timeline storage.
-pub fn router_with_storage<P, S>(
-    optimizer: RouteOptimizationService<P, S>,
-    observation: Option<JobObservationRecorder>,
-    job_store: Option<Arc<dyn JobStore>>,
-) -> Router
-where
-    P: RoutingProvider + Send + Sync + 'static,
-    S: RouteSolver + Send + Sync + 'static,
-{
-    router_with_storage_options(
-        optimizer,
-        observation,
-        job_store,
-        max_concurrent_jobs_from_env(),
-        DEFAULT_SSE_HEARTBEAT_INTERVAL,
-    )
-}
-
-/// Builds the HTTP application with an explicit background-job concurrency limit.
-pub fn router_with_storage_and_limit<P, S>(
-    optimizer: RouteOptimizationService<P, S>,
-    observation: Option<JobObservationRecorder>,
-    job_store: Option<Arc<dyn JobStore>>,
-    max_concurrent_jobs: Option<usize>,
-) -> Router
-where
-    P: RoutingProvider + Send + Sync + 'static,
-    S: RouteSolver + Send + Sync + 'static,
-{
-    router_with_storage_options(
-        optimizer,
-        observation,
-        job_store,
-        max_concurrent_jobs,
-        DEFAULT_SSE_HEARTBEAT_INTERVAL,
-    )
-}
-
-/// Builds the HTTP application with explicit background-job and SSE settings.
-pub fn router_with_storage_options<P, S>(
-    optimizer: RouteOptimizationService<P, S>,
-    observation: Option<JobObservationRecorder>,
-    job_store: Option<Arc<dyn JobStore>>,
-    max_concurrent_jobs: Option<usize>,
-    sse_heartbeat_interval: Duration,
-) -> Router
-where
-    P: RoutingProvider + Send + Sync + 'static,
-    S: RouteSolver + Send + Sync + 'static,
-{
-    let executor: Arc<dyn JobExecutor> = Arc::new(optimizer);
-    let runner = job_store
-        .as_ref()
-        .map(|store| JobRunner::new(executor.clone(), store.clone(), max_concurrent_jobs));
-    Router::new()
-        .route("/health", get(health))
-        .route("/route/providers/policy", get(provider_policy))
-        .route("/optimize", post(optimize))
-        .route("/integration/jobs", get(list_jobs).post(submit_job))
-        .route("/integration/matrix", post(build_matrix))
-        .route("/integration/jobs/{job_id}", get(get_job))
-        .route("/integration/jobs/{job_id}/events", get(job_events))
-        .route("/integration/jobs/{job_id}/cancel", post(cancel_job))
-        .route("/integration/jobs/{job_id}/timeline", get(job_timeline))
-        .fallback(not_found)
-        .method_not_allowed_fallback(method_not_allowed)
-        .layer(DefaultBodyLimit::max(MAX_REQUEST_BODY_BYTES))
-        .with_state(AppState {
-            executor,
-            runner,
-            observation,
-            job_store,
-            sse_heartbeat_interval: sse_heartbeat_interval.max(Duration::from_millis(1)),
-        })
-}
-
-fn max_concurrent_jobs_from_env() -> Option<usize> {
-    let value = std::env::var("TROUTE_MAX_CONCURRENT_JOBS").ok()?;
-    match value.parse::<usize>() {
-        Ok(limit) if limit > 0 => Some(limit),
-        _ => {
-            eprintln!(
-                "ignoring invalid TROUTE_MAX_CONCURRENT_JOBS={value:?}; expected a positive integer"
-            );
-            None
-        }
-    }
-}
-
-async fn health() -> Json<HealthResponse> {
-    Json(HealthResponse { status: "ok" })
-}
-
-async fn provider_policy(
-    State(state): State<AppState>,
-) -> Result<Json<RouteProviderPolicyDiagnostics>, ApiError> {
-    state
-        .executor
-        .provider_policy_diagnostics()
-        .map(Json)
-        .ok_or_else(|| {
-            ApiError::new(
-                StatusCode::NOT_FOUND,
-                "PROVIDER_POLICY_UNAVAILABLE",
-                "Route provider policy diagnostics are unavailable.",
-                "the configured routing provider has no policy resolver",
-            )
-        })
-}
-
-async fn build_matrix(
-    State(state): State<AppState>,
-    request: Result<Json<OptimizeRouteRequest>, JsonRejection>,
-) -> Result<Json<MatrixPreviewResponse>, ApiError> {
-    let Json(mut request) = request.map_err(ApiError::from_json_rejection)?;
-    request.travel_time_matrix = None;
-    OptimizationProblem::try_from(request.clone())
-        .map_err(OptimizationServiceError::InvalidRequest)
-        .map_err(ApiError::from_service)?;
-    let executor = state.executor.clone();
-    let matrix = tokio::task::spawn_blocking(move || executor.build_travel_time_matrix(request))
-        .await
-        .map_err(|error| {
-            ApiError::new(
-                StatusCode::INTERNAL_SERVER_ERROR,
-                "MATRIX_EXECUTION_FAILED",
-                "Travel-time matrix generation failed unexpectedly.",
-                error.to_string(),
-            )
-        })?
-        .map_err(ApiError::from_service)?;
-    Ok(Json(MatrixPreviewResponse {
-        travel_time_matrix: matrix.into_rows(),
-    }))
-}
-
-async fn optimize(
-    State(state): State<AppState>,
-    headers: HeaderMap,
-    request: Result<Json<OptimizeRouteRequest>, JsonRejection>,
-) -> Result<Json<OptimizeRouteResponse>, ApiError> {
-    let Json(request) = request.map_err(ApiError::from_json_rejection)?;
-    OptimizationProblem::try_from(request.clone())
-        .map_err(OptimizationServiceError::InvalidRequest)
-        .map_err(ApiError::from_service)?;
-    let job_id = request.job_id.clone();
-    let started = Instant::now();
-    let pair_id = state
-        .observation
-        .as_ref()
-        .map(|observation| observation.next_pair_id("opt"));
-
-    let (result, persisted_error, analyzed_suggestions) = if let Some(runner) = &state.runner {
-        let submission = runner
-            .submit_with_completion(request.clone())
-            .map_err(ApiError::from_storage)?;
-        record_optimize_request(
-            state.observation.as_ref(),
-            &job_id,
-            pair_id.as_deref(),
-            &headers,
-            &request,
-        );
-        submission
-            .completion
-            .await
-            .map_err(|_| {
-                ApiError::new(
-                    StatusCode::INTERNAL_SERVER_ERROR,
-                    "JOB_EXECUTION_FAILED",
-                    "Route optimization failed unexpectedly.",
-                    "background job ended without reporting completion",
-                )
-            })?
-            .map_err(|reason| {
-                ApiError::new(
-                    StatusCode::INTERNAL_SERVER_ERROR,
-                    "STORAGE_ERROR",
-                    "Job records could not be stored.",
-                    reason,
-                )
-            })?;
-        let job = runner
-            .store()
-            .get_job(&job_id)
-            .map_err(ApiError::from_storage)?
-            .ok_or_else(|| {
-                ApiError::new(
-                    StatusCode::INTERNAL_SERVER_ERROR,
-                    "STORAGE_ERROR",
-                    "Job records could not be stored.",
-                    format!("completed job disappeared: {job_id}"),
-                )
-            })?;
-        let persisted_error = job.error.clone();
-        (legacy_result_from_job(job), persisted_error, None)
-    } else {
-        record_optimize_request(
-            state.observation.as_ref(),
-            &job_id,
-            pair_id.as_deref(),
-            &headers,
-            &request,
-        );
-        let executor = state.executor.clone();
-        let cancellation = CancellationToken::new();
-        let execution_request = request.clone();
-        let analysis_request = request.clone();
-        let result = tokio::task::spawn_blocking(move || {
-            let result = executor.execute(
-                execution_request,
-                &NoopOptimizationEventReporter,
-                &cancellation,
-            );
-            let suggestions = result
-                .as_ref()
-                .err()
-                .map(|error| executor.failure_suggestions(&analysis_request, error, &cancellation))
-                .unwrap_or_default();
-            (result, suggestions)
-        })
-        .await
-        .map_err(|error| {
-            ApiError::new(
-                StatusCode::INTERNAL_SERVER_ERROR,
-                "JOB_EXECUTION_FAILED",
-                "Route optimization failed unexpectedly.",
-                error.to_string(),
-            )
-        })?;
-        let (result, suggestions) = result;
-        (result, None, Some(suggestions))
-    };
-
-    match result {
-        Ok(response) => {
-            record_optimize_response(
-                state.observation.as_ref(),
-                &job_id,
-                pair_id.as_deref(),
-                started,
-                StatusCode::OK,
-                serde_json::to_value(&response).ok(),
-            );
-            Ok(Json(response))
-        }
-        Err(error) => {
-            let mut error = ApiError::from_service_with_request(error, Some(&request));
-            if let Some(suggestions) = analyzed_suggestions {
-                error.suggestions = suggestions;
-            }
-            if let Some(persisted) = persisted_error {
-                match persisted.code.as_str() {
-                    "TIME_WINDOW_VIOLATION" => {
-                        error.code = "TIME_WINDOW_VIOLATION";
-                        error.message = "A location cannot be visited within its opening window.";
-                    }
-                    "START_POLICY_INFEASIBLE" => {
-                        error.code = "START_POLICY_INFEASIBLE";
-                        error.message =
-                            "The selected start policy cannot produce a feasible route.";
-                    }
-                    "ROUTING_PAIR_FAILED" => {
-                        error.code = "ROUTING_PAIR_FAILED";
-                        error.message = "A route could not be found for one location pair.";
-                    }
-                    _ => {}
-                }
-                error.detail = Some(persisted.detail);
-                if let Some(failure_detail) = persisted.failure_detail {
-                    error.failure_detail = Some(Box::new(failure_detail));
-                }
-                if let Some(suggestions) = persisted.suggestions {
-                    error.suggestions = suggestions;
-                }
-            }
-            let body = serde_json::to_value(ErrorEnvelope {
-                error: error.body(),
-            })
-            .ok();
-            record_optimize_response(
-                state.observation.as_ref(),
-                &job_id,
-                pair_id.as_deref(),
-                started,
-                error.status,
-                body,
-            );
-            Err(error)
-        }
-    }
-}
-
-fn record_optimize_request(
-    observation: Option<&JobObservationRecorder>,
-    job_id: &str,
-    pair_id: Option<&str>,
-    headers: &HeaderMap,
+fn enforce_portfolio_experiment(
+    state: &AppState,
     request: &OptimizeRouteRequest,
-) {
-    let (Some(observation), Some(pair_id)) = (observation, pair_id) else {
-        return;
+) -> Result<(), ApiError> {
+    let Some(experiment) = &request.portfolio_experiment else {
+        return Ok(());
     };
-    let mut entry = observation.entry(
-        pair_id,
-        ObservationDirection::Request,
-        ObservationPeer::Testbed,
-        ObservationPeer::Troute,
-    );
-    entry.method = Some("POST".to_owned());
-    entry.path = Some("/optimize".to_owned());
-    entry.headers = allowlisted_headers(headers);
-    entry.body = serde_json::to_value(request).ok();
-    observation.append(job_id, entry);
-}
-
-async fn submit_job(
-    State(state): State<AppState>,
-    headers: HeaderMap,
-    request: Result<Json<OptimizeRouteRequest>, JsonRejection>,
-) -> Result<impl IntoResponse, ApiError> {
-    let Json(request) = request.map_err(ApiError::from_json_rejection)?;
-    OptimizationProblem::try_from(request.clone())
-        .map_err(OptimizationServiceError::InvalidRequest)
-        .map_err(ApiError::from_service)?;
-    let runner = state.runner.as_ref().ok_or_else(|| {
+    let capabilities = state.executor.solver_capabilities().ok_or_else(|| {
         ApiError::new(
-            StatusCode::SERVICE_UNAVAILABLE,
-            "JOB_STORE_UNAVAILABLE",
-            "Asynchronous job submission is unavailable.",
-            "the application was built without a job store",
+            StatusCode::BAD_REQUEST,
+            "PORTFOLIO_EXPERIMENT_UNAVAILABLE",
+            "Portfolio experiments are unavailable.",
+            "the configured solver has no portfolio registry",
         )
     })?;
-    let job_id = request.job_id.clone();
-    let started = Instant::now();
-    let pair_id = state
-        .observation
-        .as_ref()
-        .map(|observation| observation.next_pair_id("submit"));
-    let submitted_state = runner
-        .submit(request.clone())
-        .map_err(ApiError::from_storage)?;
-    if let (Some(observation), Some(pair_id)) = (&state.observation, &pair_id) {
-        let mut entry = observation.entry(
-            pair_id,
-            ObservationDirection::Request,
-            ObservationPeer::Testbed,
-            ObservationPeer::Troute,
-        );
-        entry.method = Some("POST".to_owned());
-        entry.path = Some("/integration/jobs".to_owned());
-        entry.headers = allowlisted_headers(&headers);
-        entry.body = serde_json::to_value(&request).ok();
-        observation.append(&job_id, entry);
+    if !capabilities.experiment_override_enabled {
+        return Err(ApiError::new(
+            StatusCode::BAD_REQUEST,
+            "PORTFOLIO_EXPERIMENT_DISABLED",
+            "Per-request portfolio experiments are disabled.",
+            "set TROUTE_PORTFOLIO_EXPERIMENT_ENABLED=true to opt in",
+        ));
     }
-
-    let response = SubmitJobResponse {
-        job_id: submitted_state.job_id,
-        status: submitted_state.status,
-        created_at: submitted_state.created_at,
-    };
-    record_submit_response(
-        state.observation.as_ref(),
-        &job_id,
-        pair_id.as_deref(),
-        started,
-        &response,
-    );
-    Ok((StatusCode::ACCEPTED, Json(response)))
-}
-
-fn legacy_result_from_job(
-    job: StoredJob,
-) -> Result<OptimizeRouteResponse, OptimizationServiceError> {
-    match job.state.status {
-        JobStatus::Completed => job.result.ok_or_else(|| {
-            OptimizationServiceError::Solver(SolverError::Failed(
-                "completed job has no persisted result".to_owned(),
-            ))
-        }),
-        JobStatus::Cancelled => Err(OptimizationServiceError::Cancelled),
-        JobStatus::Failed => {
-            let error = job.error.ok_or_else(|| {
-                OptimizationServiceError::Solver(SolverError::Failed(
-                    "failed job has no persisted error".to_owned(),
-                ))
-            })?;
-            match error.code.as_str() {
-                "NO_FEASIBLE_ROUTE" | "START_POLICY_INFEASIBLE" | "TIME_WINDOW_VIOLATION" => Err(
-                    OptimizationServiceError::Solver(SolverError::NoFeasibleRoute),
+    if experiment
+        .total_budget_ms
+        .is_some_and(|budget| budget == 0 || budget > capabilities.limits.max_total_budget_ms)
+        || experiment
+            .logical_cpu_slots
+            .is_some_and(|slots| slots == 0 || slots > capabilities.limits.max_logical_cpu_slots)
+    {
+        return Err(ApiError::new(
+            StatusCode::BAD_REQUEST,
+            "PORTFOLIO_EXPERIMENT_LIMIT_EXCEEDED",
+            "Portfolio experiment limits were exceeded.",
+            format!(
+                "maximum budget={} ms; maximum logical slots={}",
+                capabilities.limits.max_total_budget_ms, capabilities.limits.max_logical_cpu_slots
+            ),
+        ));
+    }
+    if let Some(requested) = &experiment.solver_ids {
+        let registered: std::collections::HashMap<_, _> = capabilities
+            .solvers
+            .iter()
+            .map(|solver| (&solver.id, solver.unavailable_reason.as_deref()))
+            .collect();
+        let unique: std::collections::HashSet<_> = requested.iter().collect();
+        if requested.is_empty()
+            || unique.len() != requested.len()
+            || requested
+                .iter()
+                .any(|solver| !registered.contains_key(solver))
+        {
+            return Err(ApiError::new(
+                StatusCode::BAD_REQUEST,
+                "INVALID_PORTFOLIO_SOLVER_SET",
+                "The requested Solver set is invalid.",
+                "Solver IDs must be registered, unique, and non-empty",
+            ));
+        }
+        if let Some(unavailable) = requested
+            .iter()
+            .find(|solver| registered.get(*solver).copied().flatten().is_some())
+        {
+            return Err(ApiError::new(
+                StatusCode::BAD_REQUEST,
+                "PORTFOLIO_SOLVER_UNAVAILABLE",
+                "A requested Solver is unavailable in this deployment.",
+                format!(
+                    "{}: {}",
+                    unavailable,
+                    registered
+                        .get(unavailable)
+                        .copied()
+                        .flatten()
+                        .unwrap_or("unavailable")
                 ),
-                "ROUTING_UNAVAILABLE" | "ROUTING_PAIR_FAILED" => Err(
-                    OptimizationServiceError::Routing(RoutingError::Provider(error.detail)),
-                ),
-                "ROUTE_PROVIDER_RESOLUTION_ERROR" => Err(OptimizationServiceError::Routing(
-                    RoutingError::ProviderResolution(error.detail),
-                )),
-                "PROVIDER_OVERRIDE_DISABLED" => Err(OptimizationServiceError::Routing(
-                    RoutingError::ProviderOverrideDisabled,
-                )),
-                "PROVIDER_NOT_CONFIGURED" => Err(OptimizationServiceError::Routing(
-                    RoutingError::ProviderNotConfigured {
-                        provider: "selected".to_owned(),
-                        reason: error.detail,
-                    },
-                )),
-                "UNSUPPORTED_PROVIDER_CAPABILITY" => Err(OptimizationServiceError::Routing(
-                    RoutingError::UnsupportedProviderCapability {
-                        provider: "selected".to_owned(),
-                        mode: error.detail,
-                    },
-                )),
-                _ => Err(OptimizationServiceError::Solver(SolverError::Failed(
-                    error.detail,
-                ))),
-            }
+            ));
         }
-        status => Err(OptimizationServiceError::Solver(SolverError::Failed(
-            format!("background job completion reported non-terminal status {status:?}"),
-        ))),
     }
-}
-
-async fn list_jobs(
-    State(state): State<AppState>,
-    Query(query): Query<JobListQuery>,
-) -> Result<Json<JobListResponse>, ApiError> {
-    let limit = query.limit.unwrap_or(50).min(500);
-    let jobs = match &state.job_store {
-        Some(store) => store.list_recent(limit).map_err(ApiError::from_storage)?,
-        None => Vec::new(),
-    };
-    Ok(Json(JobListResponse { jobs }))
-}
-
-async fn get_job(
-    State(state): State<AppState>,
-    Path(job_id): Path<String>,
-    headers: HeaderMap,
-) -> Result<Json<StoredJob>, ApiError> {
-    let started = Instant::now();
-    let job = match &state.job_store {
-        Some(store) => store.get_job(&job_id).map_err(ApiError::from_storage)?,
-        None => None,
-    };
-    let job = job.ok_or_else(|| {
-        ApiError::new(
-            StatusCode::NOT_FOUND,
-            "JOB_NOT_FOUND",
-            "The requested job does not exist.",
-            job_id.as_str(),
-        )
-    })?;
-    record_job_inspection(state.observation.as_ref(), &job_id, &headers, started, &job);
-    Ok(Json(job))
-}
-
-async fn job_events(
-    State(state): State<AppState>,
-    Path(job_id): Path<String>,
-) -> Result<Response, ApiError> {
-    let store = state.job_store.as_ref().ok_or_else(|| {
-        ApiError::new(
-            StatusCode::NOT_FOUND,
-            "JOB_NOT_FOUND",
-            "The requested job does not exist.",
-            &job_id,
-        )
-    })?;
-
-    // Subscribe before reading the source-of-truth snapshot. Retry the read if
-    // an event was published concurrently so buffered progress older than the
-    // snapshot is not replayed after it.
-    let subscription = state
-        .runner
-        .as_ref()
-        .and_then(|runner| runner.subscribe(&job_id));
-    let read_job = || {
-        store
-            .get_job(&job_id)
-            .map_err(ApiError::from_storage)?
-            .ok_or_else(|| {
-                ApiError::new(
-                    StatusCode::NOT_FOUND,
-                    "JOB_NOT_FOUND",
-                    "The requested job does not exist.",
-                    &job_id,
-                )
-            })
-    };
-    let (initial, initial_sequence) = if let Some(subscription) = subscription.as_ref() {
-        loop {
-            let before = subscription.current_sequence();
-            let initial = read_job()?;
-            let after = subscription.current_sequence();
-            if before == after {
-                break (initial, after);
-            }
-        }
-    } else {
-        let initial = read_job()?;
-        let sequence = store
-            .current_event_sequence(&job_id)
-            .map_err(ApiError::from_storage)?
-            // Compatibility for Job records created before sequence metadata.
-            .unwrap_or_else(|| u64::try_from(initial.state.updated_at).unwrap_or(0));
-        (initial, sequence)
-    };
-    let initial_terminal = !matches!(
-        initial.state.status,
-        JobStatus::Pending | JobStatus::Running
-    );
-    let snapshot = JobEventEnvelope::from_stored_job(initial_sequence, initial);
-    let event_store = store.clone();
-    let event_job_id = job_id.clone();
-
-    let stream = async_stream::stream! {
-        yield Ok::<Event, Infallible>(sse_event("snapshot", &snapshot));
-        if initial_terminal {
-            return;
-        }
-
-        let Some(mut subscription) = subscription else {
-            return;
-        };
-        let mut cursor = initial_sequence;
-        'events: loop {
-            match subscription.receiver.recv().await {
-                Ok(event) => {
-                    if event.envelope.sequence <= cursor {
-                        continue;
-                    }
-                    cursor = event.envelope.sequence;
-                    let terminal = matches!(
-                        event.kind,
-                        JobEventKind::Completed | JobEventKind::Failed | JobEventKind::Cancelled
-                    );
-                    yield Ok(sse_event(event.kind.as_str(), &event.envelope));
-                    if terminal {
-                        break;
-                    }
-                }
-                Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => {
-                    let (job, recovered_sequence) = loop {
-                        let before = subscription.current_sequence();
-                        let job = match event_store.get_job(&event_job_id) {
-                            Ok(Some(job)) => job,
-                            Ok(None) => break 'events,
-                            Err(error) => {
-                                eprintln!(
-                                    "SSE lag recovery failed; job_id={event_job_id}; error={error}"
-                                );
-                                break 'events;
-                            }
-                        };
-                        let after = subscription.current_sequence();
-                        if before == after {
-                            break (job, after);
-                        }
-                    };
-                    let terminal = !matches!(
-                        job.state.status,
-                        JobStatus::Pending | JobStatus::Running
-                    );
-                    cursor = recovered_sequence;
-                    let snapshot = JobEventEnvelope::from_stored_job(cursor, job);
-                    yield Ok(sse_event("snapshot", &snapshot));
-                    if terminal {
-                        break;
-                    }
-                }
-                Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
-            }
-        }
-    };
-
-    let mut response = Sse::new(stream)
-        .keep_alive(
-            KeepAlive::new()
-                .interval(state.sse_heartbeat_interval)
-                .text("heartbeat"),
-        )
-        .into_response();
-    response
-        .headers_mut()
-        .insert(header::CACHE_CONTROL, HeaderValue::from_static("no-cache"));
-    response
-        .headers_mut()
-        .insert(header::CONNECTION, HeaderValue::from_static("keep-alive"));
-    response.headers_mut().insert(
-        header::HeaderName::from_static("x-accel-buffering"),
-        HeaderValue::from_static("no"),
-    );
-    Ok(response)
-}
-
-fn sse_event(event: &'static str, envelope: &JobEventEnvelope) -> Event {
-    assert!(
-        envelope.is_valid_for_event(event),
-        "persisted Job violates the {event} SSE contract"
-    );
-    Event::default()
-        .event(event)
-        .id(envelope.sequence.to_string())
-        .data(serde_json::to_string(envelope).expect("job event envelope must serialize"))
-}
-
-fn record_job_inspection(
-    observation: Option<&JobObservationRecorder>,
-    job_id: &str,
-    headers: &HeaderMap,
-    started: Instant,
-    job: &StoredJob,
-) {
-    let Some(observation) = observation else {
-        return;
-    };
-    let pair_id = observation.next_pair_id("inspect");
-    let mut request = observation.entry(
-        &pair_id,
-        ObservationDirection::Request,
-        ObservationPeer::Testbed,
-        ObservationPeer::Troute,
-    );
-    request.method = Some("GET".to_owned());
-    request.path = Some(format!("/integration/jobs/{job_id}"));
-    request.headers = allowlisted_headers(headers);
-    observation.append(job_id, request);
-
-    let mut response = observation.entry(
-        &pair_id,
-        ObservationDirection::Response,
-        ObservationPeer::Troute,
-        ObservationPeer::Testbed,
-    );
-    response.status = Some(StatusCode::OK.as_u16());
-    response.latency_ms = Some(started.elapsed().as_secs_f64() * 1_000.0);
-    response.headers = Some(ObservationHeaders::from([(
-        header::CONTENT_TYPE.as_str().to_owned(),
-        "application/json".to_owned(),
-    )]));
-    response.body = serde_json::to_value(job).ok();
-    observation.append(job_id, response);
-}
-
-async fn cancel_job(
-    State(state): State<AppState>,
-    Path(job_id): Path<String>,
-    headers: HeaderMap,
-) -> Result<Json<CancelJobResponse>, ApiError> {
-    const CANCEL_MESSAGE: &str = "Optimization cancelled at the user's request.";
-
-    let started = Instant::now();
-    let pair_id = state
-        .observation
-        .as_ref()
-        .map(|observation| observation.next_pair_id("cancel"));
-    let request_entry = match (&state.observation, &pair_id) {
-        (Some(observation), Some(pair_id)) => {
-            let mut entry = observation.entry(
-                pair_id,
-                ObservationDirection::Request,
-                ObservationPeer::Testbed,
-                ObservationPeer::Troute,
-            );
-            entry.method = Some("POST".to_owned());
-            entry.path = Some(format!("/integration/jobs/{job_id}/cancel"));
-            entry.headers = allowlisted_headers(&headers);
-            Some(entry)
-        }
-        _ => None,
-    };
-
-    let store = state.job_store.as_ref().ok_or_else(|| {
-        ApiError::new(
-            StatusCode::NOT_FOUND,
-            "JOB_NOT_FOUND",
-            "Job not found.",
-            &job_id,
-        )
-    })?;
-    // Hold a clone across the persisted transition so optimize cleanup cannot
-    // remove the token in the result-vs-cancel race.
-    let active = state
-        .runner
-        .as_ref()
-        .and_then(|runner| runner.activity(&job_id));
-
-    match store.cancel_job(&job_id, CANCEL_MESSAGE) {
-        Ok(job) => {
-            if let Some(active) = active {
-                active.publish_persisted(store.as_ref(), &job_id, JobEventKind::Cancelled);
-                active.cancel();
-            }
-            let response = CancelJobResponse {
-                job_id: job_id.clone(),
-                status: job.status,
-            };
-            record_cancel_exchange(
-                state.observation.as_ref(),
-                &job_id,
-                pair_id.as_deref(),
-                request_entry,
-                started,
-                StatusCode::OK,
-                serde_json::to_value(&response).ok(),
-            );
-            Ok(Json(response))
-        }
-        Err(JobStoreError::JobNotFound(_)) => Err(ApiError::new(
-            StatusCode::NOT_FOUND,
-            "JOB_NOT_FOUND",
-            "Job not found.",
-            &job_id,
-        )),
-        Err(JobStoreError::JobNotCancellable { status, .. }) => {
-            let error = ApiError::new(
-                StatusCode::CONFLICT,
-                "JOB_NOT_CANCELLABLE",
-                "The job is already terminal.",
-                format!("job status is {}", status.as_str()),
-            )
-            .with_detail(status.as_str());
-            let body = json!({
-                "error": {
-                    "code": error.code,
-                    "message": error.message,
-                    "detail": error.detail,
-                }
-            });
-            record_cancel_exchange(
-                state.observation.as_ref(),
-                &job_id,
-                pair_id.as_deref(),
-                request_entry,
-                started,
-                StatusCode::CONFLICT,
-                Some(body),
-            );
-            Err(error)
-        }
-        Err(error) => Err(ApiError::from_storage(error)),
-    }
-}
-
-#[allow(clippy::too_many_arguments)]
-fn record_cancel_exchange(
-    observation: Option<&JobObservationRecorder>,
-    job_id: &str,
-    pair_id: Option<&str>,
-    request: Option<JobTimelineEntry>,
-    started: Instant,
-    status: StatusCode,
-    body: Option<serde_json::Value>,
-) {
-    let (Some(observation), Some(pair_id), Some(request)) = (observation, pair_id, request) else {
-        return;
-    };
-    observation.append(job_id, request);
-    let mut response = observation.entry(
-        pair_id,
-        ObservationDirection::Response,
-        ObservationPeer::Troute,
-        ObservationPeer::Testbed,
-    );
-    response.status = Some(status.as_u16());
-    response.latency_ms = Some(started.elapsed().as_secs_f64() * 1_000.0);
-    response.headers = Some(ObservationHeaders::from([(
-        header::CONTENT_TYPE.as_str().to_owned(),
-        "application/json".to_owned(),
-    )]));
-    response.body = body;
-    observation.append(job_id, response);
-}
-
-fn record_optimize_response(
-    observation: Option<&JobObservationRecorder>,
-    job_id: &str,
-    pair_id: Option<&str>,
-    started: Instant,
-    status: StatusCode,
-    body: Option<serde_json::Value>,
-) {
-    let (Some(observation), Some(pair_id)) = (observation, pair_id) else {
-        return;
-    };
-    let mut entry = observation.entry(
-        pair_id,
-        ObservationDirection::Response,
-        ObservationPeer::Troute,
-        ObservationPeer::Testbed,
-    );
-    entry.status = Some(status.as_u16());
-    entry.latency_ms = Some(started.elapsed().as_secs_f64() * 1_000.0);
-    entry.headers = Some(ObservationHeaders::from([(
-        header::CONTENT_TYPE.as_str().to_owned(),
-        "application/json".to_owned(),
-    )]));
-    entry.body = body;
-    observation.append(job_id, entry);
-}
-
-fn record_submit_response(
-    observation: Option<&JobObservationRecorder>,
-    job_id: &str,
-    pair_id: Option<&str>,
-    started: Instant,
-    body: &SubmitJobResponse,
-) {
-    let (Some(observation), Some(pair_id)) = (observation, pair_id) else {
-        return;
-    };
-    let mut entry = observation.entry(
-        pair_id,
-        ObservationDirection::Response,
-        ObservationPeer::Troute,
-        ObservationPeer::Testbed,
-    );
-    entry.status = Some(StatusCode::ACCEPTED.as_u16());
-    entry.latency_ms = Some(started.elapsed().as_secs_f64() * 1_000.0);
-    entry.headers = Some(ObservationHeaders::from([(
-        header::CONTENT_TYPE.as_str().to_owned(),
-        "application/json".to_owned(),
-    )]));
-    entry.body = serde_json::to_value(body).ok();
-    observation.append(job_id, entry);
-}
-
-async fn job_timeline(
-    State(state): State<AppState>,
-    Path(job_id): Path<String>,
-) -> Json<JobTimelineResponse> {
-    let mut indexed_entries = state
-        .observation
-        .as_ref()
-        .map(|observation| observation.list(&job_id))
-        .unwrap_or_default()
-        .into_iter()
-        .enumerate()
-        .collect::<Vec<_>>();
-    indexed_entries.sort_by(|(left_index, left), (right_index, right)| {
-        left.timestamp_ms
-            .cmp(&right.timestamp_ms)
-            .then_with(|| left_index.cmp(right_index))
-    });
-    let entries = indexed_entries
-        .into_iter()
-        .map(|(_, entry)| entry)
-        .collect();
-
-    Json(JobTimelineResponse { job_id, entries })
+    Ok(())
 }
 
 async fn method_not_allowed<B>(request: Request<B>) -> Response {
@@ -1252,144 +280,4 @@ async fn not_found(request: Request<Body>) -> ApiError {
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::{
-        domain::Location,
-        matrix::TravelTimeMatrix,
-        routing::{RoutingContext, RoutingError, RoutingProvider},
-        solver::{RouteSolver, SolverError, SolverInput, SolverSolution},
-    };
-    use axum::{body::Body, http::Request};
-    use http_body_util::BodyExt;
-    use tower::ServiceExt;
-
-    struct FailingRoutingProvider;
-
-    impl RoutingProvider for FailingRoutingProvider {
-        fn travel_time_matrix(
-            &self,
-            _locations: &[Location],
-            _context: &RoutingContext,
-        ) -> Result<TravelTimeMatrix, RoutingError> {
-            Err(RoutingError::Provider("provider is offline".to_owned()))
-        }
-    }
-
-    struct UnusedSolver;
-
-    impl RouteSolver for UnusedSolver {
-        fn solve(&self, _input: SolverInput<'_>) -> Result<SolverSolution, SolverError> {
-            unreachable!("routing failure must stop the pipeline before solving")
-        }
-    }
-
-    struct FixedRoutingProvider;
-
-    impl RoutingProvider for FixedRoutingProvider {
-        fn travel_time_matrix(
-            &self,
-            _locations: &[Location],
-            _context: &RoutingContext,
-        ) -> Result<TravelTimeMatrix, RoutingError> {
-            TravelTimeMatrix::new(vec![vec![0]])
-                .map_err(|error| RoutingError::Provider(error.to_string()))
-        }
-    }
-
-    struct NoFeasibleSolver;
-
-    impl RouteSolver for NoFeasibleSolver {
-        fn solve(&self, _input: SolverInput<'_>) -> Result<SolverSolution, SolverError> {
-            Err(SolverError::NoFeasibleRoute)
-        }
-    }
-
-    #[tokio::test]
-    async fn routing_failures_have_a_stable_json_mapping() {
-        let app = router(RouteOptimizationService::new(
-            FailingRoutingProvider,
-            UnusedSolver,
-        ));
-        let request = Request::builder()
-            .method("POST")
-            .uri("/optimize")
-            .header(header::CONTENT_TYPE, "application/json")
-            .body(Body::from(valid_request()))
-            .unwrap();
-        let response = app.oneshot(request).await.unwrap();
-
-        assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
-        let json: serde_json::Value =
-            serde_json::from_slice(&response.into_body().collect().await.unwrap().to_bytes())
-                .unwrap();
-        assert_eq!(json["error"]["code"], "ROUTING_UNAVAILABLE");
-        assert_eq!(
-            json["error"]["message"],
-            "Travel-time routing is temporarily unavailable."
-        );
-        assert_eq!(
-            json["error"]["failure_detail"]["type"],
-            "ROUTING_UNAVAILABLE"
-        );
-        assert_eq!(json["error"]["suggestions"][0]["type"], "RETRY_ROUTING");
-    }
-
-    #[tokio::test]
-    async fn no_feasible_solver_result_has_a_stable_json_mapping() {
-        let app = router(RouteOptimizationService::new(
-            FixedRoutingProvider,
-            NoFeasibleSolver,
-        ));
-        let request = Request::builder()
-            .method("POST")
-            .uri("/optimize")
-            .header(header::CONTENT_TYPE, "application/json")
-            .body(Body::from(valid_request()))
-            .unwrap();
-        let response = app.oneshot(request).await.unwrap();
-
-        assert_eq!(response.status(), StatusCode::UNPROCESSABLE_ENTITY);
-        let json: serde_json::Value =
-            serde_json::from_slice(&response.into_body().collect().await.unwrap().to_bytes())
-                .unwrap();
-        assert_eq!(json["error"]["code"], "NO_FEASIBLE_ROUTE");
-        assert_eq!(json["error"]["message"], "No feasible route was found.");
-        assert_eq!(json["error"]["failure_detail"]["type"], "NO_FEASIBLE_ROUTE");
-        assert_eq!(json["error"]["suggestions"][0]["type"], "START_EARLIER");
-        assert_eq!(json["error"]["suggestions"][1]["type"], "REDUCE_STAY_TIME");
-        assert_eq!(json["error"]["suggestions"][1]["location_id"], "place-2");
-        assert_eq!(json["error"]["suggestions"][1]["current_minutes"], 600);
-        assert_eq!(
-            json["error"]["suggestions"][1]["suggested_max_minutes"],
-            540
-        );
-        assert_eq!(
-            json["error"]["suggestions"][2]["type"],
-            "CHANGE_START_POLICY"
-        );
-    }
-
-    fn valid_request() -> &'static str {
-        r#"{
-            "job_id":"route-http-test",
-            "locations":[
-                {
-                    "id":"place-1",
-                    "place_id":"GOOGLE_PLACE_ID_1",
-                    "open_time":"09:00",
-                    "close_time":"18:00",
-                    "stay_minutes":0
-                },
-                {
-                    "id":"place-2",
-                    "place_id":"GOOGLE_PLACE_ID_2",
-                    "open_time":"09:00",
-                    "close_time":"18:00",
-                    "stay_minutes":600
-                }
-            ],
-            "start_time":"09:00"
-        }"#
-    }
-}
+mod tests;

@@ -1,0 +1,70 @@
+[작업 1] HTTP Layer Top-down 배치
+================================
+
+대상
+- src/http/handlers/optimization.rs
+- src/http/handlers/jobs.rs
+- src/http/handlers/events.rs
+- src/http/handlers.rs
+- src/http/router.rs
+- 필요할 때만 src/http.rs, src/http/error.rs
+
+현재 관찰
+- optimization.rs의 `optimize()`는 OptimizationContext/OptimizationOutcome의
+  정의 및 구현보다 아래에 위치한다. 진입점부터 읽는 관점에서 최우선 정리 대상.
+- 이미 `OptimizationContext::prepare` → `execute` → `into_response` → `record_response`로
+  흐름이 분리돼 있다. 실행 로직을 재작성할 필요는 없다.
+- router.rs는 여러 `router_with_*` 호환 생성자와 실제 Router 구성 함수를 제공한다.
+
+요구 사항
+1. optimization.rs에 노출된 HTTP Handler들을 import 바로 아래의 읽기 쉬운 구역에 정렬.
+   예: `optimize`, `build_matrix`, `health`, `provider_policy`, `solver_capabilities`.
+   - 이 함수들의 서명과 라우팅 참조는 그대로 유지한다.
+   - `optimize` 본문은 이미 짧으므로 의미 변경 없이 이동만 우선한다.
+2. Handler 아래에 `OptimizationContext`, `OptimizationOutcome` 및 기존 impl을
+   요청 흐름 순서에 따라 묶어 둔다. 공통 에러/recording helper는 그 아래에 배치.
+3. 각 Helper를 별도 파일로 과도하게 나누지 않는다. 충분히 길고 독립적인 책임이
+   확인될 때만 추후 파일 분리 후보로 별도 보고한다(이번 작업에서 자동 수행하지 않음).
+4. jobs.rs, events.rs도 외부에 노출된 Handler를 먼저, 전용 helper를 아래에 배치.
+5. handlers.rs는 모듈 선언과 필요한 handler re-export만 남긴 facade로 유지.
+6. router.rs는 `router()`와 `router_with_*()` 등 공개 생성 API를 우선 표시하고,
+   실제 HTTP `.route(...)` 선언부가 한 눈에 읽히게 유지한다.
+   환경변수 파싱/범위 검증 helper는 하단에 두되 설정 동작은 변경하지 않는다.
+7. `AppState`는 Axum 공유 상태이므로 성급히 새 Router 객체로 감싸지 않는다.
+
+동작 보존 체크
+- 모든 경로와 메서드: GET/POST, fallback, method_not_allowed_fallback
+- `with_state`, Layer, BodyLimit, SSE, JsonRejection, HTTP status
+- JobRunner 유무에 따른 persisted/direct 실행 및 completion 대기
+- persisted error 병합 우선순위와 Failure Suggestion/Observation 기록 시점
+- `optimize()`의 `context.execute().await?` 오류 시 기록 여부는 현행 동작을 그대로 보존
+  (개선 사항은 별도 issue로만 기록; 이 리팩토링에서 동작 변경 금지)
+
+예시 목표(개념 구조이며 시그니처 변경 금지)
+```
+// optimization.rs
+use super::super::*;
+
+pub(in crate::http) async fn optimize(...) -> ... {
+    let request = ...?;
+    let context = OptimizationContext::prepare(...)?;
+    let outcome = context.execute().await?;
+    let response = outcome.into_response(&context.request);
+    context.record_response(&response);
+    response.map(Json)
+}
+
+pub(in crate::http) async fn build_matrix(...) -> ... { ... }
+// 다른 HTTP Handler들
+
+struct OptimizationContext<'a> { ... }
+impl OptimizationContext<'_> { /* prepare, execute, ... */ }
+struct OptimizationOutcome { ... }
+impl OptimizationOutcome { ... }
+fn optimization_api_error(...) -> ... { ... }
+// private helpers
+```
+
+완료
+- HTTP Handler 진입점만 살펴봐도 처리 흐름 및 역할을 이해할 수 있다.
+- 경로/인터페이스/결과/에러가 변경되지 않는다.

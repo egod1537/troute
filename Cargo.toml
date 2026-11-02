@@ -5,15 +5,22 @@ edition = "2021"
 rust-version = "1.87"
 description = "Routing and route optimization engine"
 
+[features]
+default = []
+solver-mip-scip = ["dep:russcip"]
+
 [dependencies]
 async-stream = "0.3"
 axum = { version = "0.8", default-features = false, features = ["http1", "json", "query", "tokio"] }
 rand = "0.8"
 integer-blossom = "=1.2.1"
 chrono = { version = "0.4", default-features = false, features = ["clock"] }
+chrono-tz = "0.10"
 reqwest = { version = "0.12", default-features = false, features = ["blocking", "json", "rustls-tls"] }
+russcip = { version = "=0.11.0", optional = true, default-features = false, features = ["bundled"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
+tempfile = "3"
 thiserror = "1"
 tokio = { version = "1", features = ["macros", "net", "rt-multi-thread", "signal", "sync", "time"] }
 

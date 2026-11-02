@@ -1,0 +1,29 @@
+[Codex에 바로 전달할 작업 지시]
+================================
+
+다음 Repository의 `impl` 브랜치에서 Rust 소스의 Top-down 가독성 리팩토링을 수행하라.
+Repository: https://github.com/egod1537/troute
+기준 커밋(작성 당시): ea1f201ae5af79e71e13589188a7a4bb5a161727
+
+첨부된 01_GLOBAL_RULES.txt ~ 06_VALIDATION.txt를 읽고, 02 → 03 → 04 → 05 순서로
+독립적으로 작업하라. 각 단계 직후 검증하고, 이미 Top-down으로 읽히는 코드는 수정하지 말라.
+
+핵심 목표
+- 공개 진입점/대표 메서드가 먼저 나타나고, 세부 helper는 아래로 내려가는
+  소스 배치 및 함수 본문 읽기 흐름을 달성한다.
+- `src/http/handlers/optimization.rs`는 `optimize()` 등 Handler를 위에 두고,
+  `OptimizationContext`/`OptimizationOutcome` 내부 구현을 그 아래로 정리하라.
+- `src/server.rs`, `src/solver/orchestrator.rs`처럼 이미 facade/생명주기 구조가
+  잘 되어 있는 파일은 보존하라.
+- Runner/Service/Jobs/Storage 등 큰 파일은 API-first 순서가 유효한지 확인하고
+  필요할 때만 항목을 재배열하라.
+
+절대 제약
+- 동작, 공개 API, 가시성, 오류 메시지, HTTP 계약, solver 알고리즘, 테스트 불변.
+- 불필요한 새 struct/trait, DI 컨테이너, reactive 체이닝, 파일 분리 금지.
+- mod.rs 신규 생성 금지. 별도 tests.rs 구조 유지.
+- 사용자 워킹 트리 변경사항 보존.
+
+완료 시 변경 파일, 간단한 before/after 예시, 검증 결과, 남은 이슈를 보고하라.
+확신이 없는 위험한 변경은 건너뛰고 이유를 설명하라. 코드 줄 수나 변경량을
+최대화하지 말고 진입점 중심의 탐색성을 개선하는 것을 성공 기준으로 삼아라.

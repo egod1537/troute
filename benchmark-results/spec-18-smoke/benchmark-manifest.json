@@ -1,0 +1,28 @@
+{
+  "generated_at": "2026-10-31T05:07:33.030186500+00:00",
+  "commit_sha": "a418f96abf8424d64ed3da9aebcf86ced799041e",
+  "rustc_version": "rustc 1.99.1 (58cf8f9c3 2026-10-13)",
+  "target_arch": "x86_64",
+  "target_os": "windows",
+  "sizes": [
+    5
+  ],
+  "seeds": [
+    42
+  ],
+  "budgets_ms": [
+    1000,
+    5000
+  ],
+  "scenarios": [
+    "directed_time_windows",
+    "sparse_directed",
+    "zero_minute_arcs",
+    "partial_visit",
+    "infeasible"
+  ],
+  "mip_scip_requested": true,
+  "mip_scip_compiled": true,
+  "lkh3_executable": null,
+  "resource_accounting": "wall time and configured solver thread count are recorded; process CPU and peak RSS require an external benchmark harness"
+}

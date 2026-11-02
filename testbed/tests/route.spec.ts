@@ -55,6 +55,24 @@ const routeResult = {
     { order: 2, location_id: "C", arrival_time: "12:15" },
   ],
   total_travel_minutes: 70,
+  solver_telemetry: {
+    schema_version: 1,
+    policy: "CURRENT",
+    policy_version: "1",
+    total_budget_ms: 30000,
+    logical_cpu_slots: 4,
+    seed: 42,
+    trace_collected: true,
+    runs: [
+      { solver_id: "exact_bit_dp", run_id: 1, status: "COMPLETED", feasible: true, selected: true, wall_ms: 7, reserved_slot_ms: 7, configured_threads: 1, objective: { visited_optional_count: 0, visited_optional_priority: 0, start_policy: "FIXED", selected_start: 540, finish: 735, travel: 70, wait: 0 }, proof_status: "OPTIMAL" },
+    ],
+    events: [
+      { schema_version: 1, job_id: "route-immediate", event_sequence: 1, solver_id: "exact_bit_dp", run_id: 1, scheduler_policy: "CURRENT", event_type: "SCHEDULER_DECISION", elapsed_from_job_start_ms: 0, payload: { reason: "exact first" } },
+      { schema_version: 1, job_id: "route-immediate", event_sequence: 2, solver_id: "exact_bit_dp", run_id: 1, scheduler_policy: "CURRENT", event_type: "RUN_STARTED", elapsed_from_job_start_ms: 1, payload: {} },
+      { schema_version: 1, job_id: "route-immediate", event_sequence: 3, solver_id: "exact_bit_dp", run_id: 1, scheduler_policy: "CURRENT", event_type: "GLOBAL_BEST_UPDATED", elapsed_from_job_start_ms: 6, payload: { objective: { visited_optional_count: 0, visited_optional_priority: 0, start_policy: "FIXED", selected_start: 540, finish: 735, travel: 70, wait: 0 } } },
+      { schema_version: 1, job_id: "route-immediate", event_sequence: 4, solver_id: "exact_bit_dp", run_id: 1, scheduler_policy: "CURRENT", event_type: "RUN_FINISHED", elapsed_from_job_start_ms: 8, payload: { status: "COMPLETED", wall_ms: 7, configured_threads: 1 } },
+    ],
+  },
   solver_candidates: [
     {
       strategy: "exact_bit_dp",
@@ -207,6 +225,9 @@ test.beforeEach(async ({ page }) => {
   await page.route("**/api/integration/jobs?limit=50", (route) =>
     route.fulfill({ json: { jobs: [] } }),
   );
+  await page.route("**/api/integration/solver-capabilities", (route) =>
+    route.fulfill({ json: { schema_version: 1, default_policy: "CURRENT", experiment_override_enabled: true, limits: { max_total_budget_ms: 30000, max_logical_cpu_slots: 4, max_trace_events: 10000 }, solvers: [{ id: "exact_bit_dp", name: "Exact Bit DP", family: "EXACT", capabilities: {}, execution_model: "IN_PROCESS", supported_size: { minimum: 2, maximum: 15 }, configured_threads: 1, resource_cost_hint: { logical_cpu_slots: 1, native_threads: 1 } }], policies: [] } }),
+  );
 });
 
 async function openJobDialog(page: Page, jobId?: string) {
@@ -299,6 +320,11 @@ test("job is inserted and selected before the request completes, then succeeds",
   await expect(row).toHaveAttribute("data-status", "completed");
   await expect(row).toContainText("완료");
   await expect(page.getByLabel("방문 순서")).toHaveText("A → B → C");
+  await expect(page.getByRole("heading", { name: "결과 시각화" })).toBeVisible();
+  await expect(page.getByLabel("경로 요약 지표")).toContainText("70분 이동");
+  await expect(page.getByLabel("입력 경로")).toHaveText("Start → Waypoint → Destination");
+  await expect(page.getByLabel("최적화 결과 경로")).toHaveText("Start → Waypoint → Destination");
+  await expect(page.getByLabel("방문 타임라인")).toContainText("Waypoint");
   await expect(page.locator(".route-summary").getByRole("table")).toContainText("09:25");
   await page.getByRole("button", { name: "알고리즘 비교" }).click();
   const benchmark = page.getByRole("dialog", { name: "Solver Benchmark" });
@@ -336,7 +362,7 @@ test("job is inserted and selected before the request completes, then succeeds",
   await expect(benchmark.getByText("55.6%", { exact: true })).toBeVisible();
   await expect(benchmark.getByText("Location Count", { exact: true })).toBeVisible();
   await expect(benchmark.getByText("Time Slot Size", { exact: true })).toBeVisible();
-  await expect(benchmark.getByText("10 min", { exact: true })).toBeVisible();
+  await expect(benchmark.getByText("1 min", { exact: true })).toBeVisible();
   await expect(benchmark.getByLabel("Exact Bit DP Route")).toHaveText("A → B → C");
   await expect(benchmark.getByRole("heading", { name: "Objective" })).toBeVisible();
   await benchmark.getByRole("button", { name: "Raw Diagnostics" }).click();
@@ -433,7 +459,21 @@ test("job is inserted and selected before the request completes, then succeeds",
     await expect(benchmark.getByRole("heading", { name: "Search Statistics" })).toBeVisible();
     await expect(benchmark.getByRole("heading", { name: "Route Comparison" })).toBeVisible();
   }
+  await navigation.getByRole("button", { name: "Solver Table" }).click();
+  await expect(benchmark.getByRole("heading", { name: "Solver Comparison" })).toBeVisible();
+  await expect(benchmark.getByRole("table")).toContainText("exact_bit_dp");
+  await navigation.getByRole("button", { name: "Scheduling Timeline" }).click();
+  await expect(benchmark.getByRole("heading", { name: "Scheduling Timeline" })).toBeVisible();
+  await expect(benchmark.getByLabel("Solver scheduling Gantt timeline")).toBeVisible();
+  await navigation.getByRole("button", { name: "Anytime Quality" }).click();
+  await expect(benchmark.getByRole("heading", { name: "Anytime Performance" })).toBeVisible();
+  await expect(benchmark.getByLabel(/best-so-far step chart/)).toBeVisible();
   await benchmark.getByRole("button", { name: "Close" }).click();
+  await page.getByRole("button", { name: "정책 실험" }).click();
+  const experiment = page.getByRole("dialog", { name: "Portfolio Experiment Dashboard" });
+  await expect(experiment.getByRole("heading", { name: "Policy experiments" })).toBeVisible();
+  await expect(experiment.getByRole("table")).toContainText("CURRENT");
+  await experiment.getByRole("button", { name: "Close" }).click();
   await expect(page.getByText("총 이동 시간", { exact: true })).toBeVisible();
   await expect(page.locator(".route-overview strong")).toHaveText("70분");
   await expect(page.getByText("HTTP 200", { exact: true })).toBeVisible();
@@ -445,7 +485,116 @@ test("job is inserted and selected before the request completes, then succeeds",
   await expect(page.getByRole("button", { name: "복사됨" })).toBeVisible();
 });
 
-test("form edits directed matrix, resizes with locations, and exposes five presets", async ({
+test("Seoul presets render a coordinate route map and localized timeline", async ({
+  page,
+}) => {
+  await page.route("**/api/fixture-route", async (route) => {
+    const request = route.request().postDataJSON();
+    expect(request.country_code).toBe("KR");
+    expect(request.locations).toHaveLength(3);
+    expect(request.locations.map((location: { id: string }) => location.id)).toEqual([
+      "seoul-station",
+      "gangnam-station",
+      "hongik-university-station",
+    ]);
+    await route.fulfill({
+      json: {
+        route: [
+          { order: 0, location_id: "seoul-station", arrival_time: "09:00", departure_time: "09:00", wait_minutes: 0, stay_minutes: 0 },
+          { order: 1, location_id: "gangnam-station", arrival_time: "09:24", service_start_time: "09:24", departure_time: "09:54", wait_minutes: 0, stay_minutes: 30 },
+          { order: 2, location_id: "hongik-university-station", arrival_time: "10:24", service_start_time: "10:24", wait_minutes: 0, stay_minutes: 0 },
+        ],
+        total_travel_minutes: 54,
+        start_policy: "EARLIEST",
+        selected_start_time: "09:00",
+        country_code: "KR",
+        mode: "TRANSIT",
+      },
+    });
+  });
+  await page.goto("/");
+  const { dialog } = await openJobDialog(page);
+  await dialog.getByRole("button", { name: "서울 빠른 확인 · 3", exact: true }).click();
+  await page.getByRole("button", { name: "교체", exact: true }).click();
+  await dialog.getByRole("button", { name: "Job 생성" }).click();
+
+  await expect(page.getByLabel("서울 입력 경로 지도")).toBeVisible();
+  await expect(page.getByLabel("서울 최적화 결과 지도")).toBeVisible();
+  await expect(page.locator(".route-map-point")).toHaveCount(6);
+  await expect(page.getByLabel("방문 타임라인")).toContainText("서울역");
+  await expect(page.getByLabel("방문 타임라인")).toContainText("강남역");
+  await expect(page.getByLabel("방문 타임라인")).toContainText("홍대입구역");
+  await expect(page.getByLabel("경로 요약 지표")).toContainText("54분 이동");
+});
+
+test("the infeasible all-visit Seoul preset returns and visualizes a partial route", async ({
+  page,
+}) => {
+  let submittedJobId = "";
+  await page.route("**/api/fixture-route", async (route) => {
+    const request = route.request().postDataJSON();
+    submittedJobId = request.job_id;
+    expect(request.visit_policy).toBe("BEST_EFFORT_ON_FAILURE");
+    expect(request.start_policy).toBe("FIXED");
+    expect(request.start_time).toBe("09:00");
+    expect(request.locations).toHaveLength(5);
+    expect(request.locations.map((location: { required: boolean }) => location.required)).toEqual([
+      true,
+      false,
+      false,
+      false,
+      true,
+    ]);
+    expect(
+      request.locations
+        .slice(1, -1)
+        .map((location: { close_time: string; stay_minutes: number }) => [location.close_time, location.stay_minutes]),
+    ).toEqual([
+      ["10:30", 60],
+      ["10:30", 60],
+      ["10:30", 60],
+    ]);
+    await route.fulfill({
+      json: {
+        route: [
+          { order: 0, location_id: "seoul-station", arrival_time: "09:00", departure_time: "09:00", wait_minutes: 0, stay_minutes: 0 },
+          { order: 1, location_id: "gyeongbokgung-palace", arrival_time: "09:20", departure_time: "10:20", wait_minutes: 0, stay_minutes: 60 },
+          { order: 2, location_id: "gangnam-station", arrival_time: "10:50", departure_time: "10:50", wait_minutes: 0, stay_minutes: 0 },
+        ],
+        total_travel_minutes: 50,
+        start_policy: "FIXED",
+        selected_start_time: "09:00",
+        partial: true,
+        visited_count: 3,
+        skipped_locations: [
+          { location_id: "myeongdong-station", reason: "NOT_SELECTED_DUE_TO_CONSTRAINTS" },
+          { location_id: "hongik-university-station", reason: "NOT_SELECTED_DUE_TO_CONSTRAINTS" },
+        ],
+        result_quality: "PROVEN",
+        country_code: "KR",
+        mode: "TRANSIT",
+      },
+    });
+  });
+
+  await page.goto("/");
+  const { dialog } = await openJobDialog(page);
+  await dialog.getByRole("button", { name: "서울 전체 방문 불가 · 5", exact: true }).click();
+  await page.getByRole("button", { name: "교체", exact: true }).click();
+  await expect(dialog.getByRole("group", { name: "Visit policy" }).getByRole("radio", { name: "불가능하면 일부 생략" })).toBeChecked();
+  await expect(dialog.getByLabel("2번 장소 필수")).not.toBeChecked();
+  await dialog.getByRole("button", { name: "Job 생성" }).click();
+
+  await expect(page.getByRole("option", { name: new RegExp(submittedJobId) })).toHaveAttribute("data-status", "completed");
+  await expect(page.locator(".route-map.input .route-map-point")).toHaveCount(5);
+  await expect(page.locator(".route-map.result .route-map-point")).toHaveCount(3);
+  await expect(page.getByLabel("입력 경로", { exact: true })).toContainText("명동역");
+  await expect(page.getByLabel("최적화 결과 경로", { exact: true })).not.toContainText("명동역");
+  await expect(page.getByLabel("Raw API 응답")).toContainText('"partial": true');
+  await expect(page.getByLabel("Raw API 응답")).toContainText("myeongdong-station");
+});
+
+test("form edits directed matrix, resizes with locations, and exposes Seoul-focused presets", async ({
   page,
 }) => {
   let presetMatrixRequests = 0;
@@ -476,25 +625,25 @@ test("form edits directed matrix, resizes with locations, and exposes five prese
   await dialog.getByRole("button", { name: "D 장소 삭제" }).click();
   await expect(dialog.locator(".matrix-input-table tbody input")).toHaveCount(9);
 
-  for (const name of ["Tokyo 3", "Tokyo 5", "Tokyo 10", "Seoul 5", "Synthetic 8"]) {
+  for (const name of ["서울 빠른 확인 · 3", "서울 핵심 명소 · 5", "서울 시간 제약 · 5", "서울 전체 방문 불가 · 5", "서울 종일 투어 · 10", "Synthetic 8"]) {
     await expect(dialog.getByRole("button", { name, exact: true })).toBeVisible();
   }
-  await expect(dialog.getByRole("button", { name: "Seoul 3", exact: true })).toHaveCount(0);
+  await expect(dialog.getByRole("button", { name: /Tokyo/i })).toHaveCount(0);
 
-  await dialog.getByRole("button", { name: "Tokyo 3", exact: true }).click();
-  await expect(page.getByText("현재 입력을 Tokyo 3 preset으로 교체할까요?")).toBeVisible();
+  await dialog.getByRole("button", { name: "서울 빠른 확인 · 3", exact: true }).click();
+  await expect(page.getByText("현재 입력을 서울 빠른 확인 · 3 preset으로 교체할까요?")).toBeVisible();
   await page.getByRole("button", { name: "취소", exact: true }).last().click();
   await expect(dialog.getByLabel("A에서 B 이동 시간")).toHaveValue("37");
   expect(presetMatrixRequests).toBe(0);
 
-  await dialog.getByRole("button", { name: "Tokyo 5", exact: true }).click();
-  await expect(page.getByText("현재 입력을 Tokyo 5 preset으로 교체할까요?")).toBeVisible();
+  await dialog.getByRole("button", { name: "서울 핵심 명소 · 5", exact: true }).click();
+  await expect(page.getByText("현재 입력을 서울 핵심 명소 · 5 preset으로 교체할까요?")).toBeVisible();
   await page.getByRole("button", { name: "교체", exact: true }).click();
   expect(presetMatrixRequests).toBe(0);
   await expect(dialog.locator(".location-input-table tbody tr")).toHaveCount(5);
   await expect(dialog.getByLabel("1번 장소 Place ID")).not.toHaveValue("");
   await expect(dialog.locator(".matrix-input-table tbody input")).toHaveCount(25);
-  await expect(dialog.getByLabel("tokyo-station에서 shibuya-station 이동 시간")).not.toHaveValue("");
+  await expect(dialog.getByLabel("seoul-station에서 gangnam-station 이동 시간")).not.toHaveValue("");
   await dialog.getByRole("button", { name: "검증" }).click();
   await expect(dialog.getByText("유효함", { exact: true })).toBeVisible();
 
@@ -510,7 +659,7 @@ test("form edits directed matrix, resizes with locations, and exposes five prese
   await expect(dialog.getByText("유효함", { exact: true })).toBeVisible();
   expect(presetMatrixRequests).toBe(0);
 
-  for (const [name, size] of [["Tokyo 3", 3], ["Tokyo 10", 10], ["Seoul 5", 5]] as const) {
+  for (const [name, size] of [["서울 빠른 확인 · 3", 3], ["서울 시간 제약 · 5", 5], ["서울 전체 방문 불가 · 5", 5], ["서울 종일 투어 · 10", 10]] as const) {
     await dialog.getByRole("button", { name, exact: true }).click();
     await expect(page.getByText(`현재 입력을 ${name} preset으로 교체할까요?`)).toBeVisible();
     await page.getByRole("button", { name: "교체", exact: true }).click();
@@ -672,7 +821,7 @@ test("preset changes and dialog close abort active matrix requests", async ({
 
   await dialog.getByRole("button", { name: "tcache에서 가져오기" }).click();
   await expect.poll(() => matrixRequests).toBe(1);
-  await dialog.getByRole("button", { name: "Tokyo 5", exact: true }).click();
+  await dialog.getByRole("button", { name: "서울 핵심 명소 · 5", exact: true }).click();
   await expect.poll(() => abortedMatrixRequests).toBe(1);
   releaseResponses.shift()?.();
   await page.getByRole("button", { name: "취소", exact: true }).last().click();

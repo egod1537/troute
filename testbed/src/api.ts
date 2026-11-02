@@ -7,6 +7,16 @@ export const ROUTE_PATH = (
 
 export type TravelMode = "TRANSIT" | "DRIVING" | "WALKING" | "BICYCLING";
 export type StartPolicy = "FIXED" | "EARLIEST" | "LATEST";
+export type VisitPolicy = "ALL_REQUIRED" | "BEST_EFFORT_ON_FAILURE";
+export type PortfolioPolicy =
+  | "CURRENT"
+  | "PARALLEL_ALL"
+  | "ROUND_ROBIN"
+  | "WEIGHTED_FAIR"
+  | "RACING"
+  | "UCB1"
+  | "THOMPSON_SAMPLING"
+  | "INSTANCE_AWARE";
 export type RouteProviderName =
   | "google"
   | "kakao-mobility"
@@ -24,15 +34,29 @@ export interface RouteInput {
     open_time: string;
     close_time: string;
     stay_minutes: number;
+    required?: boolean;
+    priority?: number;
   }[];
+  visit_policy?: VisitPolicy;
   start_policy?: StartPolicy;
   start_time?: string;
+  travel_date?: string;
+  time_zone?: string;
   travel_mode?: TravelMode;
   country_code?: string;
   route_provider?: RouteProviderName;
   travel_time_matrix?: number[][];
+  sparse_travel_time_matrix?: (number | null)[][];
   debug?: {
     min_job_duration_ms?: number;
+  };
+  portfolio_experiment?: {
+    policy: PortfolioPolicy;
+    total_budget_ms?: number;
+    logical_cpu_slots?: number;
+    seed?: number;
+    solver_ids?: string[];
+    detailed_trace?: boolean;
   };
 }
 
@@ -49,13 +73,33 @@ export interface RouteResponse {
   total_travel_minutes: number;
   start_policy?: StartPolicy;
   selected_start_time?: string;
+  partial?: boolean;
+  visited_count?: number;
+  skipped_locations?: {
+    location_id: string;
+    reason: "NOT_SELECTED_DUE_TO_CONSTRAINTS";
+  }[];
+  result_quality?: "PROVEN" | "BEST_FOUND";
   selected_provider?: RouteProviderName;
   provider_selection_reason?: string;
   provider_selection_source?: string;
   country_code?: string;
   mode?: TravelMode;
+  matrix_departure_time?: string;
+  matrix_time_zone?: string;
+  time_dependent_revalidation?: {
+    attempted: boolean;
+    applied: boolean;
+    revalidated_leg_count: number;
+    changed_leg_count: number;
+    max_delta_minutes: number;
+    schedule_feasible?: boolean;
+    warning_code?: string;
+    warning_detail?: string;
+  };
   solver_candidates?: SolverCandidate[];
   solver_diagnostics?: SolverDiagnostics;
+  solver_telemetry?: PortfolioTelemetrySummary;
 }
 
 export interface RouteProviderPolicyDiagnostics {
@@ -99,6 +143,8 @@ export interface SolverDiagnostics {
 
 export interface SolverCandidate {
   strategy: string;
+  solver_id?: string;
+  run_id?: number;
   best: boolean;
   route: string[];
   feasible: boolean;
@@ -108,9 +154,24 @@ export interface SolverCandidate {
     finish_time: string;
     travel_minutes: number;
     wait_minutes: number;
+    visited_optional_count?: number;
+    visited_optional_priority?: number;
   };
   elapsed_ms: number;
   metadata: {
+    job_queued_at_ms?: number;
+    job_started_at_ms?: number;
+    job_finished_at_ms?: number;
+    outcome?: "COMPLETED" | "TIMEOUT" | "CANCELLED" | "UNSUPPORTED" | "FAILED" | "INFEASIBLE";
+    proof_status?: "OPTIMAL" | "INFEASIBLE" | "FEASIBLE" | "UNKNOWN";
+    objective_phase?: string;
+    best_bound?: number;
+    relative_gap_ppm?: number;
+    thread_count?: number;
+    source_version?: string;
+    native_status?: string;
+    child_process_id?: number;
+    exit_code?: number;
     state_count?: number;
     frontier_state_count?: number;
     frontier_cell_count?: number;
@@ -164,6 +225,9 @@ export interface SolverCandidate {
     swap_move_count?: number;
     relocate_move_count?: number;
     two_opt_move_count?: number;
+    insert_optional_move_count?: number;
+    remove_optional_move_count?: number;
+    replace_optional_move_count?: number;
     accepted_worse_moves?: number;
     infeasible_candidates?: number;
     accepted_infeasible_moves?: number;
@@ -175,7 +239,162 @@ export interface SolverCandidate {
     improved_global_best?: boolean;
     timed_out: boolean;
     error?: string;
+    queued_ms?: number;
+    reserved_slot_ms?: number;
+    cpu_ms?: number;
+    peak_rss_bytes?: number;
+    memory_hint_bytes?: number;
+    scheduler_reason?: string;
+    scheduler_score?: string;
   };
+}
+
+export interface ObjectiveVector {
+  visited_optional_count: number;
+  visited_optional_priority: number;
+  start_policy: StartPolicy;
+  selected_start: number;
+  finish: number;
+  travel: number;
+  wait: number;
+}
+
+export type SolverTelemetryEventType =
+  | "RUN_QUEUED"
+  | "RUN_STARTED"
+  | "FIRST_FEASIBLE"
+  | "INCUMBENT_IMPROVED"
+  | "BOUND_UPDATED"
+  | "RUN_FINISHED"
+  | "RUN_TIMED_OUT"
+  | "RUN_CANCELLED"
+  | "RUN_FAILED"
+  | "GLOBAL_BEST_UPDATED"
+  | "SCHEDULER_DECISION"
+  | "RESOURCE_ALLOCATED"
+  | "RESOURCE_RELEASED"
+  | "ARM_ELIMINATED"
+  | "PROGRESS";
+
+export interface SolverTelemetryEvent {
+  schema_version: number;
+  job_id: string;
+  event_sequence: number;
+  solver_id?: string;
+  run_id?: number;
+  scheduler_policy: PortfolioPolicy;
+  event_type: SolverTelemetryEventType;
+  elapsed_from_job_start_ms: number;
+  recorded_at_unix_ms?: number;
+  payload: {
+    status?: string;
+    reason?: string;
+    message?: string;
+    objective?: ObjectiveVector;
+    previous_objective?: ObjectiveVector;
+    route_fingerprint?: string;
+    source_proof_status?: string;
+    wall_ms?: number;
+    cpu_ms?: number;
+    peak_rss_bytes?: number;
+    memory_hint_bytes?: number;
+    reserved_slot_ms?: number;
+    configured_threads?: number;
+    logical_cpu_slots?: number;
+    measured?: boolean;
+    metric_source?: string;
+    phase?: string;
+    native_bound?: string;
+    relative_gap_ppm?: number;
+    reward_ppm?: number;
+    selected_arm?: string;
+    decision_score?: string;
+    budget_remaining_ms?: number;
+    state_fingerprint?: string;
+    policy_version?: string;
+    sample_count?: number;
+    estimated_budget_saved_ms?: number;
+  };
+}
+
+export interface SolverRunSummary {
+  solver_id: string;
+  run_id: number;
+  status: string;
+  feasible: boolean;
+  selected: boolean;
+  wall_ms: number;
+  cpu_ms?: number;
+  peak_rss_bytes?: number;
+  memory_hint_bytes?: number;
+  reserved_slot_ms: number;
+  configured_threads: number;
+  objective?: ObjectiveVector;
+  proof_status?: string;
+  seed?: number;
+}
+
+export interface PortfolioTelemetrySummary {
+  schema_version: number;
+  policy: PortfolioPolicy;
+  policy_version: string;
+  total_budget_ms: number;
+  logical_cpu_slots: number;
+  seed: number;
+  instance_rule_id?: string;
+  instance_model_version?: string;
+  instance_feature_schema_version?: number;
+  instance_selected_solver_ids?: string[];
+  instance_weight_ppm?: Record<string, number>;
+  instance_fallback_reasons?: string[];
+  instance_features?: Record<string, string>;
+  trace_collected: boolean;
+  runs: SolverRunSummary[];
+  events: SolverTelemetryEvent[];
+}
+
+export interface SolverCapabilities {
+  schema_version: number;
+  default_policy: PortfolioPolicy;
+  experiment_override_enabled: boolean;
+  limits: {
+    max_total_budget_ms: number;
+    max_logical_cpu_slots: number;
+    max_trace_events: number;
+  };
+  solvers: {
+    id: string;
+    name: string;
+    family: string;
+    version?: string;
+    capabilities: Record<string, boolean>;
+    execution_model: string;
+    supported_size: { minimum: number; maximum?: number };
+    configured_threads: number;
+    resource_cost_hint: {
+      logical_cpu_slots: number;
+      native_threads: number;
+      memory_bytes?: number;
+    };
+    unavailable_reason?: string;
+  }[];
+  policies: {
+    id: PortfolioPolicy;
+    name: string;
+    version: string;
+    preemptive: boolean;
+    description: string;
+  }[];
+}
+
+export interface SolverTelemetryPage {
+  schema_version: number;
+  job_id: string;
+  collected: boolean;
+  summary?: PortfolioTelemetrySummary;
+  events: SolverTelemetryEvent[];
+  next_after: number;
+  has_more: boolean;
 }
 
 export type StoredJobStatus =
@@ -414,8 +633,16 @@ export function parseInput(text: string): RouteInput {
     );
   }
   const locationCount = input.locations.length;
-  const hasSuppliedMatrix = input.travel_time_matrix !== undefined;
-  if (hasSuppliedMatrix) {
+  if (
+    input.travel_time_matrix !== undefined &&
+    input.sparse_travel_time_matrix !== undefined
+  ) {
+    throw new Error("travel_time_matrix와 sparse_travel_time_matrix는 동시에 보낼 수 없습니다.");
+  }
+  const hasSuppliedMatrix =
+    input.travel_time_matrix !== undefined ||
+    input.sparse_travel_time_matrix !== undefined;
+  if (input.travel_time_matrix !== undefined) {
     if (
       !Array.isArray(input.travel_time_matrix) ||
       input.travel_time_matrix.length !== locationCount
@@ -437,6 +664,30 @@ export function parseInput(text: string): RouteInput {
       if (row[rowIndex] !== 0) {
         throw new Error(
           `travel_time_matrix[${rowIndex}][${rowIndex}]는 0이어야 합니다.`,
+        );
+      }
+    });
+  }
+  if (input.sparse_travel_time_matrix !== undefined) {
+    const matrix = input.sparse_travel_time_matrix;
+    if (!Array.isArray(matrix) || matrix.length !== locationCount) {
+      throw new Error(
+        `sparse_travel_time_matrix는 locations와 같은 ${locationCount}x${locationCount} 크기여야 합니다.`,
+      );
+    }
+    matrix.forEach((row, rowIndex) => {
+      if (
+        !Array.isArray(row) ||
+        row.length !== locationCount ||
+        !row.every((value) => value === null || unsigned(value))
+      ) {
+        throw new Error(
+          `sparse_travel_time_matrix[${rowIndex}]는 0 이상의 정수 또는 null ${locationCount}개를 포함해야 합니다.`,
+        );
+      }
+      if (row[rowIndex] !== 0) {
+        throw new Error(
+          `sparse_travel_time_matrix[${rowIndex}][${rowIndex}]는 0이어야 합니다.`,
         );
       }
     });
@@ -615,6 +866,45 @@ export function getRouteProviderPolicy(
   return integrationJson("/route/providers/policy", signal);
 }
 
+export function getSolverCapabilities(
+  signal?: AbortSignal,
+): Promise<SolverCapabilities> {
+  return integrationJson("/integration/solver-capabilities", signal);
+}
+
+export function getSolverTelemetry(
+  jobId: string,
+  after = 0,
+  limit = 500,
+  signal?: AbortSignal,
+): Promise<SolverTelemetryPage> {
+  return integrationJson(
+    `/integration/jobs/${encodeURIComponent(jobId)}/solver-telemetry?after=${after}&limit=${limit}`,
+    signal,
+  );
+}
+
+export function subscribeToSolverEvents(
+  jobId: string,
+  after: number,
+  onEvent: (event: SolverTelemetryEvent) => void,
+  onDisconnect: () => void,
+): () => void {
+  const source = new EventSource(
+    `${API_BASE}/integration/jobs/${encodeURIComponent(jobId)}/solver-events?after=${after}`,
+  );
+  source.addEventListener("solver_event", ((message: MessageEvent<string>) => {
+    try {
+      const event = JSON.parse(message.data) as SolverTelemetryEvent;
+      if (event.event_sequence === Number(message.lastEventId)) onEvent(event);
+    } catch {
+      // Cursor GET remains the recovery path for malformed notifications.
+    }
+  }) as EventListener);
+  source.onerror = onDisconnect;
+  return () => source.close();
+}
+
 export async function runRoute(
   input: RouteInput,
 ): Promise<{ response: ApiResponse; route: RouteResponse }> {
@@ -629,21 +919,24 @@ export async function runRoute(
 export async function fetchTravelTimeMatrix(
   input: RouteInput,
   signal?: AbortSignal,
-): Promise<number[][]> {
+): Promise<(number | null)[][]> {
   const response = await request("/integration/matrix", {
     ...input,
     travel_time_matrix: undefined,
+    sparse_travel_time_matrix: undefined,
   }, signal);
   if (
     !object(response.body) ||
     !Array.isArray(response.body.travel_time_matrix) ||
     !response.body.travel_time_matrix.every(
-      (row) => Array.isArray(row) && row.every(unsigned),
+      (row) =>
+        Array.isArray(row) &&
+        row.every((value) => value === null || unsigned(value)),
     )
   ) {
     throw new ApiError("매트릭스 응답 형식이 올바르지 않습니다.", response);
   }
-  return response.body.travel_time_matrix as number[][];
+  return response.body.travel_time_matrix as (number | null)[][];
 }
 
 async function integrationJson<T>(path: string, signal?: AbortSignal): Promise<T> {

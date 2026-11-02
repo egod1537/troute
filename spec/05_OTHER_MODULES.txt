@@ -1,0 +1,47 @@
+[작업 4] Service / API / Jobs / Storage / Routing 등 나머지 모듈
+================================================================
+
+우선 점검 대상 (현재 impl 브랜치에서 큰 파일 위주)
+- src/service.rs
+- src/api.rs
+- src/jobs.rs
+- src/storage.rs
+- src/failure.rs
+- src/routing/provider_policy.rs, src/routing/matrix_builder.rs
+- src/config.rs
+- src/bin/algorithm_validation.rs, src/bin/portfolio_benchmark.rs
+- 필요 시 src/domain.rs, src/schedule.rs, src/observation.rs
+
+정렬 방향
+1. service.rs: `RouteOptimizationService`의 공개 constructor/execute 계열 API와
+   핵심 파이프라인이 먼저 드러나도록 한다. PreparedOptimization 등 내부 데이터는
+   실제 이해에 필요한 위치에 유지하며 순서만 맞춰 정리한다.
+2. jobs.rs: 외부 JobRunner/JobExecutor API 및 submit/cancel/query 진입점을 우선,
+   private 실행/영속화/상태 전이 helper를 아래에 배치한다.
+3. storage.rs: 공개 저장소 타입/trait 및 주요 입출력 API를 우선,
+   파일 포맷, 내부 동기화, 변환 helper를 아래에 둔다.
+4. api.rs: 공개 요청/응답 타입과 직렬화 계약은 응집성을 유지하고,
+   내부 검증/변환 구현이 외부 API 설명을 가리지 않도록 배치.
+5. failure.rs: 공개 실패 분석 API의 사용 흐름을 먼저 보여주고,
+   세부 suggestion ranking/검증 helper는 그 아래에 둔다.
+6. routing/**: Provider/Policy 선택 진입점을 먼저, matrix building 세부 구현은 나중에.
+7. config.rs: 외부 설정의 생성 및 검증 API부터 이해할 수 있게 한다.
+8. bin/**: `main()` 또는 대표 command 실행 흐름을 import/선언 다음에 먼저 배치하고,
+   parsing/reporting/benchmark helper를 아래에 둔다.
+
+비대해 보이는 파일에 대한 판단 기준
+- 파일의 대표 기능이 이미 명확하고 내부 함수들의 책임이 응집되어 있으면
+  파일을 나눌 필요 없음. 함수/impl 순서만 바꿔도 충분하다.
+- 실제로 두 개의 독립된 책임이 있고 서로의 내부 타입에 의존하지 않는다면
+  '추가 모듈 분리 제안'을 결과 보고서에 남길 수 있다. 자동 대규모 모듈 분리 금지.
+- 요청한 리팩토링은 Top-down 배치가 목적이므로 API 분해/새 계층 설계는 별도 작업으로 둔다.
+
+계약 보존
+- public exports, 구조체 필드, serde/JSON naming, error mapping, 저장 포맷
+- job recovery / 상태 전이, routing fallback, 캐싱/limit 설정
+- 벤치마크 출력 포맷, 커맨드 옵션, 환경변수 해석, 순서
+- 기존 tests.rs와 tests/ 통합 테스트의 검증 의미
+
+완료
+- 자주 읽는 큰 파일을 위에서 아래로 따라가면 외부 API → 핵심 처리 → 내부 구현이 보인다.
+- 이미 정돈된 파일은 변경하지 않는다.

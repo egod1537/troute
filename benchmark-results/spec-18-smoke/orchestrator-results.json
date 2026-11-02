@@ -1,0 +1,29 @@
+[
+  {
+    "n": 5,
+    "seed": 42,
+    "strategy": "exact_bit_dp",
+    "feasible": true,
+    "objective": 17,
+    "latest_start": 1403,
+    "finish": 1430,
+    "travel": 17,
+    "wait": 0,
+    "elapsed_ms": 0.2589,
+    "generated_states": 16,
+    "frontier_states": 14,
+    "cluster_count": null,
+    "iteration_count": null,
+    "accepted_moves": null,
+    "improved_moves": null,
+    "initial_score": null,
+    "objective_gap": null,
+    "latest_start_gap": null,
+    "finish_gap": null,
+    "travel_gap": null,
+    "wait_gap": null,
+    "selected": true,
+    "timed_out": false,
+    "error": null
+  }
+]

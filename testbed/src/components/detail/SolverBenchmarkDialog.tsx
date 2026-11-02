@@ -10,29 +10,23 @@ import {
   NonIdealState,
   Tag,
 } from "@blueprintjs/core";
-import type { SolverCandidate, SolverDiagnostics } from "../../api";
+import { getSolverCapabilities, type PortfolioTelemetrySummary, type SolverCandidate, type SolverCapabilities, type SolverDiagnostics, type SolverTelemetryEvent } from "../../api";
+import { AnytimePerformance } from "../solver-benchmark/AnytimePerformance";
+import { SchedulingTimeline } from "../solver-benchmark/SchedulingTimeline";
+import { SolverComparison } from "../solver-benchmark/SolverComparison";
 
 interface SolverBenchmarkDialogProps {
   candidates: SolverCandidate[];
   diagnostics?: SolverDiagnostics;
+  telemetry?: PortfolioTelemetrySummary;
+  events?: SolverTelemetryEvent[];
   locationCount: number;
   dark: boolean;
   isOpen: boolean;
   onClose: () => void;
 }
 
-type BenchmarkView =
-  | "overview"
-  | "exact"
-  | "clustered"
-  | "greedy"
-  | "mst"
-  | "christofides"
-  | "sa-greedy"
-  | "sa-mst"
-  | "sa-christofides"
-  | "sa-clustered"
-  | "sa-warm-start";
+type BenchmarkView = string;
 
 interface StrategyNavigationItem {
   id: BenchmarkView;
@@ -123,7 +117,7 @@ function ExactBitDpDetail({ candidates, locationCount }: { candidates: SolverCan
     ["Frontier Cells", candidate.metadata.frontier_cell_count?.toLocaleString() ?? "—"],
     ["Pruning Ratio", pruningRatio],
     ["Location Count", locationCount.toLocaleString()],
-    ["Time Slot Size", "10 min"],
+    ["Time Slot Size", "1 min"],
   ];
   const objective = [
     ["Selected Start", selectedStart(candidate)],
@@ -511,10 +505,24 @@ function StrategyDetail({ item, candidates }: { item: StrategyNavigationItem; ca
   );
 }
 
-export function SolverBenchmarkDialog({ candidates, diagnostics, locationCount, dark, isOpen, onClose }: SolverBenchmarkDialogProps) {
+export function SolverBenchmarkDialog({ candidates, diagnostics, telemetry, events = [], locationCount, dark, isOpen, onClose }: SolverBenchmarkDialogProps) {
   const [selectedView, setSelectedView] = useState<BenchmarkView>("overview");
+  const [capabilities, setCapabilities] = useState<SolverCapabilities>();
   useEffect(() => { if (isOpen) setSelectedView("overview"); }, [isOpen]);
+  useEffect(() => {
+    if (!isOpen) return;
+    const controller = new AbortController();
+    void getSolverCapabilities(controller.signal).then(setCapabilities).catch(() => undefined);
+    return () => controller.abort();
+  }, [isOpen]);
   const selectedItem = useMemo(() => STRATEGY_NAVIGATION.find((item) => item.id === selectedView), [selectedView]);
+  const genericItems = useMemo<StrategyNavigationItem[]>(() => {
+    const known = new Set(STRATEGY_NAVIGATION.flatMap((item) => candidates.filter((candidate) => item.matches(candidate.strategy)).map((candidate) => candidate.solver_id ?? candidate.strategy)));
+    return [...new Set(candidates.map((candidate) => candidate.solver_id ?? candidate.strategy))]
+      .filter((id) => !known.has(id))
+      .map((id) => ({ id: `solver:${id}`, label: capabilities?.solvers.find((solver) => solver.id === id)?.name ?? id, matches: (strategy: string) => candidates.some((candidate) => candidate.strategy === strategy && (candidate.solver_id ?? candidate.strategy) === id) }));
+  }, [candidates, capabilities]);
+  const genericSelected = genericItems.find((item) => item.id === selectedView);
 
   return (
     <Dialog className="solver-benchmark-dialog" isOpen={isOpen} onClose={onClose} portalClassName={dark ? Classes.DARK : undefined} title="Solver Benchmark" icon="comparison" canEscapeKeyClose>
@@ -522,15 +530,19 @@ export function SolverBenchmarkDialog({ candidates, diagnostics, locationCount, 
         <aside className="benchmark-sidebar">
           <nav aria-label="Solver Benchmark 탐색">
             <Button alignText="left" fill active={selectedView === "overview"} aria-current={selectedView === "overview" ? "page" : undefined} icon="dashboard" variant="minimal" onClick={() => setSelectedView("overview")}>Overview</Button>
+            <Button alignText="left" fill active={selectedView === "comparison"} icon="comparison" variant="minimal" onClick={() => setSelectedView("comparison")}>Solver Table</Button>
+            <Button alignText="left" fill active={selectedView === "timeline"} icon="timeline-events" variant="minimal" onClick={() => setSelectedView("timeline")}>Scheduling Timeline</Button>
+            <Button alignText="left" fill active={selectedView === "anytime"} icon="series-search" variant="minimal" onClick={() => setSelectedView("anytime")}>Anytime Quality</Button>
             <div className="benchmark-nav-divider" />
             {STRATEGY_NAVIGATION.map((item) => {
               const count = candidates.filter((candidate) => item.matches(candidate.strategy)).length;
               return <Button key={item.id} alignText="left" fill active={selectedView === item.id} aria-current={selectedView === item.id ? "page" : undefined} variant="minimal" onClick={() => setSelectedView(item.id)}>{item.label}{count > 0 && <Tag minimal round>{count}</Tag>}</Button>;
             })}
+            {genericItems.map((item) => <Button key={item.id} alignText="left" fill active={selectedView === item.id} variant="minimal" onClick={() => setSelectedView(item.id)}>{item.label}</Button>)}
           </nav>
         </aside>
         <main className="benchmark-content">
-          {selectedView === "overview" ? <Overview candidates={candidates} diagnostics={diagnostics} /> : selectedView === "exact" ? <ExactBitDpDetail candidates={candidates} locationCount={locationCount} /> : selectedView === "clustered" ? <ClusteredDetail candidates={candidates} /> : selectedView === "mst" ? <MstDoubleTreeDetail candidates={candidates} /> : selectedView === "christofides" ? <ChristofidesDetail candidates={candidates} /> : selectedView.startsWith("sa-") && selectedItem ? <SimulatedAnnealingDetail item={selectedItem} candidates={candidates} /> : selectedItem ? <StrategyDetail item={selectedItem} candidates={candidates} /> : null}
+          {selectedView === "overview" ? <Overview candidates={candidates} diagnostics={diagnostics} /> : selectedView === "comparison" ? <SolverComparison candidates={candidates} telemetry={telemetry} capabilities={capabilities} /> : selectedView === "timeline" ? <SchedulingTimeline telemetry={telemetry} events={events} /> : selectedView === "anytime" ? <AnytimePerformance telemetry={telemetry} events={events} /> : selectedView === "exact" ? <ExactBitDpDetail candidates={candidates} locationCount={locationCount} /> : selectedView === "clustered" ? <ClusteredDetail candidates={candidates} /> : selectedView === "mst" ? <MstDoubleTreeDetail candidates={candidates} /> : selectedView === "christofides" ? <ChristofidesDetail candidates={candidates} /> : selectedView.startsWith("sa-") && selectedItem ? <SimulatedAnnealingDetail item={selectedItem} candidates={candidates} /> : selectedItem ? <StrategyDetail item={selectedItem} candidates={candidates} /> : genericSelected ? <StrategyDetail item={genericSelected} candidates={candidates} /> : null}
         </main>
       </DialogBody>
     </Dialog>

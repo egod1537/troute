@@ -84,7 +84,12 @@ pub fn evaluate_solution_with_penalties(
         });
     }
 
-    let mut required_violations = solution.visit_order.len().abs_diff(location_count) as u32;
+    let all_required = input.problem.visit_policy() == crate::domain::VisitPolicy::AllRequired;
+    let mut required_violations = if all_required {
+        solution.visit_order.len().abs_diff(location_count) as u32
+    } else {
+        0
+    };
     let mut seen = vec![false; location_count];
     for &location in &solution.visit_order {
         if location >= location_count || seen[location] {
@@ -93,8 +98,15 @@ pub fn evaluate_solution_with_penalties(
             seen[location] = true;
         }
     }
-    required_violations =
-        required_violations.saturating_add(seen.iter().filter(|&&visited| !visited).count() as u32);
+    required_violations = required_violations.saturating_add(
+        input
+            .problem
+            .locations()
+            .iter()
+            .enumerate()
+            .filter(|(index, location)| location.required() && !seen[*index])
+            .count() as u32,
+    );
     if solution.visit_order.first() != Some(&input.problem.start_location_index()) {
         required_violations = required_violations.saturating_add(1);
     }
@@ -122,10 +134,12 @@ pub fn evaluate_solution_with_penalties(
         if from >= location_count || to >= location_count {
             continue;
         }
-        let travel = input
-            .matrix
-            .travel_minutes(from, to)
-            .expect("matrix size was validated");
+        let Some(travel) = input.matrix.travel_minutes(from, to) else {
+            // Keep unreachable routes in the heuristic search space, but make
+            // them infeasible and never invent a numeric travel-time sentinel.
+            required_violations = required_violations.saturating_add(1);
+            continue;
+        };
         travel_minutes = travel_minutes.saturating_add(travel);
         let arrival = time_slot.saturating_add(minutes_to_slot_ceil(travel));
         let location = &input.problem.locations()[to];

@@ -28,7 +28,10 @@ use troute::{
         PolicyRoutingProvider, RouteProviderPolicyResolver, RouteProviderRegistry, RoutingContext,
         RoutingError, RoutingProgressObserver, RoutingProvider,
     },
-    solver::{RouteSolver, SolverError, SolverInput, SolverSolution},
+    solver::{
+        RouteSolver, SolverError, SolverInput, SolverOrchestrator, SolverOrchestratorConfig,
+        SolverSolution,
+    },
     storage::{FileJobStore, FileJobTimelineStore, JobStatus, JobStore},
     ProgressStage, RouteOptimizationService,
 };
@@ -230,6 +233,17 @@ fn app_with_file_storage(data_dir: &std::path::Path) -> Router {
     http::router_with_storage(
         RouteOptimizationService::new(DevelopmentRoutingProvider, DevelopmentRouteSolver),
         Some(observation),
+        Some(Arc::new(FileJobStore::new(data_dir).unwrap())),
+    )
+}
+
+fn portfolio_app_with_file_storage(data_dir: &std::path::Path) -> Router {
+    http::router_with_storage(
+        RouteOptimizationService::new(
+            DevelopmentRoutingProvider,
+            SolverOrchestrator::new(SolverOrchestratorConfig::default()).unwrap(),
+        ),
+        None,
         Some(Arc::new(FileJobStore::new(data_dir).unwrap())),
     )
 }
@@ -447,6 +461,116 @@ async fn health_remains_available() {
     let response = send(Method::GET, "/health", None, String::new()).await;
     assert_eq!(response.status, StatusCode::OK);
     assert_eq!(response.body, json!({ "status": "ok" }));
+}
+
+#[tokio::test]
+async fn portfolio_capabilities_and_cursor_telemetry_are_read_only_and_versioned() {
+    let directory = TestDirectory::new();
+    let app = portfolio_app_with_file_storage(&directory.0);
+    let capabilities = send_to(
+        app.clone(),
+        Method::GET,
+        "/integration/solver-capabilities",
+        None,
+        String::new(),
+    )
+    .await;
+    assert_eq!(capabilities.status, StatusCode::OK);
+    assert_eq!(capabilities.body["schema_version"], 1);
+    assert_eq!(capabilities.body["default_policy"], "CURRENT");
+    assert_eq!(capabilities.body["policies"].as_array().unwrap().len(), 8);
+    assert!(capabilities.body["solvers"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|solver| solver["id"] == "exact_bit_dp"));
+
+    let mut body = valid_request();
+    body["job_id"] = json!("portfolio-http");
+    body["travel_time_matrix"] = json!([[0, 10, 20], [10, 0, 10], [20, 10, 0]]);
+    let optimized = send_to(
+        app.clone(),
+        Method::POST,
+        "/optimize",
+        Some("application/json"),
+        body.to_string(),
+    )
+    .await;
+    assert_eq!(optimized.status, StatusCode::OK);
+    assert!(optimized.body.get("solver_telemetry").is_none());
+
+    let first = send_to(
+        app.clone(),
+        Method::GET,
+        "/integration/jobs/portfolio-http/solver-telemetry?after=0&limit=2",
+        None,
+        String::new(),
+    )
+    .await;
+    assert_eq!(first.status, StatusCode::OK);
+    assert_eq!(first.body["collected"], true);
+    assert_eq!(first.body["summary"]["policy"], "CURRENT");
+    assert_eq!(first.body["events"].as_array().unwrap().len(), 2);
+    assert!(first.body["events"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .all(|event| event["job_id"] == "portfolio-http"));
+    assert_eq!(first.body["has_more"], true);
+    let cursor = first.body["next_after"].as_u64().unwrap();
+
+    let second = send_to(
+        app,
+        Method::GET,
+        &format!("/integration/jobs/portfolio-http/solver-telemetry?after={cursor}&limit=100"),
+        None,
+        String::new(),
+    )
+    .await;
+    assert_eq!(second.status, StatusCode::OK);
+    assert!(second.body["events"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .all(|event| { event["event_sequence"].as_u64().unwrap() > cursor }));
+}
+
+#[tokio::test]
+async fn portfolio_override_is_rejected_before_job_creation_when_not_opted_in() {
+    let directory = TestDirectory::new();
+    let app = portfolio_app_with_file_storage(&directory.0);
+    let mut body = valid_request();
+    body["job_id"] = json!("disabled-portfolio-override");
+    body["portfolio_experiment"] = json!({
+        "policy": "PARALLEL_ALL",
+        "total_budget_ms": 100,
+        "logical_cpu_slots": 1,
+        "seed": 7
+    });
+
+    let response = send_to(
+        app.clone(),
+        Method::POST,
+        "/integration/jobs",
+        Some("application/json"),
+        body.to_string(),
+    )
+    .await;
+    assert_eq!(response.status, StatusCode::BAD_REQUEST);
+    assert_eq!(
+        response.body["error"]["code"],
+        "PORTFOLIO_EXPERIMENT_DISABLED"
+    );
+
+    let missing = send_to(
+        app,
+        Method::GET,
+        "/integration/jobs/disabled-portfolio-override",
+        None,
+        String::new(),
+    )
+    .await;
+    assert_eq!(missing.status, StatusCode::NOT_FOUND);
 }
 
 #[tokio::test]
@@ -766,7 +890,11 @@ async fn debug_minimum_duration_spaces_real_stages_persists_request_and_preserve
     wait_for_job_status(store.as_ref(), "debug-baseline", JobStatus::Completed).await;
     assert!(baseline_started.elapsed() < Duration::from_millis(750));
     let baseline = store.get_job("debug-baseline").unwrap().unwrap();
-    assert_eq!(paced.result, baseline.result);
+    let mut paced_result = paced.result.unwrap();
+    let mut baseline_result = baseline.result.unwrap();
+    paced_result.matrix_departure_time = None;
+    baseline_result.matrix_departure_time = None;
+    assert_eq!(paced_result, baseline_result);
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -1147,7 +1275,7 @@ async fn sse_reconnects_with_snapshot_orders_progress_and_closes_after_completio
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn sse_lag_recovery_emits_a_canonical_terminal_snapshot() {
+async fn sse_slow_reader_reaches_a_canonical_terminal_state_after_progress_coalescing() {
     let temporary = TestDirectory::new();
     let store = Arc::new(FileJobStore::new(&temporary.0).unwrap());
     let started = Arc::new(AtomicBool::new(false));
@@ -1184,8 +1312,9 @@ async fn sse_lag_recovery_emits_a_canonical_terminal_snapshot() {
     .await
     .unwrap();
 
-    // Do not poll the response body until more than the broadcast capacity has
-    // been published. The next receiver read must recover from persisted state.
+    // Do not poll the response body until the producer has attempted hundreds
+    // of updates. The service coalesces equal stage/progress values, so the
+    // receiver may either stay current or recover from a lagged channel.
     let (_, mut body) = open_event_stream(app, "sse-lag-recovery").await;
     release.store(true, Ordering::Release);
     wait_for_job_status(store.as_ref(), "sse-lag-recovery", JobStatus::Completed).await;
@@ -1193,9 +1322,20 @@ async fn sse_lag_recovery_emits_a_canonical_terminal_snapshot() {
     let mut buffered = String::new();
     let initial = next_sse_message(&mut body, &mut buffered).await.unwrap();
     assert_eq!(sse_field(&initial, "event"), Some("snapshot"));
-    let recovery = next_sse_message(&mut body, &mut buffered).await.unwrap();
-    assert_eq!(sse_field(&recovery, "event"), Some("snapshot"));
-    let data = sse_data(&recovery);
+    let terminal = loop {
+        let message = next_sse_message(&mut body, &mut buffered)
+            .await
+            .expect("slow reader must receive a terminal state");
+        let event = sse_field(&message, "event");
+        let data = sse_data(&message);
+        if event == Some("completed")
+            || (event == Some("snapshot") && data["state"]["status"] == "completed")
+        {
+            break message;
+        }
+        assert_eq!(event, Some("progress"));
+    };
+    let data = sse_data(&terminal);
     assert_eq!(data["state"]["status"], "completed");
     assert!(data["state"]["result"].is_object());
     assert!(data["state"]["error"].is_null());
@@ -2068,6 +2208,64 @@ async fn valid_optimize_request_uses_the_service_pipeline() {
     assert_eq!(response.body["route"][2]["location_id"], "place-3");
     assert_eq!(response.body["route"][2]["arrival_time"], "11:00");
     assert_eq!(response.body["route"][2]["departure_time"], "11:00");
+}
+
+#[tokio::test]
+async fn direct_and_persisted_optimize_responses_are_compatible() {
+    let successful_request = request_with_job_id("completion-compat-success");
+    let direct_success = send_to(
+        app(),
+        Method::POST,
+        "/optimize",
+        Some("application/json"),
+        successful_request.to_string(),
+    )
+    .await;
+    let success_directory = TestDirectory::new();
+    let persisted_success = send_to(
+        app_with_file_storage(&success_directory.0),
+        Method::POST,
+        "/optimize",
+        Some("application/json"),
+        successful_request.to_string(),
+    )
+    .await;
+    assert_eq!(persisted_success.status, direct_success.status);
+    assert!(persisted_success.body["matrix_departure_time"].is_string());
+    assert!(direct_success.body["matrix_departure_time"].is_string());
+    let mut persisted_success_body = persisted_success.body;
+    let mut direct_success_body = direct_success.body;
+    persisted_success_body
+        .as_object_mut()
+        .unwrap()
+        .remove("matrix_departure_time");
+    direct_success_body
+        .as_object_mut()
+        .unwrap()
+        .remove("matrix_departure_time");
+    assert_eq!(persisted_success_body, direct_success_body);
+
+    let mut failed_request = request_with_job_id("completion-compat-failure");
+    failed_request["locations"][1]["close_time"] = json!("09:10");
+    let direct_failure = send_to(
+        app(),
+        Method::POST,
+        "/optimize",
+        Some("application/json"),
+        failed_request.to_string(),
+    )
+    .await;
+    let failure_directory = TestDirectory::new();
+    let persisted_failure = send_to(
+        app_with_file_storage(&failure_directory.0),
+        Method::POST,
+        "/optimize",
+        Some("application/json"),
+        failed_request.to_string(),
+    )
+    .await;
+    assert_eq!(persisted_failure.status, direct_failure.status);
+    assert_eq!(persisted_failure.body, direct_failure.body);
 }
 
 #[tokio::test]

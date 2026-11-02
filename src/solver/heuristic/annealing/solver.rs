@@ -7,7 +7,8 @@ use crate::{
     solver::{
         evaluate_solution, evaluate_solution_with_penalties, ClusteredMstGreedyInitialRoute,
         ClusteredSolver, DefaultObjectivePolicy, InitialRouteGenerator, ObjectivePolicy,
-        RandomInitialRoute, RouteSolver, SolutionMetrics, SolverError, SolverInput, SolverSolution,
+        PenalizedRouteEvaluation, RandomInitialRoute, RouteSolver, SolutionMetrics, SolverError,
+        SolverInput, SolverSolution,
     },
 };
 
@@ -65,6 +66,9 @@ pub struct SimulatedAnnealingStats {
     pub swap_moves: u64,
     pub relocate_moves: u64,
     pub two_opt_moves: u64,
+    pub insert_optional_moves: u64,
+    pub remove_optional_moves: u64,
+    pub replace_optional_moves: u64,
     pub accepted_worse_moves: u64,
     pub infeasible_candidates: u64,
     pub accepted_infeasible_moves: u64,
@@ -81,6 +85,136 @@ pub struct SimulatedAnnealingResult {
     pub solution: SolverSolution,
     pub metrics: SolutionMetrics,
     pub stats: SimulatedAnnealingStats,
+}
+
+struct AnnealingSearchState {
+    current: SolverSolution,
+    current_evaluation: PenalizedRouteEvaluation,
+    best_feasible: Option<(SolverSolution, SolutionMetrics)>,
+    temperature: f64,
+    iterations: u64,
+    accepted_moves: u64,
+    improved_moves: u64,
+    swap_moves: u64,
+    relocate_moves: u64,
+    two_opt_moves: u64,
+    insert_optional_moves: u64,
+    remove_optional_moves: u64,
+    replace_optional_moves: u64,
+    accepted_worse_moves: u64,
+    infeasible_candidates: u64,
+    accepted_infeasible_moves: u64,
+    interrupted: bool,
+}
+
+impl AnnealingSearchState {
+    fn new(
+        current: SolverSolution,
+        current_evaluation: PenalizedRouteEvaluation,
+        initial_temperature: f64,
+    ) -> Self {
+        let best_feasible = current_evaluation
+            .feasible_metrics
+            .map(|metrics| (current.clone(), metrics));
+        Self {
+            current,
+            current_evaluation,
+            best_feasible,
+            temperature: initial_temperature,
+            iterations: 0,
+            accepted_moves: 0,
+            improved_moves: 0,
+            swap_moves: 0,
+            relocate_moves: 0,
+            two_opt_moves: 0,
+            insert_optional_moves: 0,
+            remove_optional_moves: 0,
+            replace_optional_moves: 0,
+            accepted_worse_moves: 0,
+            infeasible_candidates: 0,
+            accepted_infeasible_moves: 0,
+            interrupted: false,
+        }
+    }
+
+    fn record_movement(&mut self, movement: NeighborhoodMove) {
+        match movement {
+            NeighborhoodMove::Swap { .. } => self.swap_moves += 1,
+            NeighborhoodMove::Relocate { .. } => self.relocate_moves += 1,
+            NeighborhoodMove::TwoOpt { .. } => self.two_opt_moves += 1,
+            NeighborhoodMove::InsertOptional { .. } => self.insert_optional_moves += 1,
+            NeighborhoodMove::RemoveOptional { .. } => self.remove_optional_moves += 1,
+            NeighborhoodMove::ReplaceOptional { .. } => self.replace_optional_moves += 1,
+        }
+    }
+
+    fn consider_candidate(
+        &mut self,
+        objective: &dyn ObjectivePolicy,
+        candidate: SolverSolution,
+        candidate_evaluation: PenalizedRouteEvaluation,
+        random_unit: f64,
+    ) {
+        if !candidate_evaluation.feasible {
+            self.infeasible_candidates += 1;
+        }
+        if let Some(candidate_metrics) = candidate_evaluation.feasible_metrics {
+            let improves_best = match self.best_feasible.as_ref() {
+                Some((_, best_metrics)) => {
+                    objective.compare(&candidate_metrics, best_metrics).is_lt()
+                }
+                None => true,
+            };
+            if improves_best {
+                self.best_feasible = Some((candidate.clone(), candidate_metrics));
+            }
+        }
+
+        let delta = candidate_evaluation.energy - self.current_evaluation.energy;
+        if simulated_annealing_accept(delta, self.temperature, random_unit) {
+            self.accepted_moves += 1;
+            if delta < 0.0 {
+                self.improved_moves += 1;
+            } else if delta > 0.0 {
+                self.accepted_worse_moves += 1;
+            }
+            if !candidate_evaluation.feasible {
+                self.accepted_infeasible_moves += 1;
+            }
+            self.current = candidate;
+            self.current_evaluation = candidate_evaluation;
+        }
+    }
+
+    fn finish_iteration(&mut self, cooling_rate: f64) {
+        self.iterations += 1;
+        self.temperature *= cooling_rate;
+    }
+
+    fn stats(
+        &self,
+        config: SimulatedAnnealingConfig,
+        elapsed: Duration,
+    ) -> SimulatedAnnealingStats {
+        SimulatedAnnealingStats {
+            iterations: self.iterations,
+            accepted_moves: self.accepted_moves,
+            improved_moves: self.improved_moves,
+            swap_moves: self.swap_moves,
+            relocate_moves: self.relocate_moves,
+            two_opt_moves: self.two_opt_moves,
+            insert_optional_moves: self.insert_optional_moves,
+            remove_optional_moves: self.remove_optional_moves,
+            replace_optional_moves: self.replace_optional_moves,
+            accepted_worse_moves: self.accepted_worse_moves,
+            infeasible_candidates: self.infeasible_candidates,
+            accepted_infeasible_moves: self.accepted_infeasible_moves,
+            initial_temperature: config.initial_temperature,
+            final_temperature: self.temperature,
+            cooling_rate: config.cooling_rate,
+            elapsed,
+        }
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -161,7 +295,7 @@ impl<I: InitialRouteStrategy, N: NeighborhoodStrategy, O: ObjectivePolicy>
             },
             &mut rng,
         )?;
-        if !is_permutation_with_fixed_endpoints(&current, input.problem.locations().len()) {
+        if !is_structurally_valid_initial_solution(&current, input.problem) {
             current = RandomInitialRoute.generate(
                 SolverInput {
                     matrix: input.matrix,
@@ -171,7 +305,7 @@ impl<I: InitialRouteStrategy, N: NeighborhoodStrategy, O: ObjectivePolicy>
                 &mut rng,
             )?;
         }
-        let mut current_evaluation = evaluate_solution_with_penalties(
+        let current_evaluation = evaluate_solution_with_penalties(
             &self.objective,
             SolverInput {
                 matrix: input.matrix,
@@ -183,41 +317,26 @@ impl<I: InitialRouteStrategy, N: NeighborhoodStrategy, O: ObjectivePolicy>
         )?;
         let initial_solution = current.clone();
         let initial_metrics = current_evaluation.feasible_metrics;
-        let mut best_feasible = current_evaluation
-            .feasible_metrics
-            .map(|metrics| (current.clone(), metrics));
-        let mut temperature = config.initial_temperature;
+        let mut state =
+            AnnealingSearchState::new(current, current_evaluation, config.initial_temperature);
         let time_limit = config.time_limit_ms.map(Duration::from_millis);
-        let mut iterations = 0_u64;
-        let mut accepted_moves = 0_u64;
-        let mut improved_moves = 0_u64;
-        let mut swap_moves = 0_u64;
-        let mut relocate_moves = 0_u64;
-        let mut two_opt_moves = 0_u64;
-        let mut accepted_worse_moves = 0_u64;
-        let mut infeasible_candidates = 0_u64;
-        let mut accepted_infeasible_moves = 0_u64;
-        let mut interrupted = false;
 
-        while optional_limit_allows(config.iteration_limit, iterations)
+        while optional_limit_allows(config.iteration_limit, state.iterations)
             && optional_duration_allows(time_limit, started.elapsed())
-            && temperature >= config.minimum_temperature
+            && state.temperature >= config.minimum_temperature
         {
             if input.cancellation.is_cancelled() {
-                interrupted = true;
+                state.interrupted = true;
                 break;
             }
-            let Some((candidate, movement)) = self
-                .neighborhood_strategy
-                .neighbor(&current.visit_order, &mut rng)
-            else {
+            let Some((candidate, movement)) = self.neighborhood_strategy.neighbor_for_problem(
+                &state.current.visit_order,
+                input.problem,
+                &mut rng,
+            ) else {
                 break;
             };
-            match movement {
-                NeighborhoodMove::Swap { .. } => swap_moves += 1,
-                NeighborhoodMove::Relocate { .. } => relocate_moves += 1,
-                NeighborhoodMove::TwoOpt { .. } => two_opt_moves += 1,
-            }
+            state.record_movement(movement);
             let candidate = SolverSolution {
                 visit_order: candidate,
             };
@@ -233,50 +352,25 @@ impl<I: InitialRouteStrategy, N: NeighborhoodStrategy, O: ObjectivePolicy>
             ) {
                 Ok(evaluation) => evaluation,
                 Err(SolverError::Cancelled) => {
-                    interrupted = true;
+                    state.interrupted = true;
                     break;
                 }
                 Err(error) => return Err(error),
             };
-            if !candidate_evaluation.feasible {
-                infeasible_candidates += 1;
-            }
-            if let Some(candidate_metrics) = candidate_evaluation.feasible_metrics {
-                let improves_best = match best_feasible.as_ref() {
-                    Some((_, best_metrics)) => self
-                        .objective
-                        .compare(&candidate_metrics, best_metrics)
-                        .is_lt(),
-                    None => true,
-                };
-                if improves_best {
-                    best_feasible = Some((candidate.clone(), candidate_metrics));
-                }
-            }
-
-            let delta = candidate_evaluation.energy - current_evaluation.energy;
             let random_unit = rng.gen::<f64>();
-            if simulated_annealing_accept(delta, temperature, random_unit) {
-                accepted_moves += 1;
-                if delta < 0.0 {
-                    improved_moves += 1;
-                } else if delta > 0.0 {
-                    accepted_worse_moves += 1;
-                }
-                if !candidate_evaluation.feasible {
-                    accepted_infeasible_moves += 1;
-                }
-                current = candidate;
-                current_evaluation = candidate_evaluation;
-            }
-            iterations += 1;
-            temperature *= config.cooling_rate;
+            state.consider_candidate(
+                &self.objective,
+                candidate,
+                candidate_evaluation,
+                random_unit,
+            );
+            state.finish_iteration(config.cooling_rate);
         }
 
-        let Some((solution, metrics)) = best_feasible else {
+        let Some((solution, metrics)) = state.best_feasible.take() else {
             return Err(SolverError::NoFeasibleRoute);
         };
-        let verified = if interrupted || input.cancellation.is_cancelled() {
+        let verified = if state.interrupted || input.cancellation.is_cancelled() {
             metrics
         } else {
             evaluate_solution(
@@ -295,21 +389,7 @@ impl<I: InitialRouteStrategy, N: NeighborhoodStrategy, O: ObjectivePolicy>
             initial_metrics,
             solution,
             metrics: verified,
-            stats: SimulatedAnnealingStats {
-                iterations,
-                accepted_moves,
-                improved_moves,
-                swap_moves,
-                relocate_moves,
-                two_opt_moves,
-                accepted_worse_moves,
-                infeasible_candidates,
-                accepted_infeasible_moves,
-                initial_temperature: config.initial_temperature,
-                final_temperature: temperature,
-                cooling_rate: config.cooling_rate,
-                elapsed: started.elapsed(),
-            },
+            stats: state.stats(config, started.elapsed()),
         })
     }
 }
@@ -373,22 +453,34 @@ fn optional_duration_allows(limit: Option<Duration>, elapsed: Duration) -> bool 
     }
 }
 
-fn is_permutation_with_fixed_endpoints(solution: &SolverSolution, location_count: usize) -> bool {
-    if solution.visit_order.len() != location_count
+fn is_structurally_valid_initial_solution(
+    solution: &SolverSolution,
+    problem: &crate::domain::OptimizationProblem,
+) -> bool {
+    let location_count = problem.locations().len();
+    if (problem.visit_policy() == crate::domain::VisitPolicy::AllRequired
+        && solution.visit_order.len() != location_count)
+        || solution.visit_order.len() < 2
         || solution.visit_order.first() != Some(&0)
         || solution.visit_order.last() != location_count.checked_sub(1).as_ref()
     {
         return false;
     }
     let mut seen = vec![false; location_count];
-    solution.visit_order.iter().all(|&location| {
+    let valid = solution.visit_order.iter().all(|&location| {
         if location >= location_count || seen[location] {
             false
         } else {
             seen[location] = true;
             true
         }
-    })
+    });
+    valid
+        && problem
+            .locations()
+            .iter()
+            .enumerate()
+            .all(|(index, location)| !location.required() || seen[index])
 }
 
 pub fn simulated_annealing_accept(delta: f64, temperature: f64, random_unit: f64) -> bool {

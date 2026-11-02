@@ -4,7 +4,7 @@ use thiserror::Error;
 
 use crate::{cancellation::CancellationToken, domain::Location, matrix::TravelTimeMatrix};
 
-use super::{RouteProviderPolicyDiagnostics, RouteProviderSelection, RoutingContext};
+use super::{RouteProviderSelection, RouteProviderSelectionDiagnostics, RoutingContext};
 
 pub trait RoutingProgressObserver: Send + Sync {
     fn pairs_completed(&self, completed: usize, total: usize);
@@ -37,6 +37,31 @@ pub trait RoutingProvider {
         self.travel_time_matrix(locations, context)
     }
 
+    /// Builds a matrix under the caller's cancellation signal and optional
+    /// absolute deadline. Existing providers retain source compatibility via
+    /// this default; providers that fan out pair work should override it.
+    fn travel_time_matrix_with_control(
+        &self,
+        locations: &[Location],
+        context: &RoutingContext,
+        observer: &dyn RoutingProgressObserver,
+        cancellation: &CancellationToken,
+        deadline: Option<Instant>,
+    ) -> Result<TravelTimeMatrix, RoutingError> {
+        if cancellation.is_cancelled() {
+            return Err(RoutingError::Cancelled);
+        }
+        let result = match deadline {
+            Some(deadline) => self.travel_time_matrix_until(locations, context, deadline),
+            None => self.travel_time_matrix_with_progress(locations, context, observer),
+        };
+        if cancellation.is_cancelled() {
+            Err(RoutingError::Cancelled)
+        } else {
+            result
+        }
+    }
+
     /// Builds a matrix without starting work after the caller's deadline.
     /// Providers with deadline-aware I/O should override this method.
     fn travel_time_matrix_until(
@@ -53,6 +78,30 @@ pub trait RoutingProvider {
         self.travel_time_matrix(locations, context)
     }
 
+    /// Revalidates one selected route leg at its actual departure instant.
+    ///
+    /// Providers with a pair API may override this to avoid constructing a
+    /// two-location matrix. The default deliberately reuses the same routing
+    /// contract and therefore preserves provider policy and sparse-arc
+    /// semantics.
+    fn travel_time_for_leg_with_control(
+        &self,
+        from: &Location,
+        to: &Location,
+        context: &RoutingContext,
+        cancellation: &CancellationToken,
+        deadline: Option<Instant>,
+    ) -> Result<Option<u32>, RoutingError> {
+        let matrix = self.travel_time_matrix_with_control(
+            &[from.clone(), to.clone()],
+            context,
+            &NoopRoutingProgressObserver,
+            cancellation,
+            deadline,
+        )?;
+        Ok(matrix.travel_minutes(0, 1))
+    }
+
     fn provider_selection(
         &self,
         _context: &RoutingContext,
@@ -60,7 +109,7 @@ pub trait RoutingProvider {
         Ok(None)
     }
 
-    fn provider_policy_diagnostics(&self) -> Option<RouteProviderPolicyDiagnostics> {
+    fn provider_policy_diagnostics(&self) -> Option<RouteProviderSelectionDiagnostics> {
         None
     }
 }
@@ -95,6 +144,34 @@ where
         (**self).travel_time_matrix_until(locations, context, deadline)
     }
 
+    fn travel_time_matrix_with_control(
+        &self,
+        locations: &[Location],
+        context: &RoutingContext,
+        observer: &dyn RoutingProgressObserver,
+        cancellation: &CancellationToken,
+        deadline: Option<Instant>,
+    ) -> Result<TravelTimeMatrix, RoutingError> {
+        (**self).travel_time_matrix_with_control(
+            locations,
+            context,
+            observer,
+            cancellation,
+            deadline,
+        )
+    }
+
+    fn travel_time_for_leg_with_control(
+        &self,
+        from: &Location,
+        to: &Location,
+        context: &RoutingContext,
+        cancellation: &CancellationToken,
+        deadline: Option<Instant>,
+    ) -> Result<Option<u32>, RoutingError> {
+        (**self).travel_time_for_leg_with_control(from, to, context, cancellation, deadline)
+    }
+
     fn provider_selection(
         &self,
         context: &RoutingContext,
@@ -102,7 +179,7 @@ where
         (**self).provider_selection(context)
     }
 
-    fn provider_policy_diagnostics(&self) -> Option<RouteProviderPolicyDiagnostics> {
+    fn provider_policy_diagnostics(&self) -> Option<RouteProviderSelectionDiagnostics> {
         (**self).provider_policy_diagnostics()
     }
 }
@@ -158,6 +235,14 @@ pub struct TravelTime {
 
 #[derive(Debug, Error)]
 pub enum RoutingError {
+    #[error("routing request was cancelled")]
+    Cancelled,
+    #[error("no route exists between {from} and {to}: {reason}")]
+    Unreachable {
+        from: String,
+        to: String,
+        reason: String,
+    },
     #[error("routing provider failed: {0}")]
     Provider(String),
     #[error("route provider resolution failed: {0}")]

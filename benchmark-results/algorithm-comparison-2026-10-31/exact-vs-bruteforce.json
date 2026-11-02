@@ -1,0 +1,110 @@
+[
+  {
+    "n": 5,
+    "seed": 42,
+    "passed": true,
+    "feasible": true,
+    "exact": {
+      "objective": 17,
+      "latest_start": 1403,
+      "finish": 1430,
+      "travel": 17,
+      "wait": 0
+    },
+    "brute_force": {
+      "objective": 17,
+      "latest_start": 1403,
+      "finish": 1430,
+      "travel": 17,
+      "wait": 0
+    },
+    "generated_states": 16,
+    "frontier_states": 14,
+    "unpruned_generated_states": 16,
+    "unpruned_frontier_states": 16,
+    "pruning_ratio": 0.125,
+    "elapsed_ms": 0.0298,
+    "error": null
+  },
+  {
+    "n": 5,
+    "seed": 1337,
+    "passed": true,
+    "feasible": true,
+    "exact": {
+      "objective": 16,
+      "latest_start": 1414,
+      "finish": 1430,
+      "travel": 16,
+      "wait": 0
+    },
+    "brute_force": {
+      "objective": 16,
+      "latest_start": 1414,
+      "finish": 1430,
+      "travel": 16,
+      "wait": 0
+    },
+    "generated_states": 11,
+    "frontier_states": 11,
+    "unpruned_generated_states": 11,
+    "unpruned_frontier_states": 11,
+    "pruning_ratio": 0.0,
+    "elapsed_ms": 0.0108,
+    "error": null
+  },
+  {
+    "n": 10,
+    "seed": 42,
+    "passed": true,
+    "feasible": true,
+    "exact": {
+      "objective": 24,
+      "latest_start": 1346,
+      "finish": 1430,
+      "travel": 24,
+      "wait": 0
+    },
+    "brute_force": {
+      "objective": 24,
+      "latest_start": 1346,
+      "finish": 1430,
+      "travel": 24,
+      "wait": 0
+    },
+    "generated_states": 1794,
+    "frontier_states": 1025,
+    "unpruned_generated_states": 23109,
+    "unpruned_frontier_states": 23109,
+    "pruning_ratio": 0.955644986801679,
+    "elapsed_ms": 34.5769,
+    "error": null
+  },
+  {
+    "n": 10,
+    "seed": 1337,
+    "passed": true,
+    "feasible": true,
+    "exact": {
+      "objective": 25,
+      "latest_start": 1355,
+      "finish": 1430,
+      "travel": 25,
+      "wait": 0
+    },
+    "brute_force": {
+      "objective": 25,
+      "latest_start": 1355,
+      "finish": 1430,
+      "travel": 25,
+      "wait": 0
+    },
+    "generated_states": 1786,
+    "frontier_states": 1018,
+    "unpruned_generated_states": 21249,
+    "unpruned_frontier_states": 21249,
+    "pruning_ratio": 0.952091863146501,
+    "elapsed_ms": 33.2284,
+    "error": null
+  }
+]

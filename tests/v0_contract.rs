@@ -1,9 +1,9 @@
 use troute::{
-    domain::Location,
+    domain::{Location, OptimizationProblem},
     matrix::TravelTimeMatrix,
     routing::{RoutingContext, RoutingError, RoutingProvider, TravelMode},
-    solver::{RouteSolver, SolverError, SolverInput, SolverSolution},
-    OptimizeRouteRequest, RouteOptimizationService,
+    solver::{ExactBitDpSolver, RouteSolver, SolverError, SolverInput, SolverSolution},
+    CancellationToken, OptimizeRouteRequest, RouteOptimizationService,
 };
 
 struct IndexedRoutingProvider;
@@ -199,9 +199,13 @@ fn debug_request(debug: Option<serde_json::Value>) -> OptimizeRouteRequest {
 }
 
 fn optimize_debug(request: OptimizeRouteRequest) -> troute::OptimizeRouteResponse {
-    RouteOptimizationService::new(IndexedRoutingProvider, InputOrderSolver)
+    let mut response = RouteOptimizationService::new(IndexedRoutingProvider, InputOrderSolver)
         .optimize(request)
-        .unwrap()
+        .unwrap();
+    // Undated provider routing intentionally records the actual request
+    // instant, which is unrelated to debug-route determinism.
+    response.matrix_departure_time = None;
+    response
 }
 
 #[test]
@@ -297,4 +301,69 @@ fn debug_shuffle_leaves_a_two_location_route_unchanged() {
         optimize_debug(shuffled_request),
         optimize_debug(baseline_request)
     );
+}
+
+#[test]
+fn all_required_fails_but_best_effort_returns_a_partial_seoul_route() {
+    let request = serde_json::json!({
+        "job_id": "seoul-all-visits-infeasible",
+        "visit_policy": "ALL_REQUIRED",
+        "start_policy": "FIXED",
+        "start_time": "09:00",
+        "country_code": "KR",
+        "travel_mode": "TRANSIT",
+        "locations": [
+            {"id":"seoul-station","name":"서울역","place_id":"seoul-station","open_time":"09:00","close_time":"23:50","stay_minutes":0},
+            {"id":"gyeongbokgung-palace","name":"경복궁","place_id":"gyeongbokgung-palace","open_time":"09:00","close_time":"10:30","stay_minutes":60},
+            {"id":"myeongdong-station","name":"명동역","place_id":"myeongdong-station","open_time":"09:00","close_time":"10:30","stay_minutes":60},
+            {"id":"hongik-university-station","name":"홍대입구역","place_id":"hongik-university-station","open_time":"09:00","close_time":"10:30","stay_minutes":60},
+            {"id":"gangnam-station","name":"강남역","place_id":"gangnam-station","open_time":"09:00","close_time":"23:50","stay_minutes":0}
+        ],
+        "travel_time_matrix": [
+            [0,10,10,10,10],
+            [10,0,10,10,10],
+            [10,10,0,10,10],
+            [10,10,10,0,10],
+            [10,10,10,10,0]
+        ]
+    });
+    let service =
+        RouteOptimizationService::new(IndexedRoutingProvider, ExactBitDpSolver::default());
+
+    let all_required: OptimizeRouteRequest = serde_json::from_value(request.clone()).unwrap();
+    let matrix = TravelTimeMatrix::new(all_required.travel_time_matrix.clone().unwrap()).unwrap();
+    let problem: OptimizationProblem = all_required.try_into().unwrap();
+    let cancellation = CancellationToken::new();
+    assert!(matches!(
+        ExactBitDpSolver::default().solve(SolverInput {
+            matrix: &matrix,
+            problem: &problem,
+            cancellation: &cancellation,
+        }),
+        Err(SolverError::NoFeasibleRoute)
+    ));
+
+    let mut best_effort = request;
+    best_effort["job_id"] = serde_json::json!("seoul-best-effort-partial");
+    best_effort["visit_policy"] = serde_json::json!("BEST_EFFORT_ON_FAILURE");
+    let locations = best_effort["locations"].as_array_mut().unwrap();
+    for (index, location) in locations.iter_mut().enumerate() {
+        location["required"] = serde_json::json!(index == 0 || index + 1 == 5);
+        location["priority"] = serde_json::json!(100 - index * 10);
+    }
+
+    let response = service
+        .optimize(serde_json::from_value(best_effort).unwrap())
+        .unwrap();
+    assert_eq!(response.partial, Some(true));
+    assert_eq!(response.visited_count, Some(3));
+    assert_eq!(
+        response
+            .route
+            .iter()
+            .map(|stop| stop.location_id.as_str())
+            .collect::<Vec<_>>(),
+        ["seoul-station", "gyeongbokgung-palace", "gangnam-station"]
+    );
+    assert_eq!(response.skipped_locations.as_ref().unwrap().len(), 2);
 }

@@ -1,0 +1,42 @@
+[작업 2] Server / Bootstrap / Config Top-down 점검
+==================================================
+
+대상
+- src/main.rs, src/server.rs
+- src/server/bootstrap.rs, routing.rs, storage.rs, startup.rs, shutdown.rs
+- src/config.rs 및 src/config/env.rs (변경 필요 시에만)
+
+현재 관찰
+- server.rs는 이미 `Server { bind_addr, listener, router }`와 `bind()/serve()`로 분리됨.
+- bootstrap.rs의 ServerComponents::initialize가 의존성 조립(Composition Root)을 담당.
+- RoutingRuntime, StorageRuntime, StartupSummary, shutdown_signal이 하위 모듈로 분리됨.
+- 따라서 server.rs를 다시 분해하거나 DI 라이브러리를 붙이는 작업은 불필요.
+
+요구 사항
+1. main.rs의 `main()`/`run()`, server.rs의 `Server`/`bind()`/`serve()`를
+   외부 진입점 중심의 현재 구조로 유지한다.
+2. bootstrap.rs는 `ServerComponents` 선언과 `initialize()`가 우선 보이고,
+   필요한 경우 초기화 내부 단계가 코드를 읽는 순서대로 드러나게 정렬한다.
+3. routing.rs, storage.rs, startup.rs는 각 runtime 타입 정의 → 공개(모듈 내부)
+   생성/접근 메서드 → private helper 순서를 우선 검토한다.
+4. shutdown.rs는 함수형 시그널 처리로 유지한다. 인위적인 ShutdownManager 객체 금지.
+5. config.rs는 `AppConfig`처럼 외부에서 사용하는 설정 타입과 핵심 초기화 API가
+   먼저 보이도록 점검하되 관련 타입과 `impl`의 응집성은 유지한다.
+6. 이미 Top-down인 파일은 수정하지 않고 'no-op'으로 보고한다.
+
+주의: 보존해야 할 상세 행위
+- TcpListener 바인딩, graceful shutdown 및 SIGINT/SIGTERM 대응
+- 런타임 초기화/에러 전파, 시작 로그, startup_warnings 처리 시점
+- `tokio::task::block_in_place()` 사용 근거와 실제 동작
+- JobStore의 interrupted-job recovery 순서
+- RouterRuntimeOptions 전달 및 DI 구성 시점
+- 기존 `pub(crate)`, `pub(super)` 경계
+
+금지
+- ServerComponents와 Server의 소유권 책임을 바꾸지 않는다.
+- 새 DI 컨테이너/Resolver/Factory 프레임워크를 도입하지 않는다.
+- 로그를 보기 좋다는 이유로 재배치하면서 서버 시작의 의미를 바꾸지 않는다.
+
+완료
+- main → Server → ServerComponents → 하위 runtime으로 코드를 따라가기가 쉽다.
+- 기존의 깔끔한 구현에 불필요한 코드 변경이 없다.

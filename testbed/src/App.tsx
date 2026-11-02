@@ -7,11 +7,14 @@ import {
   getRouteProviderPolicy,
   getStoredJob,
   getStoredTimeline,
+  getSolverTelemetry,
   runRoute,
+  subscribeToSolverEvents,
   subscribeToStoredJob,
   type RouteInput,
   type RouteProviderPolicyDiagnostics,
   type StoredJobError,
+  type SolverTelemetryEvent,
 } from "./api";
 import { AppHeader, type HealthState } from "./components/AppHeader";
 import { JobDetail } from "./components/detail/JobDetail";
@@ -38,6 +41,8 @@ export function App({ initialThemeMode }: AppProps) {
   const [providerPolicy, setProviderPolicy] =
     useState<RouteProviderPolicyDiagnostics | null>(null);
   const [providerPolicyError, setProviderPolicyError] = useState("");
+  const [providerPolicyOpen, setProviderPolicyOpen] = useState(false);
+  const [providerPolicyLoading, setProviderPolicyLoading] = useState(false);
   const [jobs, setJobs] = useState<TestbedJob[]>([]);
   const [selectedJobId, setSelectedJobId] = useState<string | null>(null);
   const [newJobOpen, setNewJobOpen] = useState(false);
@@ -64,16 +69,26 @@ export function App({ initialThemeMode }: AppProps) {
     }
   }
 
+  async function refreshProviderPolicy() {
+    setProviderPolicyLoading(true);
+    try {
+      const policy = await getRouteProviderPolicy();
+      setProviderPolicy(policy);
+      setProviderPolicyError("");
+    } catch (error) {
+      setProviderPolicyError(`Provider policy 조회 실패: ${(error as Error).message}`);
+    } finally {
+      setProviderPolicyLoading(false);
+    }
+  }
+
+  function openProviderPolicy() {
+    setProviderPolicyOpen(true);
+    void refreshProviderPolicy();
+  }
+
   useEffect(() => {
     void refreshHealth();
-    void getRouteProviderPolicy()
-      .then((policy) => {
-        setProviderPolicy(policy);
-        setProviderPolicyError("");
-      })
-      .catch((error: Error) =>
-        setProviderPolicyError(`Provider policy 조회 실패: ${error.message}`),
-      );
   }, []);
 
   useEffect(() => {
@@ -83,6 +98,67 @@ export function App({ initialThemeMode }: AppProps) {
     let inFlight = false;
     let controller: AbortController | null = null;
     let closeEvents: (() => void) | undefined;
+    let closeSolverEvents: (() => void) | undefined;
+    let solverCursor = 0;
+    const mergeSolverEvents = (incoming: SolverTelemetryEvent[]) => {
+      if (!incoming.length) return;
+      solverCursor = Math.max(
+        solverCursor,
+        ...incoming.map((event) => event.event_sequence),
+      );
+      setJobs((current) =>
+        current.map((job) => {
+          if (job.id !== selectedJobId) return job;
+          const events = new Map(
+            (job.solverEvents ?? []).map((event) => [event.event_sequence, event]),
+          );
+          incoming.forEach((event) => events.set(event.event_sequence, event));
+          const solverEvents = [...events.values()].sort(
+            (left, right) => left.event_sequence - right.event_sequence,
+          );
+          return {
+            ...job,
+            solverEvents,
+            solverTelemetry: job.solverTelemetry
+              ? { ...job.solverTelemetry, events: solverEvents }
+              : job.solverTelemetry,
+          };
+        }),
+      );
+    };
+    const refreshSolverTelemetry = async () => {
+      try {
+        let after = solverCursor;
+        let hasMore = true;
+        while (!disposed && hasMore) {
+          const page = await getSolverTelemetry(
+            selectedJobId,
+            after,
+            500,
+            controller?.signal,
+          );
+          if (disposed) return;
+          mergeSolverEvents(page.events);
+          after = page.next_after;
+          hasMore = page.has_more;
+          if (page.summary) {
+            setJobs((current) =>
+              current.map((job) => {
+                if (job.id !== selectedJobId) return job;
+                const events = job.solverEvents ?? [];
+                return {
+                  ...job,
+                  solverTelemetry: { ...page.summary!, events },
+                };
+              }),
+            );
+          }
+        }
+      } catch {
+        // Legacy Jobs legitimately have no telemetry. The normal Job stream
+        // and a later cursor recovery remain authoritative.
+      }
+    };
     const refreshSelectedJob = async () => {
       if (inFlight) return;
       inFlight = true;
@@ -100,6 +176,7 @@ export function App({ initialThemeMode }: AppProps) {
               : job,
           ),
         );
+        await refreshSolverTelemetry();
       } catch {
         // A browser-created Job may not be persisted yet. SSE reconnect and
         // list discovery recover without replacing the UI with an error.
@@ -134,10 +211,19 @@ export function App({ initialThemeMode }: AppProps) {
         },
         () => void refreshSelectedJob(),
       );
+      closeSolverEvents = subscribeToSolverEvents(
+        selectedJobId,
+        solverCursor,
+        (event) => {
+          if (!disposed) mergeSolverEvents([event]);
+        },
+        () => void refreshSolverTelemetry(),
+      );
     }
     return () => {
       disposed = true;
       closeEvents?.();
+      closeSolverEvents?.();
       controller?.abort();
     };
   }, [selectedJobId, selectedJob?.status]);
@@ -258,13 +344,9 @@ export function App({ initialThemeMode }: AppProps) {
         health={health}
         healthRefreshing={healthRefreshing}
         themeMode={themeMode}
+        onOpenProviderPolicy={openProviderPolicy}
         onRefreshHealth={() => void refreshHealth()}
         onThemeChange={selectMode}
-      />
-
-      <ProviderPolicyPanel
-        diagnostics={providerPolicy}
-        error={providerPolicyError}
       />
 
       <main className="job-workspace">
@@ -292,6 +374,15 @@ export function App({ initialThemeMode }: AppProps) {
         existingJobIds={existingJobIds}
         onClose={() => setNewJobOpen(false)}
         onCreate={createJob}
+      />
+      <ProviderPolicyPanel
+        diagnostics={providerPolicy}
+        error={providerPolicyError}
+        isOpen={providerPolicyOpen}
+        dark={resolvedTheme === "dark"}
+        loading={providerPolicyLoading}
+        onClose={() => setProviderPolicyOpen(false)}
+        onRefresh={() => void refreshProviderPolicy()}
       />
     </div>
   );

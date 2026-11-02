@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { Alert, Button, Callout, Classes, Collapse, Dialog, DialogBody, DialogFooter, Intent, Spinner, Tag, TextArea } from "@blueprintjs/core";
-import { fetchTravelTimeMatrix, isTenMinuteDuration, isTenMinuteTime, parseInput, type RouteInput, type RouteProviderName, type StartPolicy, type TravelMode } from "../../api";
+import { fetchTravelTimeMatrix, isTenMinuteDuration, isTenMinuteTime, parseInput, type RouteInput, type RouteProviderName, type StartPolicy, type TravelMode, type VisitPolicy } from "../../api";
 import { JOB_PRESETS, type JobPreset } from "../../placePresets";
 import { createSample } from "../../sample";
 
@@ -11,16 +11,18 @@ interface NewJobDialogProps {
 interface FormLocation {
   key: string; id: string; name: string; placeId: string;
   openTime: string; closeTime: string; stayMinutes: string;
+  required: boolean; priority: string;
 }
 interface ValidationResult { valid: boolean; message: string }
 
 function locationFromRequest(location: RouteInput["locations"][number], index: number): FormLocation {
-  return { key: `${location.id}-${index}-${Date.now()}`, id: location.id, name: location.name ?? "", placeId: location.place_id, openTime: location.open_time, closeTime: location.close_time, stayMinutes: String(location.stay_minutes) };
+  return { key: `${location.id}-${index}-${Date.now()}`, id: location.id, name: location.name ?? "", placeId: location.place_id, openTime: location.open_time, closeTime: location.close_time, stayMinutes: String(location.stay_minutes), required: location.required ?? false, priority: String(location.priority ?? 1) };
 }
 function blankMatrix(size: number): string[][] {
   return Array.from({ length: size }, (_, row) => Array.from({ length: size }, (_, column) => row === column ? "0" : ""));
 }
-const matrixFromNumbers = (matrix: number[][]) => matrix.map((row) => row.map(String));
+const matrixFromNumbers = (matrix: (number | null)[][]) =>
+  matrix.map((row) => row.map((value) => value === null ? "null" : String(value)));
 function completeMatrix(matrix: string[][], size: number): number[][] | undefined {
   if (matrix.length !== size || matrix.some((row) => row.length !== size || row.some((value) => value.trim() === ""))) return undefined;
   return matrix.map((row) => row.map(Number));
@@ -31,6 +33,7 @@ export function NewJobDialog({ isOpen, dark, existingJobIds, onClose, onCreate }
   const [countryCode, setCountryCode] = useState("");
   const [travelMode, setTravelMode] = useState<TravelMode>("TRANSIT");
   const [routeProvider, setRouteProvider] = useState<RouteProviderName | "">("");
+  const [visitPolicy, setVisitPolicy] = useState<VisitPolicy>("ALL_REQUIRED");
   const [startPolicy, setStartPolicy] = useState<StartPolicy>("LATEST");
   const [startTime, setStartTime] = useState("00:00");
   const [locations, setLocations] = useState<FormLocation[]>([]);
@@ -69,6 +72,7 @@ export function NewJobDialog({ isOpen, dark, existingJobIds, onClose, onCreate }
     setCountryCode(request.country_code ?? "");
     setTravelMode(request.travel_mode ?? "TRANSIT");
     setRouteProvider(request.route_provider ?? "");
+    setVisitPolicy(request.visit_policy ?? "ALL_REQUIRED");
     setStartPolicy(request.start_policy ?? "LATEST");
     setStartTime(request.start_time ?? "00:00");
     setLocations(request.locations.map(locationFromRequest));
@@ -87,7 +91,17 @@ export function NewJobDialog({ isOpen, dark, existingJobIds, onClose, onCreate }
     const suppliedMatrix = completeMatrix(matrix, locations.length);
     return {
       job_id: jobId,
-      locations: locations.map((location) => ({ id: location.id.trim(), name: location.name.trim() || undefined, place_id: location.placeId.trim(), open_time: location.openTime, close_time: location.closeTime, stay_minutes: Number(location.stayMinutes) })),
+      locations: locations.map((location, index) => ({
+        id: location.id.trim(),
+        name: location.name.trim() || undefined,
+        place_id: location.placeId.trim(),
+        open_time: location.openTime,
+        close_time: location.closeTime,
+        stay_minutes: Number(location.stayMinutes),
+        required: visitPolicy === "BEST_EFFORT_ON_FAILURE" ? index === 0 || index === locations.length - 1 || location.required : undefined,
+        priority: visitPolicy === "BEST_EFFORT_ON_FAILURE" ? Number(location.priority) : undefined,
+      })),
+      visit_policy: visitPolicy,
       start_policy: startPolicy,
       start_time: startTime || undefined,
       country_code: countryCode.trim().toUpperCase() || undefined,
@@ -96,14 +110,14 @@ export function NewJobDialog({ isOpen, dark, existingJobIds, onClose, onCreate }
       travel_time_matrix: suppliedMatrix,
       debug: { min_job_duration_ms: 4_000 },
     };
-  }, [jobId, countryCode, travelMode, routeProvider, startPolicy, startTime, locations, matrix]);
+  }, [jobId, countryCode, travelMode, routeProvider, visitPolicy, startPolicy, startTime, locations, matrix]);
   useEffect(() => { if (!rawEditing) setRawInput(JSON.stringify(formRequest, null, 2)); }, [formRequest, rawEditing]);
 
   function clearFeedback() {
     cancelMatrixRequest();
     setValidation(null); setFieldErrors({}); setRawEditing(false);
   }
-  function updateLocation(index: number, field: keyof Omit<FormLocation, "key">, value: string) {
+  function updateLocation(index: number, field: keyof Omit<FormLocation, "key">, value: string | boolean) {
     setLocations((current) => current.map((location, itemIndex) => itemIndex === index ? { ...location, [field]: value } : location));
     clearFeedback();
   }
@@ -131,6 +145,8 @@ export function NewJobDialog({ isOpen, dark, existingJobIds, onClose, onCreate }
       if (isTenMinuteTime(location.openTime) && isTenMinuteTime(location.closeTime) && location.openTime > location.closeTime) errors[`${prefix}.closeTime`] = "Close는 Open보다 빠를 수 없습니다.";
       const stay = Number(location.stayMinutes);
       if (location.stayMinutes.trim() === "" || !isTenMinuteDuration(stay)) errors[`${prefix}.stayMinutes`] = "체류시간은 0 이상의 10분 배수여야 합니다.";
+      const priority = Number(location.priority);
+      if (visitPolicy === "BEST_EFFORT_ON_FAILURE" && (location.priority.trim() === "" || !Number.isInteger(priority) || priority < 1 || priority > 100)) errors[`${prefix}.priority`] = "우선순위는 1~100 사이의 정수여야 합니다.";
     });
     if (validateMatrix && hasMatrixInput && (matrix.length !== locations.length || matrix.some((row) => row.length !== locations.length))) errors.matrix = "매트릭스 크기가 장소 수와 일치하지 않습니다.";
     else if (validateMatrix && hasMatrixInput) matrix.forEach((row, rowIndex) => row.forEach((value, columnIndex) => {
@@ -154,7 +170,7 @@ export function NewJobDialog({ isOpen, dark, existingJobIds, onClose, onCreate }
   function addLocation() {
     const nextIndex = locations.length;
     const candidate = String.fromCharCode(65 + (nextIndex % 26));
-    setLocations((current) => [...current, { key: `new-${Date.now()}-${nextIndex}`, id: current.some((location) => location.id === candidate) ? `L${nextIndex + 1}` : candidate, name: "", placeId: "", openTime: "09:00", closeTime: "18:00", stayMinutes: "0" }]);
+    setLocations((current) => [...current, { key: `new-${Date.now()}-${nextIndex}`, id: current.some((location) => location.id === candidate) ? `L${nextIndex + 1}` : candidate, name: "", placeId: "", openTime: "09:00", closeTime: "18:00", stayMinutes: "0", required: false, priority: "1" }]);
     setMatrix((current) => [...current.map((row) => [...row, ""]), Array.from({ length: current.length + 1 }, (_, index) => index === current.length ? "0" : "")]);
     clearFeedback();
   }
@@ -169,6 +185,7 @@ export function NewJobDialog({ isOpen, dark, existingJobIds, onClose, onCreate }
     else void applyPreset(preset);
   }
   async function applyPreset(preset: JobPreset) {
+    const nextVisitPolicy = preset.visitPolicy ?? "ALL_REQUIRED";
     const nextLocations: FormLocation[] = preset.locations.map((location) => ({
       key: `${preset.key}-${location.id}`,
       id: location.id,
@@ -177,12 +194,17 @@ export function NewJobDialog({ isOpen, dark, existingJobIds, onClose, onCreate }
       openTime: location.openTime,
       closeTime: location.closeTime,
       stayMinutes: String(location.stayMinutes),
+      required: location.required ?? false,
+      priority: String(location.priority ?? 1),
     }));
     cancelMatrixRequest();
     setPendingPreset(null);
     setCountryCode(preset.countryCode ?? "");
     setTravelMode(preset.travelMode ?? "WALKING");
     setRouteProvider("");
+    setVisitPolicy(nextVisitPolicy);
+    setStartPolicy(preset.startPolicy ?? "EARLIEST");
+    setStartTime(preset.startTime ?? "09:00");
     setLocations(nextLocations);
     setRawEditing(false);
     setFieldErrors({});
@@ -205,9 +227,12 @@ export function NewJobDialog({ isOpen, dark, existingJobIds, onClose, onCreate }
         open_time: location.openTime,
         close_time: location.closeTime,
         stay_minutes: Number(location.stayMinutes),
+        required: nextVisitPolicy === "BEST_EFFORT_ON_FAILURE" ? location.required : undefined,
+        priority: nextVisitPolicy === "BEST_EFFORT_ON_FAILURE" ? Number(location.priority) : undefined,
       })),
-      start_policy: startPolicy,
-      start_time: startTime,
+      visit_policy: nextVisitPolicy,
+      start_policy: preset.startPolicy ?? "EARLIEST",
+      start_time: preset.startTime ?? "09:00",
       country_code: preset.countryCode,
       travel_mode: preset.travelMode ?? "WALKING",
     };
@@ -270,18 +295,34 @@ export function NewJobDialog({ isOpen, dark, existingJobIds, onClose, onCreate }
   return <Dialog className="new-job-dialog" isOpen={isOpen} onClose={closeDialog} portalClassName={dark ? Classes.DARK : undefined} title="새 Job" icon="new-object" canEscapeKeyClose>
     <DialogBody className="new-job-dialog-body">
       <section className="new-job-section preset-section" aria-labelledby="preset-heading">
-        <h2 id="preset-heading">Preset</h2>
+        <div className="section-heading">
+          <h2 id="preset-heading">서울 테스트 시나리오</h2>
+          <p className={Classes.TEXT_MUTED}>실제 서울 장소와 오프라인 추정 이동시간으로 바로 실행할 수 있습니다.</p>
+        </div>
         <div className="preset-buttons">
-          {JOB_PRESETS.map((preset) => <Button key={preset.key} onClick={() => requestPreset(preset)}>{preset.name}</Button>)}
+          {JOB_PRESETS.map((preset) => (
+            <Button
+              key={preset.key}
+              aria-label={preset.name}
+              className="preset-button"
+              onClick={() => requestPreset(preset)}
+            >
+              <span className="preset-button-content">
+                <strong>{preset.name}</strong>
+                <small>{preset.description}</small>
+              </span>
+            </Button>
+          ))}
         </div>
       </section>
       <section className="new-job-section" aria-labelledby="basic-info-heading">
         <h2 id="basic-info-heading">기본 정보</h2>
         <div className="basic-info-grid">
           <label><span>Job ID</span><input className={`bp6-input ${fieldErrors.jobId ? "field-invalid" : ""}`} aria-invalid={Boolean(fieldErrors.jobId)} value={jobId} onChange={(event) => { setJobId(event.target.value); clearFeedback(); }} />{fieldErrors.jobId && <small>{fieldErrors.jobId}</small>}</label>
-          <label><span>Country</span><input className={`bp6-input ${fieldErrors.countryCode ? "field-invalid" : ""}`} aria-invalid={Boolean(fieldErrors.countryCode)} placeholder="JP" maxLength={2} value={countryCode} onChange={(event) => { setCountryCode(event.target.value); clearFeedback(); }} />{fieldErrors.countryCode && <small>{fieldErrors.countryCode}</small>}</label>
+          <label><span>Country</span><input className={`bp6-input ${fieldErrors.countryCode ? "field-invalid" : ""}`} aria-invalid={Boolean(fieldErrors.countryCode)} placeholder="KR" maxLength={2} value={countryCode} onChange={(event) => { setCountryCode(event.target.value); clearFeedback(); }} />{fieldErrors.countryCode && <small>{fieldErrors.countryCode}</small>}</label>
           <label><span>Mode</span><input className={`bp6-input ${fieldErrors.travelMode ? "field-invalid" : ""}`} aria-invalid={Boolean(fieldErrors.travelMode)} placeholder="TRANSIT" value={travelMode} onChange={(event) => { setTravelMode(event.target.value.toUpperCase() as TravelMode); clearFeedback(); }} />{fieldErrors.travelMode && <small>{fieldErrors.travelMode}</small>}</label>
           <label><span>Provider override</span><input className={`bp6-input ${fieldErrors.routeProvider ? "field-invalid" : ""}`} aria-invalid={Boolean(fieldErrors.routeProvider)} placeholder="Policy (optional)" value={routeProvider} onChange={(event) => { setRouteProvider(event.target.value.toLowerCase() as RouteProviderName | ""); clearFeedback(); }} />{fieldErrors.routeProvider && <small>{fieldErrors.routeProvider}</small>}</label>
+          <div className="visit-policy-field"><span>Visit policy</span><div className="visit-policy-options" role="group" aria-label="Visit policy"><label><input type="radio" name="visit-policy" checked={visitPolicy === "ALL_REQUIRED"} onChange={() => { setVisitPolicy("ALL_REQUIRED"); clearFeedback(); }} />모두 방문</label><label><input type="radio" name="visit-policy" checked={visitPolicy === "BEST_EFFORT_ON_FAILURE"} onChange={() => { setVisitPolicy("BEST_EFFORT_ON_FAILURE"); clearFeedback(); }} />불가능하면 일부 생략</label></div></div>
           <label><span>Start policy</span><input className={`bp6-input ${fieldErrors.startPolicy ? "field-invalid" : ""}`} aria-invalid={Boolean(fieldErrors.startPolicy)} value={startPolicy} onChange={(event) => { setStartPolicy(event.target.value.toUpperCase() as StartPolicy); clearFeedback(); }} />{fieldErrors.startPolicy && <small>{fieldErrors.startPolicy}</small>}</label>
           <label><span>Start time / lower bound</span><input className={`bp6-input ${fieldErrors.startTime ? "field-invalid" : ""}`} aria-invalid={Boolean(fieldErrors.startTime)} type="time" step="60" value={startTime} onChange={(event) => { setStartTime(event.target.value); clearFeedback(); }} />{fieldErrors.startTime && <small>{fieldErrors.startTime}</small>}</label>
           <div className="readonly-fact"><span>시간 단위</span><strong>10분</strong></div>
@@ -289,10 +330,12 @@ export function NewJobDialog({ isOpen, dark, existingJobIds, onClose, onCreate }
       </section>
 
       <section className="new-job-section" aria-labelledby="locations-heading">
-        <div className="section-heading"><div><h2 id="locations-heading">장소</h2><p className={Classes.TEXT_MUTED}>locations[0]은 고정 start, 마지막 항목은 고정 destination이며 중간 장소만 재배치됩니다.</p></div></div>
-        <div className="form-table-scroll"><table className="location-input-table"><thead><tr><th>순서</th><th>ID</th><th>이름</th><th>Place ID</th><th>Open</th><th>Close</th><th>체류시간(분)</th><th>삭제</th></tr></thead>
+        <div className="section-heading"><div><h2 id="locations-heading">장소</h2><p className={Classes.TEXT_MUTED}>locations[0]은 고정 start, 마지막 항목은 고정 destination입니다. 부분 방문 정책에서는 중간 장소의 필수 여부와 우선순위를 반영합니다.</p></div></div>
+        <div className="form-table-scroll"><table className="location-input-table"><thead><tr><th>순서</th><th>ID</th><th>이름</th><th>Place ID</th><th>Open</th><th>Close</th><th>체류시간(분)</th><th>필수</th><th>우선순위</th><th>삭제</th></tr></thead>
           <tbody>{locations.map((location, index) => {
             const role = index === 0 ? "start" : index === locations.length - 1 ? "destination" : String(index + 1);
+            const endpoint = index === 0 || index === locations.length - 1;
+            const effectivelyRequired = endpoint || visitPolicy === "ALL_REQUIRED" || location.required;
             const field = (name: string) => fieldErrors[`location.${index}.${name}`];
             return <tr key={location.key}>
               <td><Tag minimal>{role}</Tag></td>
@@ -302,6 +345,8 @@ export function NewJobDialog({ isOpen, dark, existingJobIds, onClose, onCreate }
               <td><input aria-label={`${index + 1}번 장소 Open`} aria-invalid={Boolean(field("openTime"))} className={`bp6-input time-input ${field("openTime") ? "field-invalid" : ""}`} type="time" step="600" value={location.openTime} onChange={(event) => updateLocation(index, "openTime", event.target.value)} /></td>
               <td><input aria-label={`${index + 1}번 장소 Close`} aria-invalid={Boolean(field("closeTime"))} className={`bp6-input time-input ${field("closeTime") ? "field-invalid" : ""}`} type="time" step="600" value={location.closeTime} onChange={(event) => updateLocation(index, "closeTime", event.target.value)} /></td>
               <td><input aria-label={`${index + 1}번 장소 체류시간`} aria-invalid={Boolean(field("stayMinutes"))} className={`bp6-input stay-input ${field("stayMinutes") ? "field-invalid" : ""}`} type="number" min="0" step="10" value={location.stayMinutes} onChange={(event) => updateLocation(index, "stayMinutes", event.target.value)} /></td>
+              <td><input aria-label={`${index + 1}번 장소 필수`} type="checkbox" checked={effectivelyRequired} disabled={endpoint || visitPolicy === "ALL_REQUIRED"} onChange={(event) => updateLocation(index, "required", event.target.checked)} /></td>
+              <td><input aria-label={`${index + 1}번 장소 우선순위`} aria-invalid={Boolean(field("priority"))} className={`bp6-input priority-input ${field("priority") ? "field-invalid" : ""}`} type="number" min="1" max="100" step="1" disabled={visitPolicy === "ALL_REQUIRED"} value={location.priority} onChange={(event) => updateLocation(index, "priority", event.target.value)} /></td>
               <td><Button aria-label={`${location.id || index + 1} 장소 삭제`} icon="trash" intent={Intent.DANGER} minimal onClick={() => removeLocation(index)} /></td>
             </tr>;
           })}</tbody></table></div>

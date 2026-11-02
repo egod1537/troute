@@ -58,8 +58,37 @@ impl<O: ObjectivePolicy, F: FrontierPolicy> ExactBitDpSolver<O, F> {
                 .ok_or(SolverError::NoFeasibleRoute);
         }
 
+        if input.problem.visit_policy() == crate::domain::VisitPolicy::BestEffortOnFailure {
+            let target = self
+                .search_at_start(&input, low)?
+                .ok_or(SolverError::NoFeasibleRoute)?;
+            let target_coverage = (
+                target.metrics.visited_optional_count,
+                target.metrics.visited_optional_priority,
+            );
+            let mut high = (slots_per_day() - 1) as u16;
+            while low < high {
+                let middle = low + (high - low).div_ceil(2);
+                let preserves_target =
+                    self.search_at_start(&input, middle)?.is_some_and(|result| {
+                        (
+                            result.metrics.visited_optional_count,
+                            result.metrics.visited_optional_priority,
+                        ) >= target_coverage
+                    });
+                if preserves_target {
+                    low = middle;
+                } else {
+                    high = middle - 1;
+                }
+            }
+            return self
+                .search_at_start(&input, low)?
+                .ok_or(SolverError::NoFeasibleRoute);
+        }
+
         // Feasibility is monotone: an earlier departure can wait and reproduce
-        // any later feasible route. Binary search avoids up to 144 full DPs.
+        // any later feasible route. Binary search avoids up to 1,440 full DPs.
         let mut high = (slots_per_day() - 1) as u16;
         if !self.is_feasible_at_start(&input, low)? {
             return Err(SolverError::NoFeasibleRoute);
@@ -112,12 +141,23 @@ impl<O: ObjectivePolicy, F: FrontierPolicy> ExactBitDpSolver<O, F> {
         let state_count = 1_usize << location_count;
         let full_mask = state_count - 1;
         let end = input.problem.end_location_index();
+        let required_mask = input
+            .problem
+            .locations()
+            .iter()
+            .enumerate()
+            .filter(|(_, location)| location.required())
+            .fold(0_usize, |mask, (index, _)| mask | (1 << index));
+        let partial =
+            input.problem.visit_policy() == crate::domain::VisitPolicy::BestEffortOnFailure;
         let mut frontiers = vec![Vec::<usize>::new(); state_count * location_count];
         let mut arena = Vec::new();
         arena.push(ParetoState {
             time_slot: initial.departure_slot,
             travel_minutes: 0,
             wait_minutes: initial.wait_minutes,
+            visited_optional_count: 0,
+            visited_optional_priority: 0,
             score: self.objective.score(0, initial.wait_minutes),
             frontier_cost: self.objective.frontier_cost(0, initial.wait_minutes),
             predecessor: None,
@@ -135,14 +175,22 @@ impl<O: ObjectivePolicy, F: FrontierPolicy> ExactBitDpSolver<O, F> {
                 }
                 let state_ids = frontiers[index(mask, last, location_count)].clone();
                 for state_id in state_ids {
+                    if last == end {
+                        continue;
+                    }
                     for next in 1..location_count {
                         let next_bit = 1 << next;
                         if mask & next_bit != 0 {
                             continue;
                         }
                         // The fixed destination can only be visited last.
-                        if next == end && mask | next_bit != full_mask {
-                            continue;
+                        if next == end {
+                            let terminal_mask = mask | next_bit;
+                            if (!partial && terminal_mask != full_mask)
+                                || (terminal_mask & required_mask != required_mask)
+                            {
+                                continue;
+                            }
                         }
                         let Some(candidate) =
                             self.transition(input, &arena[state_id], state_id, next)
@@ -173,8 +221,15 @@ impl<O: ObjectivePolicy, F: FrontierPolicy> ExactBitDpSolver<O, F> {
             }
         }
 
-        let terminal_ids = &frontiers[index(full_mask, end, location_count)];
-        let best = terminal_ids.iter().copied().min_by(|&left, &right| {
+        let terminal_ids: Vec<_> = if partial {
+            (1..=full_mask)
+                .filter(|mask| mask & (1 << end) != 0 && mask & required_mask == required_mask)
+                .flat_map(|mask| frontiers[index(mask, end, location_count)].iter().copied())
+                .collect()
+        } else {
+            frontiers[index(full_mask, end, location_count)].clone()
+        };
+        let best = terminal_ids.into_iter().min_by(|&left, &right| {
             self.objective.compare(
                 &metrics(input.problem.start_policy(), start_time_slot, &arena[left]),
                 &metrics(input.problem.start_policy(), start_time_slot, &arena[right]),
@@ -279,10 +334,19 @@ impl<O: ObjectivePolicy, F: FrontierPolicy> ExactBitDpSolver<O, F> {
         let wait_minutes = (service_start - arrival_slot).checked_mul(TIME_SLOT_MINUTES)?;
         let total_travel = state.travel_minutes.checked_add(travel_minutes)?;
         let total_wait = state.wait_minutes.checked_add(wait_minutes)?;
+        let optional = !location.required();
         Some(ParetoState {
             time_slot: finish_slot as u16,
             travel_minutes: total_travel,
             wait_minutes: total_wait,
+            visited_optional_count: state.visited_optional_count + usize::from(optional),
+            visited_optional_priority: state.visited_optional_priority.checked_add(
+                if optional {
+                    u32::from(location.priority())
+                } else {
+                    0
+                },
+            )?,
             score: self.objective.score(total_travel, total_wait),
             frontier_cost: self.objective.frontier_cost(total_travel, total_wait),
             predecessor: Some(predecessor),
@@ -334,6 +398,8 @@ fn metrics(
 ) -> SolutionMetrics {
     SolutionMetrics {
         start_policy,
+        visited_optional_count: state.visited_optional_count,
+        visited_optional_priority: state.visited_optional_priority,
         start_time_slot,
         finish_time_slot: state.time_slot,
         travel_minutes: state.travel_minutes,
@@ -347,252 +413,4 @@ fn index(mask: usize, last: usize, location_count: usize) -> usize {
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::{
-        api::OptimizeRouteRequest,
-        cancellation::CancellationToken,
-        domain::{Location, OptimizationProblem, RoutingReference, TimeOfDay, TimeWindow},
-        matrix::TravelTimeMatrix,
-    };
-
-    fn problem(windows_and_stays: &[(&str, &str, u32)], start: &str) -> OptimizationProblem {
-        let locations: Vec<_> = windows_and_stays
-            .iter()
-            .enumerate()
-            .map(|(index, (open, close, stay))| {
-                serde_json::json!({
-                    "id": index.to_string(),
-                    "place_id": format!("place-{index}"),
-                    "open_time": open,
-                    "close_time": close,
-                    "stay_minutes": stay
-                })
-            })
-            .collect();
-        let request: OptimizeRouteRequest = serde_json::from_value(serde_json::json!({
-            "job_id": "exact-solver-test",
-            "locations": locations,
-            "start_time": start
-        }))
-        .unwrap();
-        request.try_into().unwrap()
-    }
-
-    fn detailed(
-        problem: &OptimizationProblem,
-        rows: Vec<Vec<u32>>,
-    ) -> Result<ExactSolveResult, SolverError> {
-        let matrix = TravelTimeMatrix::new(rows).unwrap();
-        ExactBitDpSolver::default().solve_detailed(SolverInput {
-            matrix: &matrix,
-            problem,
-            cancellation: &CancellationToken::new(),
-        })
-    }
-
-    #[test]
-    fn solves_one_location() {
-        let problem = OptimizationProblem::new(
-            vec![Location::new(
-                "0".to_owned(),
-                RoutingReference::GooglePlaceId("place-0".to_owned()),
-                TimeWindow::new(
-                    TimeOfDay::from_minutes(0).unwrap(),
-                    TimeOfDay::from_minutes(1439).unwrap(),
-                )
-                .unwrap(),
-                0,
-            )],
-            TimeOfDay::from_minutes(540).unwrap(),
-        );
-        let result = detailed(&problem, vec![vec![0]]).unwrap();
-        assert_eq!(result.solution.visit_order, vec![0]);
-        assert_eq!(result.metrics.start_time_slot, 143);
-        assert_eq!(result.metrics.finish_time_slot, 143);
-    }
-
-    #[test]
-    fn solves_three_locations_and_respects_opening_and_closing() {
-        let problem = problem(
-            &[
-                ("00:00", "23:50", 0),
-                ("10:00", "10:30", 20),
-                ("00:00", "23:50", 0),
-            ],
-            "09:00",
-        );
-        let result = detailed(
-            &problem,
-            vec![vec![0, 10, 90], vec![10, 0, 10], vec![90, 10, 0]],
-        )
-        .unwrap();
-        assert_eq!(result.solution.visit_order, vec![0, 1, 2]);
-        assert_eq!(result.metrics.start_time_slot, 60); // 10:00
-        assert_eq!(result.metrics.finish_time_slot, 64); // 10:40 at destination
-    }
-
-    #[test]
-    fn records_waiting_at_a_fixed_start_slot() {
-        let problem = problem(
-            &[
-                ("00:00", "23:50", 0),
-                ("10:00", "18:00", 10),
-                ("00:00", "23:50", 0),
-            ],
-            "09:00",
-        );
-        let matrix = TravelTimeMatrix::new(vec![vec![0; 3]; 3]).unwrap();
-        let cancellation = CancellationToken::new();
-        let input = SolverInput {
-            matrix: &matrix,
-            problem: &problem,
-            cancellation: &cancellation,
-        };
-        let result = ExactBitDpSolver::default()
-            .search_at_start(&input, 54)
-            .unwrap()
-            .unwrap();
-        assert_eq!(result.metrics.wait_minutes, 60);
-    }
-
-    #[test]
-    fn reports_infeasible_time_windows() {
-        let problem = problem(
-            &[
-                ("00:00", "23:50", 0),
-                ("09:00", "09:10", 20),
-                ("00:00", "23:50", 0),
-            ],
-            "09:00",
-        );
-        assert!(matches!(
-            detailed(&problem, vec![vec![0; 3]; 3]),
-            Err(SolverError::NoFeasibleRoute)
-        ));
-    }
-
-    #[test]
-    fn directed_times_choose_the_only_feasible_order() {
-        let problem = problem(
-            &[
-                ("00:00", "23:50", 0),
-                ("09:00", "12:00", 0),
-                ("09:00", "12:00", 0),
-                ("00:00", "23:50", 0),
-            ],
-            "09:00",
-        );
-        let huge = 240;
-        let result = detailed(
-            &problem,
-            vec![
-                vec![0, 10, huge, 0],
-                vec![huge, 0, 10, 10],
-                vec![huge, huge, 0, 10],
-                vec![0, 0, 0, 0],
-            ],
-        )
-        .unwrap();
-        assert_eq!(result.solution.visit_order, vec![0, 1, 2, 3]);
-    }
-
-    #[test]
-    fn latest_start_precedes_cost_and_finish_breaks_ties() {
-        let problem = problem(
-            &[
-                ("00:00", "23:50", 0),
-                ("09:00", "12:00", 0),
-                ("09:00", "12:00", 0),
-                ("00:00", "23:50", 0),
-            ],
-            "09:00",
-        );
-        let rows = vec![
-            vec![0, 10, 10, 0],
-            vec![0, 0, 20, 10],
-            vec![0, 20, 0, 40],
-            vec![0, 0, 0, 0],
-        ];
-        let result = detailed(&problem, rows.clone()).unwrap();
-        assert_eq!(result.metrics.start_time_slot, 69); // 11:30
-        assert_eq!(result.solution.visit_order, vec![0, 2, 1, 3]);
-        assert_eq!(result.metrics.finish_time_slot, 73); // 12:10 at destination
-
-        let matrix = TravelTimeMatrix::new(rows).unwrap();
-        let selected = ExactBitDpSolver::default()
-            .selected_start_time(
-                SolverInput {
-                    matrix: &matrix,
-                    problem: &problem,
-                    cancellation: &CancellationToken::new(),
-                },
-                &result.solution,
-            )
-            .unwrap();
-        assert_eq!(selected.to_string(), "11:30");
-    }
-
-    #[test]
-    fn latest_visit_start_moves_back_by_the_start_stay() {
-        let without_start_stay = problem(&[("00:00", "23:50", 0), ("00:00", "11:00", 0)], "00:00");
-        let with_start_stay = problem(&[("00:00", "23:50", 60), ("00:00", "11:00", 0)], "00:00");
-        let rows = vec![vec![0, 30], vec![30, 0]];
-
-        let without = detailed(&without_start_stay, rows.clone()).unwrap();
-        let with = detailed(&with_start_stay, rows).unwrap();
-
-        assert_eq!(without.metrics.start_time_slot, 63); // 10:30
-        assert_eq!(with.metrics.start_time_slot, 57); // 09:30
-        assert_eq!(
-            without.metrics.start_time_slot - with.metrics.start_time_slot,
-            6
-        );
-        assert_eq!(with.metrics.finish_time_slot, 66); // 11:00
-    }
-
-    #[test]
-    fn pareto_pruning_retains_the_optimal_predecessor_chain() {
-        let problem = problem(&[("00:00", "23:50", 0); 5], "09:00");
-        let mut rows = vec![vec![600; 5]; 5];
-        for (from, to, minutes) in [(0, 1, 10), (1, 2, 10), (2, 3, 10), (3, 4, 10)] {
-            rows[from][to] = minutes;
-        }
-        // A slower path reaches the same (mask, last=3) frontier cell.
-        for (from, to, minutes) in [(0, 2, 40), (2, 1, 40), (1, 3, 40)] {
-            rows[from][to] = minutes;
-        }
-        for (index, row) in rows.iter_mut().enumerate() {
-            row[index] = 0;
-        }
-        let matrix = TravelTimeMatrix::new(rows).unwrap();
-        let cancellation = CancellationToken::new();
-        let result = ExactBitDpSolver::default()
-            .search_at_start(
-                &SolverInput {
-                    matrix: &matrix,
-                    problem: &problem,
-                    cancellation: &cancellation,
-                },
-                54,
-            )
-            .unwrap()
-            .unwrap();
-        assert_eq!(result.solution.visit_order, vec![0, 1, 2, 3, 4]);
-        assert_eq!(result.metrics.travel_minutes, 40);
-    }
-
-    #[test]
-    fn rejects_more_than_the_exact_limit() {
-        let entries = vec![("00:00", "23:50", 0); EXACT_MAX_LOCATIONS + 1];
-        let problem = problem(&entries, "09:00");
-        let size = entries.len();
-        assert!(matches!(
-            detailed(&problem, vec![vec![0; size]; size]),
-            Err(SolverError::UnsupportedLocationCount {
-                maximum: EXACT_MAX_LOCATIONS,
-                actual
-            }) if actual == size
-        ));
-    }
-}
+mod tests;

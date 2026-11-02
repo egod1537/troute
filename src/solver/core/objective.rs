@@ -8,6 +8,8 @@ use super::{SolverError, SolverInput, SolverSolution};
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct SolutionMetrics {
     pub start_policy: StartPolicy,
+    pub visited_optional_count: usize,
+    pub visited_optional_priority: u32,
     pub start_time_slot: u16,
     pub finish_time_slot: u16,
     pub travel_minutes: u32,

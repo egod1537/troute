@@ -5,6 +5,7 @@ use chrono::{SecondsFormat, Utc};
 use crate::{
     cancellation::CancellationToken,
     domain::Location,
+    logging::logger,
     routing::{RoutingContext, RoutingError, TravelTime, TravelTimeProvider},
 };
 
@@ -73,11 +74,7 @@ impl TcacheTravelTimeProvider {
             }
             if Instant::now() >= deadline {
                 self.cancel(&job_id);
-                eprintln!(
-                    "tcache route job timed out; pair={} -> {}; jobId={job_id}",
-                    from.id(),
-                    to.id()
-                );
+                logger().tcache_route_job_timed_out(from.id(), to.id(), &job_id);
                 return Err(timeout_error(from, to, Some(&job_id)));
             }
             let status: JobStatusResponse = match self.request_json(
@@ -91,11 +88,7 @@ impl TcacheTravelTimeProvider {
                 Ok(status) => status,
                 Err(_error) if Instant::now() >= deadline => {
                     self.cancel(&job_id);
-                    eprintln!(
-                        "tcache route job timed out; pair={} -> {}; jobId={job_id}",
-                        from.id(),
-                        to.id()
-                    );
+                    logger().tcache_route_job_timed_out(from.id(), to.id(), &job_id);
                     return Err(timeout_error(from, to, Some(&job_id)));
                 }
                 Err(error) => return Err(error),
@@ -111,6 +104,28 @@ impl TcacheTravelTimeProvider {
                         )
                     }) {
                         return Err(error);
+                    }
+                    if status.status == "failed"
+                        && status.error.as_ref().is_some_and(|error| {
+                            matches!(
+                                error.code.to_ascii_uppercase().as_str(),
+                                "NO_ROUTE_FOUND"
+                                    | "ROUTE_NOT_FOUND"
+                                    | "ZERO_RESULTS"
+                                    | "UNREACHABLE"
+                            )
+                        })
+                    {
+                        let reason = status
+                            .error
+                            .as_ref()
+                            .map(|error| error.message.clone())
+                            .unwrap_or_else(|| "provider reported no route".to_owned());
+                        return Err(RoutingError::Unreachable {
+                            from: from.id().to_owned(),
+                            to: to.id().to_owned(),
+                            reason,
+                        });
                     }
                     let detail = status
                         .error
@@ -153,11 +168,7 @@ impl TcacheTravelTimeProvider {
             Ok(result) => result,
             Err(_error) if Instant::now() >= deadline => {
                 self.cancel(&job_id);
-                eprintln!(
-                    "tcache route job timed out; pair={} -> {}; jobId={job_id}",
-                    from.id(),
-                    to.id()
-                );
+                logger().tcache_route_job_timed_out(from.id(), to.id(), &job_id);
                 return Err(timeout_error(from, to, Some(&job_id)));
             }
             Err(error) => return Err(error),

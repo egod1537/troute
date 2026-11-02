@@ -63,6 +63,7 @@ interface AppHeaderProps {
   health: HealthState;
   healthRefreshing: boolean;
   themeMode: ThemeMode;
+  onOpenProviderPolicy: () => void;
   onRefreshHealth: () => void;
   onThemeChange: (mode: ThemeMode) => void;
 }
@@ -71,6 +72,7 @@ export function AppHeader({
   health,
   healthRefreshing,
   themeMode,
+  onOpenProviderPolicy,
   onRefreshHealth,
   onThemeChange,
 }: AppHeaderProps) {
@@ -98,6 +100,14 @@ export function AppHeader({
         <CommitIndicator />
       </NavbarGroup>
       <NavbarGroup align={Alignment.END}>
+        <Button
+          aria-label="Provider 정책"
+          icon="settings"
+          variant="minimal"
+          onClick={onOpenProviderPolicy}
+        >
+          <span className="navbar-provider-label">Provider 정책</span>
+        </Button>
         <span className={`${Classes.TEXT_MUTED} navbar-api-label`}>API</span>
         <Tag
           aria-label={`API ${healthLabel}`}

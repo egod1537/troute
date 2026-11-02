@@ -6,6 +6,12 @@ pub enum SolverError {
     Cancelled,
     #[error("no feasible route was found")]
     NoFeasibleRoute,
+    #[error("solver proved that no feasible route exists")]
+    ProvenInfeasible,
+    #[error("solver capability is unavailable: {0}")]
+    Unsupported(String),
+    #[error("solver reached its time limit without a feasible route")]
+    TimedOut,
     #[error("exact solver supports at most {maximum} locations (actual {actual})")]
     UnsupportedLocationCount { maximum: usize, actual: usize },
     #[error("bit-DP perfect matching supports at most {maximum} vertices (actual {actual})")]

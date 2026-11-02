@@ -59,8 +59,10 @@ fn input<'a>(
 fn expected_metrics() -> SolutionMetrics {
     SolutionMetrics {
         start_policy: troute::domain::StartPolicy::Latest,
-        start_time_slot: 139,
-        finish_time_slot: 143,
+        visited_optional_count: 0,
+        visited_optional_priority: 0,
+        start_time_slot: 23 * 60 + 10,
+        finish_time_slot: 23 * 60 + 50,
         travel_minutes: 40,
         wait_minutes: 0,
         score: 40,
@@ -291,6 +293,8 @@ fn caller_matrix_bypass_and_api_response_contract_are_stable() {
         BTreeSet::from([
             "frontier_cell_count",
             "frontier_state_count",
+            "outcome",
+            "proof_status",
             "state_count",
             "timed_out"
         ])

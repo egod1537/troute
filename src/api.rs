@@ -1,11 +1,12 @@
 use std::collections::HashSet;
 
+use chrono::{LocalResult, NaiveDate, NaiveDateTime, NaiveTime, TimeZone, Utc};
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
 use crate::domain::{
     DomainError, Location, OptimizationProblem, RoutePlan, RoutingReference, StartPolicy,
-    TimeOfDay, TimeWindow,
+    TimeOfDay, TimeWindow, VisitPolicy,
 };
 use crate::events::{validate_job_id, JobIdError};
 use crate::routing::{
@@ -13,11 +14,14 @@ use crate::routing::{
     RouteProviderSelectionSource, TravelMode,
 };
 use crate::solver::{
-    SolverCandidate, SolverCandidateMetadata, SolverDiagnostics, TIME_SLOT_MINUTES,
+    PortfolioExperimentOptions, PortfolioTelemetrySummary, SolverCandidate,
+    SolverCandidateMetadata, SolverDiagnostics, SolverOutcomeKind, SolverProofStatus,
+    TIME_SLOT_MINUTES,
 };
 
 const MAX_LOCATIONS: usize = 500;
 const MAX_STRING_CHARACTERS: usize = 512;
+const INPUT_TIME_GRANULARITY_MINUTES: u32 = 10;
 pub const MAX_DEBUG_JOB_DURATION_MS: u64 = 60_000;
 
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
@@ -26,9 +30,15 @@ pub struct OptimizeRouteRequest {
     pub job_id: String,
     pub locations: Vec<LocationInput>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub visit_policy: Option<VisitPolicy>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub start_policy: Option<StartPolicy>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub start_time: Option<TimeOfDay>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub travel_date: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none", alias = "timeZone")]
+    pub time_zone: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub travel_mode: Option<TravelMode>,
     #[serde(
@@ -46,8 +56,14 @@ pub struct OptimizeRouteRequest {
     pub route_provider: Option<RouteProviderName>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub travel_time_matrix: Option<Vec<Vec<u32>>>,
+    /// Sparse matrix form. JSON numbers are travel minutes and `null` marks a
+    /// directed arc that is known to be unreachable.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sparse_travel_time_matrix: Option<Vec<Vec<Option<u32>>>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub debug: Option<DebugOptions>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub portfolio_experiment: Option<PortfolioExperimentOptions>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
@@ -71,6 +87,10 @@ pub struct LocationInput {
     pub open_time: TimeOfDay,
     pub close_time: TimeOfDay,
     pub stay_minutes: u32,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub required: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub priority: Option<u8>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
@@ -82,9 +102,19 @@ pub struct OptimizeRouteResponse {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub selected_start_time: Option<TimeOfDay>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub partial: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub visited_count: Option<usize>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub skipped_locations: Option<Vec<SkippedLocationOutput>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub result_quality: Option<PartialResultQuality>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub solver_candidates: Option<Vec<SolverCandidateOutput>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub solver_diagnostics: Option<SolverDiagnosticsOutput>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub solver_telemetry: Option<PortfolioTelemetrySummary>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub selected_provider: Option<RouteProviderName>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -95,6 +125,40 @@ pub struct OptimizeRouteResponse {
     pub country_code: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub mode: Option<TravelMode>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub matrix_departure_time: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub matrix_time_zone: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub time_dependent_revalidation: Option<TimeDependentRevalidationOutput>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
+pub struct TimeDependentRevalidationOutput {
+    pub attempted: bool,
+    pub applied: bool,
+    pub revalidated_leg_count: usize,
+    pub changed_leg_count: usize,
+    pub max_delta_minutes: u32,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub schedule_feasible: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub warning_code: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub warning_detail: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
+pub struct SkippedLocationOutput {
+    pub location_id: String,
+    pub reason: String,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(rename_all = "SCREAMING_SNAKE_CASE")]
+pub enum PartialResultQuality {
+    Proven,
+    BestFound,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
@@ -111,6 +175,10 @@ pub struct SolverDiagnosticsOutput {
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
 pub struct SolverCandidateOutput {
     pub strategy: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub solver_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub run_id: Option<u64>,
     pub best: bool,
     pub route: Vec<String>,
     pub feasible: bool,
@@ -130,10 +198,54 @@ pub struct ObjectiveScoreOutput {
     pub finish_time: TimeOfDay,
     pub travel_minutes: u32,
     pub wait_minutes: u32,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub visited_optional_count: Option<usize>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub visited_optional_priority: Option<u32>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
 pub struct SolverCandidateMetadataOutput {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub job_queued_at_ms: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub job_started_at_ms: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub job_finished_at_ms: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub queued_ms: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub reserved_slot_ms: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub cpu_ms: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub peak_rss_bytes: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub memory_hint_bytes: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub scheduler_reason: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub scheduler_score: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub outcome: Option<SolverOutcomeKind>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub proof_status: Option<SolverProofStatus>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub objective_phase: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub best_bound: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub relative_gap_ppm: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub thread_count: Option<usize>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub source_version: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub native_status: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub child_process_id: Option<u32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub exit_code: Option<i32>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub state_count: Option<usize>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -209,6 +321,12 @@ pub struct SolverCandidateMetadataOutput {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub two_opt_move_count: Option<u64>,
     #[serde(skip_serializing_if = "Option::is_none")]
+    pub insert_optional_move_count: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub remove_optional_move_count: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub replace_optional_move_count: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub accepted_worse_moves: Option<u64>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub infeasible_candidates: Option<u64>,
@@ -282,6 +400,12 @@ impl TryFrom<OptimizeRouteRequest> for OptimizationProblem {
             normalize_country_code(country_code)
                 .map_err(RequestValidationError::InvalidCountryCode)?;
         }
+        requested_routing_departure(
+            &request,
+            request
+                .start_time
+                .unwrap_or_else(|| TimeOfDay::from_minutes(0).expect("midnight is valid")),
+        )?;
         if let Some(actual) = request
             .debug
             .as_ref()
@@ -306,6 +430,7 @@ impl TryFrom<OptimizeRouteRequest> for OptimizationProblem {
             });
         }
         let start_policy = request.start_policy.unwrap_or_default();
+        let visit_policy = request.visit_policy.unwrap_or_default();
         let start_time = match (start_policy, request.start_time) {
             (StartPolicy::Fixed, None) => {
                 return Err(RequestValidationError::FixedStartTimeRequired)
@@ -313,7 +438,11 @@ impl TryFrom<OptimizeRouteRequest> for OptimizationProblem {
             (_, Some(start_time)) => start_time,
             (_, None) => TimeOfDay::from_minutes(0).expect("midnight is a valid time"),
         };
-        let has_supplied_matrix = request.travel_time_matrix.is_some();
+        if request.travel_time_matrix.is_some() && request.sparse_travel_time_matrix.is_some() {
+            return Err(RequestValidationError::MultipleTravelTimeMatrices);
+        }
+        let has_supplied_matrix =
+            request.travel_time_matrix.is_some() || request.sparse_travel_time_matrix.is_some();
         if let Some(matrix) = request.travel_time_matrix.as_ref() {
             if matrix.len() != request.locations.len() {
                 return Err(RequestValidationError::TravelTimeMatrixSizeMismatch {
@@ -337,10 +466,44 @@ impl TryFrom<OptimizeRouteRequest> for OptimizationProblem {
                 }
             }
         }
-        let mut ids = HashSet::with_capacity(request.locations.len());
-        let mut locations = Vec::with_capacity(request.locations.len());
+        if let Some(matrix) = request.sparse_travel_time_matrix.as_ref() {
+            if matrix.len() != request.locations.len() {
+                return Err(RequestValidationError::TravelTimeMatrixSizeMismatch {
+                    expected: request.locations.len(),
+                    actual: matrix.len(),
+                });
+            }
+            for (row, values) in matrix.iter().enumerate() {
+                if values.len() != request.locations.len() {
+                    return Err(RequestValidationError::TravelTimeMatrixRowSizeMismatch {
+                        row,
+                        expected: request.locations.len(),
+                        actual: values.len(),
+                    });
+                }
+                match values[row] {
+                    Some(0) => {}
+                    Some(actual) => {
+                        return Err(RequestValidationError::TravelTimeMatrixDiagonalNonzero {
+                            index: row,
+                            actual,
+                        })
+                    }
+                    None => {
+                        return Err(
+                            RequestValidationError::TravelTimeMatrixDiagonalUnreachable {
+                                index: row,
+                            },
+                        )
+                    }
+                }
+            }
+        }
+        let location_count = request.locations.len();
+        let mut ids = HashSet::with_capacity(location_count);
+        let mut locations = Vec::with_capacity(location_count);
 
-        for input in request.locations {
+        for (location_index, input) in request.locations.into_iter().enumerate() {
             if input.id.trim().is_empty() {
                 return Err(RequestValidationError::EmptyLocationId);
             }
@@ -378,7 +541,7 @@ impl TryFrom<OptimizeRouteRequest> for OptimizationProblem {
                 ("open_time", input.open_time),
                 ("close_time", input.close_time),
             ] {
-                if time.minutes() % TIME_SLOT_MINUTES as u16 != 0 {
+                if time.minutes() % INPUT_TIME_GRANULARITY_MINUTES as u16 != 0 {
                     return Err(RequestValidationError::TimeNotTenMinuteAligned {
                         location_id: input.id.clone(),
                         field,
@@ -386,12 +549,30 @@ impl TryFrom<OptimizeRouteRequest> for OptimizationProblem {
                     });
                 }
             }
-            if input.stay_minutes % TIME_SLOT_MINUTES != 0 {
+            if input.stay_minutes % INPUT_TIME_GRANULARITY_MINUTES != 0 {
                 return Err(RequestValidationError::StayMinutesNotTenMinuteMultiple {
                     location_id: input.id.clone(),
                     actual: input.stay_minutes,
                 });
             }
+            let endpoint = location_index == 0 || location_index + 1 == location_count;
+            if input.required == Some(false)
+                && (endpoint || visit_policy == VisitPolicy::AllRequired)
+            {
+                return Err(RequestValidationError::RequiredLocationCannotBeOptional {
+                    location_id: input.id,
+                });
+            }
+            let priority = input.priority.unwrap_or(1);
+            if !(1..=100).contains(&priority) {
+                return Err(RequestValidationError::InvalidLocationPriority {
+                    location_id: input.id,
+                    actual: priority,
+                });
+            }
+            let required = visit_policy == VisitPolicy::AllRequired
+                || endpoint
+                || input.required.unwrap_or(false);
 
             let time_window =
                 TimeWindow::new(input.open_time, input.close_time).map_err(|source| {
@@ -401,29 +582,91 @@ impl TryFrom<OptimizeRouteRequest> for OptimizationProblem {
                     }
                 })?;
 
-            locations.push(Location::new(
-                input.id,
-                RoutingReference::GooglePlaceId(input.place_id),
-                time_window,
-                input.stay_minutes,
-            ));
+            locations.push(
+                Location::new(
+                    input.id,
+                    RoutingReference::GooglePlaceId(input.place_id),
+                    time_window,
+                    input.stay_minutes,
+                )
+                .with_visit_metadata(required, priority),
+            );
         }
 
-        Ok(OptimizationProblem::with_start_policy(
+        Ok(OptimizationProblem::with_policies(
             locations,
             start_time,
             start_policy,
+            visit_policy,
         ))
     }
 }
 
 impl OptimizeRouteResponse {
+    /// Removes opt-in portfolio fields so ordinary `/optimize` traffic keeps
+    /// its historical JSON shape. The unmodified response can still be stored
+    /// for the versioned telemetry endpoints before this method is called.
+    pub(crate) fn strip_portfolio_extensions(&mut self) {
+        self.solver_telemetry = None;
+        if let Some(candidates) = self.solver_candidates.as_mut() {
+            for candidate in candidates {
+                candidate.solver_id = None;
+                candidate.run_id = None;
+                if let Some(objective) = candidate.objective_score.as_mut() {
+                    objective.visited_optional_count = None;
+                    objective.visited_optional_priority = None;
+                }
+                candidate.metadata.queued_ms = None;
+                candidate.metadata.job_queued_at_ms = None;
+                candidate.metadata.job_started_at_ms = None;
+                candidate.metadata.job_finished_at_ms = None;
+                candidate.metadata.reserved_slot_ms = None;
+                candidate.metadata.cpu_ms = None;
+                candidate.metadata.peak_rss_bytes = None;
+                candidate.metadata.memory_hint_bytes = None;
+                candidate.metadata.scheduler_reason = None;
+                candidate.metadata.scheduler_score = None;
+                candidate.metadata.thread_count = None;
+                candidate.metadata.improved_global_best = None;
+            }
+        }
+    }
+
     pub(crate) fn from_plan(
         plan: RoutePlan,
         problem: &OptimizationProblem,
         diagnostics: Option<&SolverDiagnostics>,
     ) -> Self {
         let schedule_objective = ScheduleObjective::from_plan(&plan);
+        let mut visited = vec![false; problem.locations().len()];
+        for stop in &plan.stops {
+            visited[stop.location_index] = true;
+        }
+        let partial_mode = problem.visit_policy() == VisitPolicy::BestEffortOnFailure;
+        let skipped_locations = partial_mode.then(|| {
+            problem
+                .locations()
+                .iter()
+                .enumerate()
+                .filter(|(index, location)| !location.required() && !visited[*index])
+                .map(|(_, location)| SkippedLocationOutput {
+                    location_id: location.id().to_owned(),
+                    reason: "NOT_SELECTED_DUE_TO_CONSTRAINTS".to_owned(),
+                })
+                .collect::<Vec<_>>()
+        });
+        let partial = skipped_locations
+            .as_ref()
+            .map(|skipped| !skipped.is_empty());
+        let result_quality = partial_mode.then(|| {
+            if diagnostics
+                .is_some_and(|diagnostics| diagnostics.selected_strategy == "exact_bit_dp")
+            {
+                PartialResultQuality::Proven
+            } else {
+                PartialResultQuality::BestFound
+            }
+        });
         let best_route: Vec<String> = plan
             .stops
             .iter()
@@ -445,12 +688,17 @@ impl OptimizeRouteResponse {
             .collect();
 
         let selected_start_time = route.first().map(|stop| stop.arrival_time);
+        let visited_count = partial_mode.then_some(route.len());
 
         Self {
             route,
             total_travel_minutes: plan.total_travel_minutes,
             start_policy: Some(problem.start_policy()),
             selected_start_time,
+            partial,
+            visited_count,
+            skipped_locations,
+            result_quality,
             solver_candidates: diagnostics.map(|diagnostics| {
                 let mut best_emitted = false;
                 diagnostics
@@ -478,11 +726,16 @@ impl OptimizeRouteResponse {
                 global_best_updates: diagnostics.global_best_updates,
                 termination_reason: diagnostics.termination_reason.clone(),
             }),
+            solver_telemetry: diagnostics
+                .and_then(|diagnostics| diagnostics.portfolio_telemetry.clone()),
             selected_provider: None,
             provider_selection_reason: None,
             provider_selection_source: None,
             country_code: None,
             mode: None,
+            matrix_departure_time: None,
+            matrix_time_zone: None,
+            time_dependent_revalidation: None,
         }
     }
 
@@ -500,6 +753,73 @@ impl OptimizeRouteResponse {
             self.mode = Some(mode);
         }
     }
+
+    pub(crate) fn set_routing_time_metadata(
+        &mut self,
+        departure_time: chrono::DateTime<Utc>,
+        time_zone: Option<String>,
+    ) {
+        self.matrix_departure_time = Some(departure_time.to_rfc3339());
+        self.matrix_time_zone = time_zone;
+    }
+
+    pub(crate) fn set_time_dependent_revalidation(
+        &mut self,
+        value: TimeDependentRevalidationOutput,
+    ) {
+        self.time_dependent_revalidation = Some(value);
+    }
+}
+
+pub(crate) fn requested_routing_departure(
+    request: &OptimizeRouteRequest,
+    start_time: TimeOfDay,
+) -> Result<Option<(chrono::DateTime<Utc>, String)>, RequestValidationError> {
+    let (date, time_zone) = match (&request.travel_date, &request.time_zone) {
+        (None, None) => return Ok(None),
+        (Some(_), None) => return Err(RequestValidationError::TravelDateRequiresTimeZone),
+        (None, Some(_)) => return Err(RequestValidationError::TimeZoneRequiresTravelDate),
+        (Some(date), Some(time_zone)) => (date, time_zone),
+    };
+    let date = NaiveDate::parse_from_str(date, "%Y-%m-%d").map_err(|_| {
+        RequestValidationError::InvalidTravelDate(request.travel_date.clone().unwrap_or_default())
+    })?;
+    let zone = time_zone
+        .parse::<chrono_tz::Tz>()
+        .map_err(|_| RequestValidationError::InvalidTimeZone(time_zone.clone()))?;
+    if let Some(country) = request.country_code.as_deref() {
+        let expected = match country.to_ascii_uppercase().as_str() {
+            "KR" => Some("Asia/Seoul"),
+            "JP" => Some("Asia/Tokyo"),
+            _ => None,
+        };
+        if expected.is_some_and(|expected| expected != time_zone) {
+            return Err(RequestValidationError::CountryTimeZoneMismatch {
+                country_code: country.to_ascii_uppercase(),
+                time_zone: time_zone.clone(),
+            });
+        }
+    }
+    let minute = start_time.minutes();
+    let time = NaiveTime::from_hms_opt(u32::from(minute / 60), u32::from(minute % 60), 0)
+        .expect("validated TimeOfDay always forms a NaiveTime");
+    let local = NaiveDateTime::new(date, time);
+    let zoned = match zone.from_local_datetime(&local) {
+        LocalResult::Single(value) => value,
+        LocalResult::Ambiguous(_, _) => {
+            return Err(RequestValidationError::AmbiguousLocalDeparture {
+                local: local.to_string(),
+                time_zone: time_zone.clone(),
+            })
+        }
+        LocalResult::None => {
+            return Err(RequestValidationError::NonexistentLocalDeparture {
+                local: local.to_string(),
+                time_zone: time_zone.clone(),
+            })
+        }
+    };
+    Ok(Some((zoned.with_timezone(&Utc), time_zone.clone())))
 }
 
 impl SolverCandidateOutput {
@@ -549,11 +869,24 @@ impl SolverCandidateOutput {
                         .ok()?,
                         travel_minutes: score.travel_minutes,
                         wait_minutes: score.wait_minutes,
+                        visited_optional_count: Some(score.visited_optional_count),
+                        visited_optional_priority: Some(score.visited_optional_priority),
                     })
                 })
             });
         Self {
             strategy: candidate.strategy.clone(),
+            solver_id: candidate.metadata.solver_id.clone().or_else(|| {
+                Some(
+                    if candidate.strategy.starts_with("sa_") {
+                        "sa"
+                    } else {
+                        &candidate.strategy
+                    }
+                    .to_owned(),
+                )
+            }),
+            run_id: candidate.metadata.run_id,
             best,
             route,
             feasible: candidate.feasible,
@@ -591,6 +924,8 @@ impl ObjectiveScoreOutput {
             finish_time: objective.finish_time,
             travel_minutes: objective.travel_minutes,
             wait_minutes: objective.wait_minutes,
+            visited_optional_count: None,
+            visited_optional_priority: None,
         }
     }
 }
@@ -598,6 +933,26 @@ impl ObjectiveScoreOutput {
 impl From<&SolverCandidateMetadata> for SolverCandidateMetadataOutput {
     fn from(metadata: &SolverCandidateMetadata) -> Self {
         Self {
+            job_queued_at_ms: metadata.job_queued_at_ms,
+            job_started_at_ms: metadata.job_started_at_ms,
+            job_finished_at_ms: metadata.job_finished_at_ms,
+            queued_ms: metadata.queued_ms,
+            reserved_slot_ms: metadata.reserved_slot_ms,
+            cpu_ms: metadata.cpu_ms,
+            peak_rss_bytes: metadata.peak_rss_bytes,
+            memory_hint_bytes: metadata.memory_hint_bytes,
+            scheduler_reason: metadata.scheduler_reason.clone(),
+            scheduler_score: metadata.scheduler_score.clone(),
+            outcome: metadata.outcome,
+            proof_status: metadata.proof_status,
+            objective_phase: metadata.objective_phase.clone(),
+            best_bound: metadata.best_bound,
+            relative_gap_ppm: metadata.relative_gap_ppm,
+            thread_count: metadata.thread_count,
+            source_version: metadata.source_version.clone(),
+            native_status: metadata.native_status.clone(),
+            child_process_id: metadata.child_process_id,
+            exit_code: metadata.exit_code,
             state_count: metadata.state_count,
             frontier_state_count: metadata.frontier_state_count,
             frontier_cell_count: metadata.frontier_cell_count,
@@ -666,6 +1021,9 @@ impl From<&SolverCandidateMetadata> for SolverCandidateMetadataOutput {
             swap_move_count: metadata.swap_move_count,
             relocate_move_count: metadata.relocate_move_count,
             two_opt_move_count: metadata.two_opt_move_count,
+            insert_optional_move_count: metadata.insert_optional_move_count,
+            remove_optional_move_count: metadata.remove_optional_move_count,
+            replace_optional_move_count: metadata.replace_optional_move_count,
             accepted_worse_moves: metadata.accepted_worse_moves,
             infeasible_candidates: metadata.infeasible_candidates,
             accepted_infeasible_moves: metadata.accepted_infeasible_moves,
@@ -687,6 +1045,23 @@ pub enum RequestValidationError {
     InvalidJobId(JobIdError),
     #[error("invalid country_code: {0}")]
     InvalidCountryCode(String),
+    #[error("travel_date requires time_zone")]
+    TravelDateRequiresTimeZone,
+    #[error("time_zone requires travel_date")]
+    TimeZoneRequiresTravelDate,
+    #[error("travel_date must use YYYY-MM-DD and be a real calendar date: {0}")]
+    InvalidTravelDate(String),
+    #[error("time_zone must be a valid IANA identifier: {0}")]
+    InvalidTimeZone(String),
+    #[error("country_code {country_code} does not match time_zone {time_zone}")]
+    CountryTimeZoneMismatch {
+        country_code: String,
+        time_zone: String,
+    },
+    #[error("local departure {local} is ambiguous in {time_zone}")]
+    AmbiguousLocalDeparture { local: String, time_zone: String },
+    #[error("local departure {local} does not exist in {time_zone}")]
+    NonexistentLocalDeparture { local: String, time_zone: String },
     #[error("start_time is required when start_policy is FIXED")]
     FixedStartTimeRequired,
     #[error("debug.min_job_duration_ms must not exceed {maximum} milliseconds (actual {actual})")]
@@ -719,6 +1094,12 @@ pub enum RequestValidationError {
         "stay_minutes must be a non-negative multiple of 10 for location {location_id} (actual {actual})"
     )]
     StayMinutesNotTenMinuteMultiple { location_id: String, actual: u32 },
+    #[error("start/end and ALL_REQUIRED locations cannot set required=false ({location_id})")]
+    RequiredLocationCannotBeOptional { location_id: String },
+    #[error("priority must be between 1 and 100 for location {location_id} (actual {actual})")]
+    InvalidLocationPriority { location_id: String, actual: u8 },
+    #[error("provide only one of travel_time_matrix and sparse_travel_time_matrix")]
+    MultipleTravelTimeMatrices,
     #[error(
         "travel_time_matrix has {actual} rows; expected {expected} for the supplied locations"
     )]
@@ -731,6 +1112,8 @@ pub enum RequestValidationError {
     },
     #[error("travel_time_matrix diagonal entry [{index}][{index}] must be 0; actual {actual}")]
     TravelTimeMatrixDiagonalNonzero { index: usize, actual: u32 },
+    #[error("sparse_travel_time_matrix diagonal entry [{index}][{index}] must be 0, not null")]
+    TravelTimeMatrixDiagonalUnreachable { index: usize },
     #[error("invalid time window for location {location_id}: {source}")]
     InvalidTimeWindow {
         location_id: String,
@@ -740,328 +1123,4 @@ pub enum RequestValidationError {
 }
 
 #[cfg(test)]
-mod tests {
-    use std::time::Duration;
-
-    use super::*;
-    use crate::{
-        domain::ScheduledStop,
-        solver::{
-            SolutionMetrics, SolverCandidate, SolverCandidateMetadata, SolverDiagnostics,
-            SolverSolution,
-        },
-    };
-    use serde_json::json;
-
-    fn request_with_locations(location_ids: &[&str]) -> OptimizeRouteRequest {
-        serde_json::from_value(json!({
-            "job_id": "route-api-test",
-            "locations": location_ids
-                .iter()
-                .map(|id| json!({
-                    "id": id,
-                    "place_id": format!("place-{id}"),
-                    "open_time": "00:00",
-                    "close_time": "23:50",
-                    "stay_minutes": 0
-                }))
-                .collect::<Vec<_>>(),
-            "start_time": "09:00"
-        }))
-        .unwrap()
-    }
-
-    #[test]
-    fn zero_and_one_location_are_rejected() {
-        for ids in [&[][..], &["A"][..]] {
-            let error = OptimizationProblem::try_from(request_with_locations(ids)).unwrap_err();
-            assert!(matches!(
-                error,
-                RequestValidationError::TooFewLocations {
-                    minimum: 2,
-                    actual
-                } if actual == ids.len()
-            ));
-        }
-    }
-
-    #[test]
-    fn two_locations_define_start_and_end() {
-        let problem = OptimizationProblem::try_from(request_with_locations(&["A", "B"])).unwrap();
-
-        assert_eq!(problem.start_location().id(), "A");
-        assert_eq!(problem.end_location().id(), "B");
-        assert!(problem.intermediate_locations().is_empty());
-    }
-
-    #[test]
-    fn fixed_policy_requires_start_time_and_other_policies_default_to_midnight() {
-        let mut fixed = serde_json::to_value(request_with_locations(&["A", "B"])).unwrap();
-        fixed["start_policy"] = json!("FIXED");
-        fixed.as_object_mut().unwrap().remove("start_time");
-        let error = OptimizationProblem::try_from(
-            serde_json::from_value::<OptimizeRouteRequest>(fixed).unwrap(),
-        )
-        .unwrap_err();
-        assert!(matches!(
-            error,
-            RequestValidationError::FixedStartTimeRequired
-        ));
-
-        for policy in ["EARLIEST", "LATEST"] {
-            let mut value = serde_json::to_value(request_with_locations(&["A", "B"])).unwrap();
-            value["start_policy"] = json!(policy);
-            value.as_object_mut().unwrap().remove("start_time");
-            let problem = OptimizationProblem::try_from(
-                serde_json::from_value::<OptimizeRouteRequest>(value).unwrap(),
-            )
-            .unwrap();
-            assert_eq!(problem.start_time().to_string(), "00:00");
-        }
-    }
-
-    #[test]
-    fn location_ids_remain_unique() {
-        let error = OptimizationProblem::try_from(request_with_locations(&["A", "A"])).unwrap_err();
-        assert!(matches!(
-            error,
-            RequestValidationError::DuplicateLocationId(id) if id == "A"
-        ));
-    }
-
-    #[test]
-    fn location_times_and_stays_require_ten_minute_units() {
-        for minute in [0, 10, 20, 30, 40, 50] {
-            let mut request = request_with_locations(&["A", "B"]);
-            request.locations[0].open_time = TimeOfDay::from_minutes(9 * 60 + minute).unwrap();
-            request.locations[0].close_time = TimeOfDay::from_minutes(10 * 60 + minute).unwrap();
-            OptimizationProblem::try_from(request).unwrap();
-        }
-
-        for minute in [1, 9, 11, 59] {
-            for field in ["open_time", "close_time"] {
-                let mut request = request_with_locations(&["A", "B"]);
-                let value = TimeOfDay::from_minutes(9 * 60 + minute).unwrap();
-                if field == "open_time" {
-                    request.locations[0].open_time = value;
-                } else {
-                    request.locations[0].close_time = value;
-                }
-                assert!(matches!(
-                    OptimizationProblem::try_from(request),
-                    Err(RequestValidationError::TimeNotTenMinuteAligned {
-                        field: actual_field,
-                        actual,
-                        ..
-                    }) if actual_field == field && actual == value
-                ));
-            }
-        }
-
-        for stay_minutes in [0, 10, 20] {
-            let mut request = request_with_locations(&["A", "B"]);
-            request.locations[0].stay_minutes = stay_minutes;
-            OptimizationProblem::try_from(request).unwrap();
-        }
-        for stay_minutes in [1, 15, 25] {
-            let mut request = request_with_locations(&["A", "B"]);
-            request.locations[0].stay_minutes = stay_minutes;
-            assert!(matches!(
-                OptimizationProblem::try_from(request),
-                Err(RequestValidationError::StayMinutesNotTenMinuteMultiple {
-                    actual,
-                    ..
-                }) if actual == stay_minutes
-            ));
-        }
-    }
-
-    #[test]
-    fn travel_mode_is_optional_strict_and_round_trips() {
-        let omitted = request_with_locations(&["A", "B"]);
-        assert_eq!(omitted.travel_mode, None);
-        assert!(serde_json::to_value(&omitted).unwrap()["travel_mode"].is_null());
-
-        for (wire_value, expected) in [
-            ("TRANSIT", TravelMode::Transit),
-            ("DRIVING", TravelMode::Driving),
-            ("WALKING", TravelMode::Walking),
-            ("BICYCLING", TravelMode::Bicycling),
-        ] {
-            let mut value = serde_json::to_value(request_with_locations(&["A", "B"])).unwrap();
-            value["travel_mode"] = json!(wire_value);
-            let request: OptimizeRouteRequest = serde_json::from_value(value).unwrap();
-            assert_eq!(request.travel_mode, Some(expected));
-            assert_eq!(
-                serde_json::to_value(request).unwrap()["travel_mode"],
-                wire_value
-            );
-        }
-
-        for invalid in ["transit", "DRIVE", "CAR", "PUBLIC_TRANSIT", "FLYING"] {
-            let mut value = serde_json::to_value(request_with_locations(&["A", "B"])).unwrap();
-            value["travel_mode"] = json!(invalid);
-            assert!(serde_json::from_value::<OptimizeRouteRequest>(value).is_err());
-        }
-    }
-
-    #[test]
-    fn supplied_matrix_is_validated_and_allows_empty_place_ids() {
-        let mut request = request_with_locations(&["A", "B"]);
-        request.locations[0].place_id.clear();
-        request.locations[1].place_id.clear();
-        request.travel_time_matrix = Some(vec![vec![0, 7], vec![9, 0]]);
-        OptimizationProblem::try_from(request).unwrap();
-
-        let mut wrong_size = request_with_locations(&["A", "B"]);
-        wrong_size.travel_time_matrix = Some(vec![vec![0]]);
-        assert!(matches!(
-            OptimizationProblem::try_from(wrong_size),
-            Err(RequestValidationError::TravelTimeMatrixSizeMismatch {
-                expected: 2,
-                actual: 1
-            })
-        ));
-
-        let mut nonzero_diagonal = request_with_locations(&["A", "B"]);
-        nonzero_diagonal.travel_time_matrix = Some(vec![vec![1, 7], vec![9, 0]]);
-        assert!(matches!(
-            OptimizationProblem::try_from(nonzero_diagonal),
-            Err(RequestValidationError::TravelTimeMatrixDiagonalNonzero {
-                index: 0,
-                actual: 1
-            })
-        ));
-    }
-
-    #[test]
-    fn response_exposes_ranked_solver_candidates_and_best_marker() {
-        let problem = OptimizationProblem::try_from(request_with_locations(&["A", "B"])).unwrap();
-        let diagnostics = SolverDiagnostics {
-            selected_strategy: "exact_bit_dp".to_owned(),
-            candidates: vec![SolverCandidate {
-                strategy: "exact_bit_dp".to_owned(),
-                route: Some(SolverSolution {
-                    visit_order: vec![0, 1],
-                }),
-                feasible: true,
-                objective_score: Some(SolutionMetrics {
-                    start_policy: StartPolicy::Latest,
-                    start_time_slot: 60,
-                    finish_time_slot: 61,
-                    travel_minutes: 10,
-                    wait_minutes: 0,
-                    score: 10,
-                }),
-                elapsed: Duration::from_millis(7),
-                metadata: SolverCandidateMetadata {
-                    state_count: Some(2),
-                    frontier_state_count: Some(2),
-                    frontier_cell_count: Some(2),
-                    ..SolverCandidateMetadata::default()
-                },
-            }],
-            total_budget_ms: 30_000,
-            total_elapsed_ms: 7,
-            baseline_elapsed_ms: 7,
-            sa_elapsed_ms: 0,
-            sa_run_count: 0,
-            global_best_updates: 1,
-            termination_reason: "exact_optimum".to_owned(),
-        };
-        let response = OptimizeRouteResponse::from_plan(
-            RoutePlan {
-                stops: vec![
-                    ScheduledStop {
-                        location_index: 0,
-                        arrival_time: TimeOfDay::from_minutes(600).unwrap(),
-                        service_start_time: TimeOfDay::from_minutes(600).unwrap(),
-                        departure_time: Some(TimeOfDay::from_minutes(600).unwrap()),
-                        wait_minutes: 0,
-                        stay_minutes: 0,
-                    },
-                    ScheduledStop {
-                        location_index: 1,
-                        arrival_time: TimeOfDay::from_minutes(610).unwrap(),
-                        service_start_time: TimeOfDay::from_minutes(610).unwrap(),
-                        departure_time: None,
-                        wait_minutes: 0,
-                        stay_minutes: 0,
-                    },
-                ],
-                total_travel_minutes: 10,
-            },
-            &problem,
-            Some(&diagnostics),
-        );
-
-        let candidate = &response.solver_candidates.unwrap()[0];
-        assert!(candidate.best);
-        assert!(candidate.feasible);
-        assert_eq!(candidate.route, ["A", "B"]);
-        assert_eq!(candidate.elapsed_ms, 7);
-        assert_eq!(
-            candidate.objective_score.unwrap().latest_start.to_string(),
-            "10:00"
-        );
-        assert_eq!(candidate.metadata.state_count, Some(2));
-        assert_eq!(candidate.metadata.frontier_state_count, Some(2));
-        assert_eq!(candidate.metadata.frontier_cell_count, Some(2));
-    }
-
-    #[test]
-    fn debug_duration_is_optional_bounded_and_round_trips() {
-        let mut request = request_with_locations(&["A", "B"]);
-        request.debug = Some(DebugOptions {
-            min_job_duration_ms: Some(MAX_DEBUG_JOB_DURATION_MS),
-            shuffle_result_route: None,
-            shuffle_seed: None,
-        });
-        let serialized = serde_json::to_value(&request).unwrap();
-        assert_eq!(
-            serialized["debug"]["min_job_duration_ms"],
-            MAX_DEBUG_JOB_DURATION_MS
-        );
-        OptimizationProblem::try_from(request).unwrap();
-
-        let mut excessive = request_with_locations(&["A", "B"]);
-        excessive.debug = Some(DebugOptions {
-            min_job_duration_ms: Some(MAX_DEBUG_JOB_DURATION_MS + 1),
-            shuffle_result_route: None,
-            shuffle_seed: None,
-        });
-        assert!(matches!(
-            OptimizationProblem::try_from(excessive),
-            Err(RequestValidationError::DebugJobDurationTooLong {
-                maximum: MAX_DEBUG_JOB_DURATION_MS,
-                actual
-            }) if actual == MAX_DEBUG_JOB_DURATION_MS + 1
-        ));
-    }
-
-    #[test]
-    fn debug_shuffle_options_are_optional_strict_and_round_trip() {
-        let mut request = request_with_locations(&["A", "B", "C"]);
-        request.debug = Some(DebugOptions {
-            min_job_duration_ms: None,
-            shuffle_result_route: Some(true),
-            shuffle_seed: Some(1_234),
-        });
-
-        let serialized = serde_json::to_value(&request).unwrap();
-        assert_eq!(serialized["debug"]["shuffle_result_route"], true);
-        assert_eq!(serialized["debug"]["shuffle_seed"], 1_234);
-        OptimizationProblem::try_from(request).unwrap();
-
-        let invalid = serde_json::from_value::<OptimizeRouteRequest>(json!({
-            "job_id": "route-api-test",
-            "locations": [
-                {"id":"A","place_id":"a","open_time":"00:00","close_time":"23:50","stay_minutes":0},
-                {"id":"B","place_id":"b","open_time":"00:00","close_time":"23:50","stay_minutes":0}
-            ],
-            "start_time": "09:00",
-            "debug": {"shuffle_result_route": "true"}
-        }));
-        assert!(invalid.is_err());
-    }
-}
+mod tests;

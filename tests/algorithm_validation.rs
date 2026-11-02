@@ -3,7 +3,7 @@ use std::{cmp::Ordering, collections::BTreeSet};
 use rand::{rngs::StdRng, Rng, SeedableRng};
 use troute::{
     cancellation::CancellationToken,
-    domain::OptimizationProblem,
+    domain::{OptimizationProblem, StartPolicy},
     matrix::TravelTimeMatrix,
     schedule::calculate_schedule_from,
     solver::{
@@ -60,7 +60,11 @@ fn independently_evaluate(
     solution: &SolverSolution,
 ) -> Option<SolutionMetrics> {
     let earliest = u32::from(case.problem.start_time().minutes()).div_ceil(TIME_SLOT_MINUTES);
-    for start in (earliest..SLOTS_PER_DAY).rev() {
+    let starts: Box<dyn Iterator<Item = u32>> = match case.problem.start_policy() {
+        StartPolicy::Latest => Box::new((earliest..SLOTS_PER_DAY).rev()),
+        StartPolicy::Fixed | StartPolicy::Earliest => Box::new(std::iter::once(earliest)),
+    };
+    for start in starts {
         if let Some(metrics) = independently_simulate(case, solution, start as u16) {
             return Some(metrics);
         }
@@ -95,6 +99,8 @@ fn independently_simulate(
     }
     Some(SolutionMetrics {
         start_policy: case.problem.start_policy(),
+        visited_optional_count: 0,
+        visited_optional_priority: 0,
         start_time_slot: start,
         finish_time_slot: slot as u16,
         travel_minutes,
@@ -104,9 +110,12 @@ fn independently_simulate(
 }
 
 fn compare_metrics(left: &SolutionMetrics, right: &SolutionMetrics) -> Ordering {
-    right
-        .start_time_slot
-        .cmp(&left.start_time_slot)
+    let start_order = match left.start_policy {
+        StartPolicy::Fixed => Ordering::Equal,
+        StartPolicy::Earliest => left.start_time_slot.cmp(&right.start_time_slot),
+        StartPolicy::Latest => right.start_time_slot.cmp(&left.start_time_slot),
+    };
+    start_order
         .then_with(|| left.finish_time_slot.cmp(&right.finish_time_slot))
         .then_with(|| left.travel_minutes.cmp(&right.travel_minutes))
         .then_with(|| left.wait_minutes.cmp(&right.wait_minutes))
@@ -130,6 +139,15 @@ fn next_permutation(values: &mut [usize]) -> bool {
 }
 
 fn random_case(location_count: usize, seed: u64, force_infeasible: bool) -> GeneratedCase {
+    random_case_with_policy(location_count, seed, force_infeasible, StartPolicy::Latest)
+}
+
+fn random_case_with_policy(
+    location_count: usize,
+    seed: u64,
+    force_infeasible: bool,
+    start_policy: StartPolicy,
+) -> GeneratedCase {
     assert!(location_count >= 2);
     let mut rng = StdRng::seed_from_u64(seed ^ ((location_count as u64) << 32));
     let start_minutes: u16 = rng.gen_range(7 * 60..=10 * 60);
@@ -172,6 +190,7 @@ fn random_case(location_count: usize, seed: u64, force_infeasible: bool) -> Gene
     let request: OptimizeRouteRequest = serde_json::from_value(serde_json::json!({
         "job_id": format!("algorithm-validation-{location_count}-{seed}"),
         "locations": locations,
+        "start_policy": start_policy,
         "start_time": hhmm(start_minutes),
     }))
     .unwrap();
@@ -187,6 +206,40 @@ fn random_case(location_count: usize, seed: u64, force_infeasible: bool) -> Gene
     )
     .unwrap();
     GeneratedCase { problem, matrix }
+}
+
+#[test]
+fn exact_and_pruning_match_the_oracle_for_every_start_policy() {
+    for start_policy in [
+        StartPolicy::Fixed,
+        StartPolicy::Earliest,
+        StartPolicy::Latest,
+    ] {
+        for location_count in 2..=8 {
+            for seed in [7_u64, 42, 1_337] {
+                let case = random_case_with_policy(location_count, seed, false, start_policy);
+                let brute = brute_force(&case);
+                let pruned = solve_exact(&case, TimeCostFrontierPolicy);
+                let unpruned = solve_exact(&case, NoPruning);
+                let context = format!("policy={start_policy:?}, n={location_count}, seed={seed}");
+                match (brute, pruned, unpruned) {
+                    (Some((_, expected)), Ok(pruned), Ok(unpruned)) => {
+                        assert_eq!(pruned.metrics, expected, "{context}: oracle mismatch");
+                        assert_eq!(pruned.metrics, unpruned.metrics, "{context}: pruning mismatch");
+                    }
+                    (
+                        None,
+                        Err(SolverError::NoFeasibleRoute),
+                        Err(SolverError::NoFeasibleRoute),
+                    ) => {}
+                    (brute, pruned, unpruned) => panic!(
+                        "{context}: feasibility differs: oracle={}, pruned={pruned:?}, unpruned={unpruned:?}",
+                        brute.is_some()
+                    ),
+                }
+            }
+        }
+    }
 }
 
 fn boundary_case(travel: u32, stay: u32, open: u16, close: u16) -> GeneratedCase {
@@ -330,18 +383,17 @@ fn pruning_on_and_off_produce_the_same_seeded_optimum() {
 }
 
 #[test]
-fn ten_minute_quantization_boundaries_are_conservative_and_schedulable() {
+fn minute_boundaries_match_the_schedule_exactly() {
     for value in [1_u32, 9, 10, 11, 19, 20] {
         let travel = value;
         let stay = 0;
         let case = boundary_case(travel, stay, 0, 23 * 60 + 50);
         let result = solve_exact(&case, TimeCostFrontierPolicy).unwrap();
-        let occupied_slots = travel.div_ceil(10);
         assert_eq!(
             result.metrics.start_time_slot,
-            (143 - occupied_slots) as u16
+            (23 * 60 + 50 - travel) as u16
         );
-        assert_eq!(result.metrics.finish_time_slot, 143);
+        assert_eq!(result.metrics.finish_time_slot, 23 * 60 + 50);
         let start = troute::domain::TimeOfDay::from_minutes(
             result.metrics.start_time_slot * TIME_SLOT_MINUTES as u16,
         )
@@ -357,18 +409,18 @@ fn ten_minute_quantization_boundaries_are_conservative_and_schedulable() {
             .unwrap()
             .minutes();
         assert!(
-            actual_finish <= result.metrics.finish_time_slot * TIME_SLOT_MINUTES as u16,
+            actual_finish == result.metrics.finish_time_slot * TIME_SLOT_MINUTES as u16,
             "travel={travel}, stay={stay}"
         );
     }
 
-    // API time windows are aligned, and slot 143 (23:50) is the final
-    // representable finish slot.
+    // API time windows stay ten-minute aligned, while solver state retains the
+    // exact minute value.
     for (open, close, expected_start, expected_finish) in [
         (0, 0, 0, 0),
-        (10, 10, 1, 1),
-        (20, 20, 2, 2),
-        (23 * 60 + 50, 23 * 60 + 50, 143, 143),
+        (10, 10, 10, 10),
+        (20, 20, 20, 20),
+        (23 * 60 + 50, 23 * 60 + 50, 23 * 60 + 50, 23 * 60 + 50),
     ] {
         let case = boundary_case(0, 0, open, close);
         let result = solve_exact(&case, TimeCostFrontierPolicy).unwrap();
