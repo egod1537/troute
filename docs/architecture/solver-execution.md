@@ -13,15 +13,19 @@ safety margin reserved for selection, scheduling, and response assembly.
 
 ```mermaid
 flowchart TD
-    A[SolverInput] --> B{exact applicable?}
-    B -- yes --> C[run exact bit-DP]
-    C --> D{feasible exact result?}
+    A[SolverInput] --> S[TaskScheduler]
+    S --> B{exact applicable?}
+    B -- yes --> C[emit exact bit-DP task]
+    C --> X1[TaskExecutor]
+    X1 --> D{feasible exact result?}
     D -- yes --> Z[select and return exact optimum]
-    D -- no --> E[parallel baseline queue]
+    D -- no --> E[emit parallel baseline tasks]
     B -- no --> E
-    E --> F[validated candidates]
-    F --> G[chunked simulated annealing]
-    G --> H{budget / cancel / exhausted?}
+    E --> X2[TaskExecutor]
+    X2 --> F[validated TaskResults]
+    F --> G[emit chunked annealing task]
+    G --> X3[TaskExecutor]
+    X3 --> H{budget / cancel / exhausted?}
     H -- continue --> G
     H -- stop --> I[CandidateSelector rank and select]
     I --> J[service recalculates schedule]
@@ -53,12 +57,15 @@ metadata path as in-process strategies.
 
 ## Candidate validation and selection
 
-`execute_strategy` gives each strategy a child cancellation token. A watcher
-signals it when the parent Job is cancelled or the strategy deadline expires.
-The returned visit order is evaluated through the orchestrator's common
-`ObjectiveEvaluator`; a strategy cannot make itself selectable merely by
-reporting its own score. A candidate records feasibility, objective metrics,
-elapsed time, error/timeout information, and strategy-specific metadata.
+`TaskExecutor` creates an `ExecutionContext` after acquiring the Task's resource
+lease. The context owns the child cancellation token, local/global deadlines,
+seed, warm start, and lease. A watcher signals cancellation when the parent Job
+is cancelled or the task deadline expires. The returned visit order is
+evaluated through the orchestrator's common `ObjectiveEvaluator`; a strategy
+cannot make itself selectable merely by reporting its own score. The resulting
+`TaskResult` records the independent Task/Solver identities, final task state,
+feasibility, objective metrics, elapsed time, error/timeout information, and
+strategy-specific metadata.
 
 `CandidateSelector` ranks feasible candidates with the common objective policy
 and deterministic tie breakers, then chooses the first candidate with a route.
@@ -88,7 +95,11 @@ solver loops are still required.
 
 - [`src/service.rs`](../../src/service.rs): common pipeline and final schedule.
 - [`src/solver/orchestrator/runner.rs`](../../src/solver/orchestrator/runner.rs):
-  exact-first, parallel baseline, SA chunks, deadlines.
+  compatibility facade and final result coordination.
+- [`src/solver/orchestrator/scheduler.rs`](../../src/solver/orchestrator/scheduler.rs):
+  exact-first order, parallel baseline batches, SA follow-up tasks, and budgets.
+- [`src/solver/orchestrator/executor.rs`](../../src/solver/orchestrator/executor.rs):
+  common timeout, cancellation, lease, panic, and validation path.
 - [`src/solver/orchestrator/selector.rs`](../../src/solver/orchestrator/selector.rs):
   candidate selection and diagnostics.
 - [`src/solver/exact`](../../src/solver/exact): exact bit-DP and time frontier.

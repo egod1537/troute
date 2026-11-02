@@ -47,6 +47,7 @@ impl<'a> StartupSummary<'a> {
             provider,
             pair_concurrency: self.routing.pair_concurrency(),
             matrix_total_timeout: self.routing.matrix_total_timeout(),
+            tcache_configured: self.routing.tcache_configured(),
             remediation: self.remediation,
         });
     }

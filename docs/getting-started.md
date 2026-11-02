@@ -15,11 +15,11 @@ cargo test
 
 ## Run the server
 
-`TCACHE_BASE_URL` is currently required at startup. The example below supplies
-its own matrix, so the placeholder URL is validated but never contacted:
+`TCACHE_BASE_URL` is optional. The example below supplies its own matrix, so no
+tcache configuration or running tcache service is needed:
 
 ```sh
-TCACHE_BASE_URL=http://127.0.0.1:1 cargo run
+cargo run
 ```
 
 The server listens on `0.0.0.0:8080` by default.

@@ -38,7 +38,7 @@ pub(crate) struct ServerConfig {
 
 #[derive(Debug, Clone)]
 pub(crate) struct RoutingConfig {
-    pub(crate) tcache: TcacheRoutingConfig,
+    pub(crate) tcache: Option<TcacheRoutingConfig>,
     pub(crate) provider_selector: RouteProviderSelector,
     pub(crate) pair_concurrency: NonZeroUsize,
     pub(crate) matrix_total_timeout: Duration,
@@ -332,12 +332,14 @@ fn read_matching_config<S: EnvSource>(
 
 fn read_tcache_config<S: EnvSource>(
     reader: &EnvReader<'_, S>,
-) -> Result<TcacheRoutingConfig, String> {
-    let base_url = reader
+) -> Result<Option<TcacheRoutingConfig>, String> {
+    let Some(base_url) = reader
         .lookup("TCACHE_BASE_URL")
-        .ok()
-        .flatten()
-        .ok_or_else(|| "TCACHE_BASE_URL is required".to_owned())?;
+        .map_err(|error| error.to_string())?
+        .filter(|value| !value.trim().is_empty())
+    else {
+        return Ok(None);
+    };
     let poll_interval = reader
         .lookup("TCACHE_POLL_INTERVAL_MS")
         .map_err(|error| error.to_string())?;
@@ -357,6 +359,7 @@ fn read_tcache_config<S: EnvSource>(
         timeout.as_deref(),
         legacy_timeout.as_deref(),
     )
+    .map(Some)
 }
 
 fn read_remediation_config<S: EnvSource>(

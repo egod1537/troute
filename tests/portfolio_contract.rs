@@ -1,4 +1,7 @@
-use std::time::Duration;
+use std::{
+    sync::Arc,
+    time::{Duration, Instant},
+};
 
 use troute::solver::{
     portfolio::{
@@ -6,8 +9,70 @@ use troute::solver::{
         RunId, SolverId, SolverRegistry, TelemetryCollector, TelemetryEventPayload,
         TelemetryEventType, TelemetryMode,
     },
-    PortfolioPolicyConfig, RouteSolver, SolverInput, SolverOrchestrator, SolverOrchestratorConfig,
+    DefaultObjectivePolicy, NoopSolverProgressObserver, OrchestratedStrategy,
+    PortfolioPolicyConfig, RouteSolver, ScheduledTask, SolverCandidateMetadata, SolverError,
+    SolverInput, SolverOrchestrator, SolverOrchestratorConfig, SolverSolution, SolverTask,
+    StrategyExecution, TaskExecutor, TaskId, TaskResult, TaskScheduler, TaskState,
 };
+
+#[derive(Clone)]
+struct ContractTaskStrategy {
+    name: &'static str,
+    panic: bool,
+}
+
+impl OrchestratedStrategy for ContractTaskStrategy {
+    fn name(&self) -> &str {
+        self.name
+    }
+
+    fn execute(&self, _input: SolverInput<'_>) -> Result<StrategyExecution, SolverError> {
+        assert!(!self.panic, "intentional task panic");
+        Ok(StrategyExecution {
+            solution: SolverSolution {
+                visit_order: vec![0, 1],
+            },
+            metadata: SolverCandidateMetadata::default(),
+        })
+    }
+}
+
+struct TwoRunScheduler {
+    strategy: Arc<dyn OrchestratedStrategy>,
+    next_id: u64,
+    waiting: bool,
+}
+
+impl TaskScheduler for TwoRunScheduler {
+    fn next_tasks(&mut self) -> Result<Vec<ScheduledTask>, SolverError> {
+        if self.waiting || self.next_id > 2 {
+            return Ok(Vec::new());
+        }
+        let id = self.next_id;
+        self.next_id += 1;
+        self.waiting = true;
+        Ok(vec![ScheduledTask::new(
+            SolverTask::new(
+                TaskId::new(id),
+                SolverId::new("greedy").unwrap(),
+                Duration::from_millis(20),
+                ResourceRequest {
+                    logical_cpu_slots: 1,
+                    native_threads: 1,
+                    external_processes: 0,
+                    memory_hint_bytes: None,
+                },
+            ),
+            Arc::clone(&self.strategy),
+        )])
+    }
+
+    fn observe(&mut self, result: &mut TaskResult) -> Result<(), SolverError> {
+        assert_eq!(result.task_id.get(), self.next_id - 1);
+        self.waiting = false;
+        Ok(())
+    }
+}
 use troute::{
     api::OptimizeRouteRequest,
     cancellation::CancellationToken,
@@ -122,6 +187,129 @@ fn resource_leases_reserve_native_threads_and_release_on_drop() {
         0,
         "panic must not leak a resource lease"
     );
+}
+
+#[test]
+fn scheduler_creates_independent_follow_up_tasks_for_the_same_solver() {
+    let request: OptimizeRouteRequest = serde_json::from_value(serde_json::json!({
+        "job_id": "task-restart-contract",
+        "locations": [
+            {"id":"start","place_id":"s","open_time":"00:00","close_time":"23:50","stay_minutes":0},
+            {"id":"end","place_id":"e","open_time":"00:00","close_time":"23:50","stay_minutes":0}
+        ]
+    }))
+    .unwrap();
+    let problem = OptimizationProblem::try_from(request).unwrap();
+    let matrix = TravelTimeMatrix::new(vec![vec![0, 1], vec![1, 0]]).unwrap();
+    let cancellation = CancellationToken::new();
+    let resources = ResourceManager::new(ResourceLimits {
+        logical_cpu_slots: 1,
+        max_concurrent_runs: 1,
+        max_external_processes: 1,
+        memory_limit_bytes: None,
+    })
+    .unwrap();
+    let evaluator = DefaultObjectivePolicy;
+    let observer = NoopSolverProgressObserver;
+    let executor = TaskExecutor::new(&evaluator, &resources, &observer, Instant::now(), None);
+    let mut scheduler = TwoRunScheduler {
+        strategy: Arc::new(ContractTaskStrategy {
+            name: "greedy",
+            panic: false,
+        }),
+        next_id: 1,
+        waiting: false,
+    };
+    let mut identities = Vec::new();
+    loop {
+        let mut tasks = scheduler.next_tasks().unwrap();
+        if tasks.is_empty() {
+            break;
+        }
+        let mut result = executor.execute(
+            SolverInput {
+                matrix: &matrix,
+                problem: &problem,
+                cancellation: &cancellation,
+            },
+            tasks.pop().unwrap(),
+        );
+        identities.push((result.task_id, result.solver_id.clone(), result.state));
+        scheduler.observe(&mut result).unwrap();
+    }
+
+    assert_eq!(identities[0].0, TaskId::new(1));
+    assert_eq!(identities[1].0, TaskId::new(2));
+    assert_eq!(identities[0].1, identities[1].1);
+    assert!(identities
+        .iter()
+        .all(|(_, _, state)| *state == TaskState::Completed));
+}
+
+#[test]
+fn task_executor_isolates_panics_and_releases_leases() {
+    let request: OptimizeRouteRequest = serde_json::from_value(serde_json::json!({
+        "job_id": "task-failure-contract",
+        "locations": [
+            {"id":"start","place_id":"s","open_time":"00:00","close_time":"23:50","stay_minutes":0},
+            {"id":"end","place_id":"e","open_time":"00:00","close_time":"23:50","stay_minutes":0}
+        ]
+    }))
+    .unwrap();
+    let problem = OptimizationProblem::try_from(request).unwrap();
+    let matrix = TravelTimeMatrix::new(vec![vec![0, 1], vec![1, 0]]).unwrap();
+    let cancellation = CancellationToken::new();
+    let resources = ResourceManager::new(ResourceLimits {
+        logical_cpu_slots: 1,
+        max_concurrent_runs: 1,
+        max_external_processes: 1,
+        memory_limit_bytes: None,
+    })
+    .unwrap();
+    let request = ResourceRequest {
+        logical_cpu_slots: 1,
+        native_threads: 1,
+        external_processes: 0,
+        memory_hint_bytes: None,
+    };
+    let task = |id, name, panic| {
+        ScheduledTask::new(
+            SolverTask::new(
+                TaskId::new(id),
+                SolverId::new("greedy").unwrap(),
+                Duration::from_millis(20),
+                request,
+            ),
+            Arc::new(ContractTaskStrategy { name, panic }),
+        )
+    };
+    let evaluator = DefaultObjectivePolicy;
+    let observer = NoopSolverProgressObserver;
+    let executor = TaskExecutor::new(&evaluator, &resources, &observer, Instant::now(), None);
+    let results = executor.execute_batch(
+        SolverInput {
+            matrix: &matrix,
+            problem: &problem,
+            cancellation: &cancellation,
+        },
+        vec![task(1, "panicking", true), task(2, "healthy", false)],
+        1,
+    );
+
+    assert_eq!(results.len(), 2);
+    assert_eq!(results[0].task_id, TaskId::new(1));
+    assert_eq!(results[0].state, TaskState::Failed);
+    assert!(results[0]
+        .candidate
+        .metadata
+        .error
+        .as_deref()
+        .unwrap()
+        .contains("panicked"));
+    assert_eq!(results[1].task_id, TaskId::new(2));
+    assert_eq!(results[1].state, TaskState::Completed);
+    assert_eq!(resources.usage().active_runs, 0);
+    assert_eq!(resources.usage().logical_cpu_slots, 0);
 }
 
 #[test]

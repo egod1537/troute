@@ -1,6 +1,4 @@
-use crate::solver::{
-    BestSolutionTracker, ObjectiveEvaluator, RunId, SolverCandidate, SolverSolution,
-};
+use crate::solver::{BestSolutionTracker, ObjectiveEvaluator, RunId, SolverCandidate};
 
 use super::strategy::solver_id_for_strategy;
 
@@ -56,11 +54,6 @@ impl CandidateAccumulator {
 
     pub(super) fn has_best(&self) -> bool {
         self.best_index.is_some()
-    }
-
-    pub(super) fn warm_start(&self) -> Option<SolverSolution> {
-        self.best_index
-            .and_then(|index| self.candidates[index].route.clone())
     }
 
     pub(super) fn into_parts(self) -> (Vec<SolverCandidate>, u64) {

@@ -41,6 +41,7 @@ pub struct ServerStartupLog<'a> {
     pub provider: &'a RouteProviderSelectionDiagnostics,
     pub pair_concurrency: NonZeroUsize,
     pub matrix_total_timeout: Duration,
+    pub tcache_configured: bool,
     pub remediation: RemediationConfig,
 }
 
@@ -82,6 +83,7 @@ impl AppLogger {
             provider,
             pair_concurrency,
             matrix_total_timeout,
+            tcache_configured,
             remediation,
         } = startup;
 
@@ -105,11 +107,21 @@ impl AppLogger {
             "Solver strategy concurrency: {}",
             solver.max_concurrency
         ));
-        self.info(format_args!("tcache pair concurrency: {pair_concurrency}"));
         self.info(format_args!(
-            "tcache matrix total timeout: {} ms",
-            matrix_total_timeout.as_millis()
+            "tcache routing: {}",
+            if tcache_configured {
+                "configured"
+            } else {
+                "disabled (caller-supplied matrices only)"
+            }
         ));
+        if tcache_configured {
+            self.info(format_args!("tcache pair concurrency: {pair_concurrency}"));
+            self.info(format_args!(
+                "tcache matrix total timeout: {} ms",
+                matrix_total_timeout.as_millis()
+            ));
+        }
         self.info(format_args!(
             "Route provider mode: {} (request override enabled: {})",
             provider.route_provider_mode, provider.override_enabled

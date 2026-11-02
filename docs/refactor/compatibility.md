@@ -8,7 +8,7 @@ This map describes the contracts preserved by the structural refactor. Defaults 
 | --- | --- | --- |
 | `TROUTE_PORT` | `8080` | integer `1..=65535`; invalid values fail startup |
 | `TROUTE_DATA_DIR` | `.local/troute` | trim is used only to reject an empty value; the original path string is retained |
-| `TCACHE_BASE_URL` | required | valid `http`/`https` URL; trailing slash normalized; errors retain the `invalid tcache configuration:` boundary |
+| `TCACHE_BASE_URL` | absent | optional valid `http`/`https` URL; absent or blank disables provider routing, while invalid non-blank values retain the `invalid tcache configuration:` error boundary |
 | `TCACHE_POLL_INTERVAL_MS`, legacy `TCACHE_MATRIX_POLL_INTERVAL_MS` | `250` ms | positive `u64`; new key wins even when invalid, so there is no fallback from an invalid new value |
 | `TCACHE_REQUEST_TIMEOUT_MS`, legacy `TCACHE_MATRIX_TIMEOUT_MS` | `30000` ms | same alias and positive-value rules |
 | `TCACHE_PAIR_CONCURRENCY` | routing constant | integer `1..=256` |

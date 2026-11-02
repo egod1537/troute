@@ -8,13 +8,15 @@ When `travel_time_matrix` is omitted, optimization queries one tcache Route Job
 for each directed pair, and `PairwiseMatrixRoutingProvider` assembles those
 results into the troute-owned matrix. A caller-supplied matrix bypasses tcache
 after its dimensions and zero diagonal are validated. `TCACHE_BASE_URL` is
-required, and missing or invalid configuration fails application startup.
+optional. When it is unset or blank, troute starts normally and accepts requests
+with caller-supplied dense or sparse matrices; requests that require routing
+return `PROVIDER_NOT_CONFIGURED`. An invalid non-blank value still fails startup.
 
 | Variable | Default | Description |
 | --- | --- | --- |
 | `TROUTE_PORT` | `8080` | HTTP server port; 1-65535 |
 | `TROUTE_DATA_DIR` | `.local/troute` | persisted Job records and telemetry directory |
-| `TCACHE_BASE_URL` | none | required tcache server base URL |
+| `TCACHE_BASE_URL` | none | optional tcache server base URL; unset or blank disables provider routing |
 | `TCACHE_POLL_INTERVAL_MS` | `250` | positive Route Job status polling interval |
 | `TCACHE_REQUEST_TIMEOUT_MS` | `30000` | positive total timeout for each pair query |
 | `TCACHE_PAIR_CONCURRENCY` | `4` | maximum concurrent directed pair Route Jobs; 1-256 |

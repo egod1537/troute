@@ -34,12 +34,14 @@ async fn initialization_propagates_storage_failures() {
             router: RouterRuntimeOptions::default(),
         },
         routing: RoutingConfig {
-            tcache: TcacheRoutingConfig::from_parts(
-                "http://127.0.0.1:1",
-                Duration::from_millis(1),
-                Duration::from_millis(1),
-            )
-            .unwrap(),
+            tcache: Some(
+                TcacheRoutingConfig::from_parts(
+                    "http://127.0.0.1:1",
+                    Duration::from_millis(1),
+                    Duration::from_millis(1),
+                )
+                .unwrap(),
+            ),
             provider_selector,
             pair_concurrency: NonZeroUsize::new(1).unwrap(),
             matrix_total_timeout: Duration::from_secs(1),

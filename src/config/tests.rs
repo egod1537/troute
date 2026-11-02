@@ -40,13 +40,12 @@ fn source(values: &[(&str, &str)]) -> BTreeMap<String, String> {
 #[test]
 fn app_config_loads_defaults_without_mutating_process_environment() {
     let missing = source(&[]);
-    assert_eq!(
-        AppConfig::from_source(&missing).unwrap_err().to_string(),
-        "invalid tcache configuration: TCACHE_BASE_URL is required"
-    );
+    let without_tcache = AppConfig::from_source(&missing).unwrap();
+    assert!(without_tcache.routing.tcache.is_none());
 
     let values = source(&[("TCACHE_BASE_URL", "http://localhost:8081")]);
     let defaults = AppConfig::from_source(&values).unwrap();
+    assert!(defaults.routing.tcache.is_some());
     assert_eq!(defaults.server.port.get(), 8080);
     assert_eq!(defaults.server.data_dir, PathBuf::from(".local/troute"));
     assert_eq!(
@@ -103,7 +102,16 @@ fn app_config_loads_typed_values_and_preserves_alias_priority() {
     assert_eq!(configured.server.router.max_outstanding_jobs, Some(40));
     assert_eq!(configured.server.router.max_concurrent_matrix_previews, 5);
     assert_eq!(configured.server.router.max_routing_pairs, 800);
-    assert_eq!(configured.routing.tcache.poll_interval.as_millis(), 400);
+    assert_eq!(
+        configured
+            .routing
+            .tcache
+            .as_ref()
+            .unwrap()
+            .poll_interval
+            .as_millis(),
+        400
+    );
     assert_eq!(configured.routing.pair_concurrency.get(), 12);
     assert_eq!(configured.routing.matrix_total_timeout.as_millis(), 1234);
     assert!(
@@ -226,12 +234,10 @@ fn non_unicode_values_follow_each_settings_existing_error_policy() {
         values: BTreeMap::new(),
         error_name: "TCACHE_BASE_URL",
     };
-    assert_eq!(
-        AppConfig::from_source(&invalid_base_url)
-            .unwrap_err()
-            .to_string(),
-        "invalid tcache configuration: TCACHE_BASE_URL is required"
-    );
+    assert!(AppConfig::from_source(&invalid_base_url)
+        .unwrap_err()
+        .to_string()
+        .starts_with("invalid tcache configuration:"));
 
     let warned_limit = ErrorSource {
         values: values.clone(),
@@ -250,4 +256,10 @@ fn non_unicode_values_follow_each_settings_existing_error_policy() {
         configured.solver.lkh3_executable.as_deref(),
         Some(Path::new("non-unicode-value"))
     );
+}
+
+#[test]
+fn blank_tcache_base_url_disables_tcache() {
+    let configured = AppConfig::from_source(&source(&[("TCACHE_BASE_URL", "  ")])).unwrap();
+    assert!(configured.routing.tcache.is_none());
 }

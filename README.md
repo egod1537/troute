@@ -76,7 +76,7 @@ Install Rust 1.87 or later, then build and run the server:
 
 ```sh
 cargo build
-TCACHE_BASE_URL=http://127.0.0.1:1 cargo run
+cargo run
 ```
 
 The server listens on port `8080` by default. Verify it from another terminal:
@@ -98,7 +98,8 @@ curl http://127.0.0.1:8080/integration/jobs/readme-matrix-example
 The completed route is `hotel -> park -> museum -> station` with 35 minutes of
 travel. Change `job_id` in the example file before submitting it again.
 
-The placeholder tcache URL is sufficient for requests that supply their own
-travel-time matrix. See [Getting Started](docs/getting-started.md) for the
+No tcache configuration is needed for requests that supply their own
+travel-time matrix. Configure `TCACHE_BASE_URL` only when troute must build a
+matrix from Place IDs. See [Getting Started](docs/getting-started.md) for the
 self-contained API example and [Configuration](docs/configuration.md) for
 routing-provider and optional solver setup.

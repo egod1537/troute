@@ -4,7 +4,7 @@ use thiserror::Error;
 
 use crate::{
     cancellation::CancellationToken,
-    solver::{ResourceLease, RunId, SolverId, SolverSolution},
+    solver::{ResourceLease, RunId, SolverId, SolverSolution, SolverTask, TaskId},
 };
 
 /// Immutable identity, timing, cancellation, and resource state shared with a
@@ -12,6 +12,7 @@ use crate::{
 /// reserved resource through the common RAII path.
 pub struct ExecutionContext {
     job_id: String,
+    task_id: TaskId,
     run_id: RunId,
     solver_id: SolverId,
     started_at: Instant,
@@ -49,6 +50,7 @@ impl ExecutionContext {
         }
         Ok(Self {
             job_id,
+            task_id: TaskId::new(run_id.get()),
             run_id,
             solver_id,
             started_at,
@@ -61,12 +63,53 @@ impl ExecutionContext {
         })
     }
 
+    /// Builds the runtime context for a scheduled task after its resource
+    /// lease has been acquired.
+    #[allow(clippy::too_many_arguments)]
+    pub fn for_task(
+        job_id: impl Into<String>,
+        task: &SolverTask,
+        started_at: Instant,
+        global_deadline: Instant,
+        local_deadline: Instant,
+        cancellation: CancellationToken,
+        resource_lease: ResourceLease,
+    ) -> Result<Self, ExecutionContextError> {
+        let job_id = job_id.into();
+        if job_id.trim().is_empty() {
+            return Err(ExecutionContextError::EmptyJobId);
+        }
+        if global_deadline < started_at
+            || local_deadline < started_at
+            || local_deadline > global_deadline
+        {
+            return Err(ExecutionContextError::InvalidDeadlineOrder);
+        }
+        Ok(Self {
+            job_id,
+            task_id: task.task_id,
+            run_id: RunId::new(task.task_id.get()),
+            solver_id: task.solver_id.clone(),
+            started_at,
+            global_deadline,
+            local_deadline,
+            cancellation,
+            deterministic_seed: task.seed.unwrap_or_default(),
+            resource_lease,
+            warm_start: task.warm_start.clone(),
+        })
+    }
+
     pub fn job_id(&self) -> &str {
         &self.job_id
     }
 
     pub fn run_id(&self) -> RunId {
         self.run_id
+    }
+
+    pub fn task_id(&self) -> TaskId {
+        self.task_id
     }
 
     pub fn solver_id(&self) -> &SolverId {

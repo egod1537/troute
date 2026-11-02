@@ -8,6 +8,7 @@ mod descriptor;
 mod objective;
 mod policy;
 mod resources;
+mod task;
 mod telemetry;
 
 pub use context::*;
@@ -15,4 +16,5 @@ pub use descriptor::*;
 pub use objective::*;
 pub use policy::*;
 pub use resources::*;
+pub use task::*;
 pub use telemetry::*;

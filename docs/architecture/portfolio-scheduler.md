@@ -6,8 +6,10 @@ The dependency direction is:
 HTTP / Job
   -> RouteOptimizationService
     -> SolverOrchestrator (compatibility facade)
-      -> portfolio policy + registry
-        -> ResourceManager
+      -> TaskScheduler + registry
+        -> SolverTask (identity, budget, seed, warm start, resource request)
+      -> TaskExecutor
+        -> ExecutionContext + ResourceManager
           -> OrchestratedStrategy adapter
             -> Exact / MIP / external / heuristic solver
       -> common ObjectiveEvaluator + BestSolutionTracker
@@ -26,14 +28,16 @@ and it contains capacity counters rather than candidate or policy history.
 `SolverOrchestrator::solve_detailed_with_progress`. With `CURRENT` it preserves
 the existing sequence:
 
-1. Run Exact Bit DP first when `N <= exact_limit`.
+1. The scheduler emits an Exact Bit DP task first when `N <= exact_limit`.
 2. Return immediately after a validated exact solution unless `compare_all` is
    enabled.
-3. Queue applicable baseline strategies and run at most the configured logical
-   CPU slots.
-4. Run simulated annealing in bounded chunks. The legacy four initializer
-   order and periodic global-best warm start are preserved.
-5. Validate every returned route with the shared `ObjectiveEvaluator`.
+3. The scheduler queues applicable baseline tasks; the executor admits at most
+   the configured logical CPU slots through resource leases.
+4. The scheduler creates simulated-annealing follow-up tasks in bounded chunks.
+   The legacy four initializer order and periodic global-best warm start are
+   preserved, with a new Task ID for every restart.
+5. The executor validates every returned route with the shared
+   `ObjectiveEvaluator`.
 6. Rank validated candidates with the existing lexicographic comparator and
    assemble legacy diagnostics and response fields.
 
@@ -46,13 +50,16 @@ configured budget; reporting time is not labelled solver time.
 
 | Boundary | Responsibility |
 | --- | --- |
-| `context.rs` | Per-run identity, monotonic deadlines, cancellation, deterministic seed, warm start, and owned RAII lease |
+| `task.rs` | Immutable Task ID/Solver ID, timeout, seed, warm start, resource request, and separate task result/state types |
+| `context.rs` | Per-run monotonic deadlines, cancellation, task identity/settings, and owned RAII lease |
 | `descriptor.rs` | Stable Solver IDs, capability/availability metadata, Registry enumeration and applicability |
 | `policy.rs` | Eight policy IDs, decisions, arm observations, seeded RR/weighted/racing/UCB1/Thompson selection, input-only instance rules |
 | `resources.rs` | RAII logical slots, native-thread reservations, external-process and memory hints, finite cancellation-aware waits |
 | `objective.rs` | Objective vector, route fingerprint, atomic validated-best update and policy reward |
 | `telemetry.rs` | Versioned event schema, central sequence assignment, bounded collection, run and scheduler summaries |
-| `orchestrator/runner.rs` | Compatibility facade, common execution/validation path, policy-to-strategy adaptation |
+| `orchestrator/scheduler.rs` | Task order/budget decisions, policy observations, and Exact/Baseline/SA follow-up generation; never executes a solver |
+| `orchestrator/executor.rs` | Common lease, timeout, cancellation, panic isolation, objective validation, and `TaskResult` construction |
+| `orchestrator/runner.rs` | Compatibility facade coordinating scheduler, executor, registry, accumulation, and final selection |
 | `storage.rs` | Append-only Job telemetry JSONL and cursor reads; never decides solver quality |
 
 ## Objective and reward
