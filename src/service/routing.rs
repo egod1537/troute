@@ -52,8 +52,14 @@ where
         let travel_mode = request.travel_mode.unwrap_or_default();
         let requested_country = request.country_code.clone();
         let requested_provider = request.route_provider;
+        let problem = OptimizationProblem::try_from(request.clone())?;
+        if request.use_euclidean_matrix {
+            return Ok(crate::euclidean::travel_time_matrix(
+                &request.locations,
+                travel_mode,
+            ));
+        }
         let (departure_time, time_zone) = routing_departure_time(&request)?;
-        let problem = OptimizationProblem::try_from(request)?;
         let routing_context = self.matrix_service.routing_context(
             departure_time,
             travel_mode,
@@ -79,18 +85,20 @@ where
         progress: &ProgressCoordinator<'_>,
         cancellation: &CancellationToken,
     ) -> Result<ResolvedRouting, OptimizationServiceError> {
-        let has_supplied_matrix = prepared.has_supplied_matrix();
+        let has_local_matrix = prepared.has_local_matrix();
         progress.report(
             ProgressStage::SelectingProvider,
             ProgressStage::SelectingProvider.range().start,
-            if has_supplied_matrix {
+            if prepared.euclidean_matrix.is_some() {
+                "Using coordinates to estimate a straight-line matrix; no route provider is required."
+            } else if has_local_matrix {
                 "Using the caller-supplied matrix; no route provider is required."
             } else {
                 "Selecting a route provider for the requested travel mode."
             },
         );
         check_cancelled(cancellation)?;
-        if has_supplied_matrix {
+        if has_local_matrix {
             return Ok(ResolvedRouting {
                 context: None,
                 selection: None,
@@ -139,7 +147,9 @@ where
         progress.report(
             ProgressStage::FetchingTravelTimes,
             ProgressStage::FetchingTravelTimes.range().start,
-            if prepared.has_supplied_matrix() {
+            if prepared.euclidean_matrix.is_some() {
+                "Estimating travel times from straight-line coordinate distances.".to_owned()
+            } else if prepared.has_local_matrix() {
                 "Loading the caller-supplied travel-time matrix.".to_owned()
             } else {
                 format!("Fetching travel times for {pair_count} directed pairs.")
@@ -149,11 +159,12 @@ where
         let source = match (
             prepared.supplied_matrix.take(),
             prepared.supplied_sparse_matrix.take(),
+            prepared.euclidean_matrix.take(),
         ) {
-            (Some(rows), None) => MatrixSource::Dense(rows),
-            (None, Some(rows)) => MatrixSource::Sparse(rows),
-            (None, None) => MatrixSource::Provider,
-            (Some(_), Some(_)) => unreachable!("request validation rejects two matrices"),
+            (Some(rows), None, None) | (None, None, Some(rows)) => MatrixSource::Dense(rows),
+            (None, Some(rows), None) => MatrixSource::Sparse(rows),
+            (None, None, None) => MatrixSource::Provider,
+            _ => unreachable!("request validation rejects multiple matrix sources"),
         };
         let default_context = RoutingContext::default();
         let context = routing.context.as_ref().unwrap_or(&default_context);

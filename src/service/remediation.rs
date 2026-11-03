@@ -84,11 +84,16 @@ where
                 failed_from,
                 failed_to,
                 ..
-            }) if request.travel_time_matrix.is_none() => {
+            }) if request.travel_time_matrix.is_none()
+                && request.sparse_travel_time_matrix.is_none()
+                && !request.use_euclidean_matrix =>
+            {
                 self.probe_alternative_modes(request, Some((failed_from, failed_to)), &mut run);
             }
             OptimizationServiceError::Routing(RoutingError::Provider(_))
-                if request.travel_time_matrix.is_none() =>
+                if request.travel_time_matrix.is_none()
+                    && request.sparse_travel_time_matrix.is_none()
+                    && !request.use_euclidean_matrix =>
             {
                 self.probe_alternative_modes(request, None, &mut run);
             }
@@ -159,6 +164,7 @@ where
             let location_id = request.locations[remove_index].id.clone();
             let mut probe = request.clone();
             probe.locations.remove(remove_index);
+            probe.use_euclidean_matrix = false;
             probe.travel_time_matrix = None;
             probe.sparse_travel_time_matrix = Some(subset_matrix(&rows, remove_index));
             if lightweight_feasibility_probe(probe, run.cancellation) {
@@ -177,14 +183,21 @@ where
         deadline: Instant,
     ) -> Result<TravelTimeMatrix, OptimizationServiceError> {
         let problem = OptimizationProblem::try_from(request.clone())?;
+        let euclidean_matrix = request.use_euclidean_matrix.then(|| {
+            crate::euclidean::travel_time_rows(
+                &request.locations,
+                request.travel_mode.unwrap_or_default(),
+            )
+        });
         let source = match (
             request.travel_time_matrix.clone(),
             request.sparse_travel_time_matrix.clone(),
+            euclidean_matrix,
         ) {
-            (Some(rows), None) => MatrixSource::Dense(rows),
-            (None, Some(rows)) => MatrixSource::Sparse(rows),
-            (None, None) => MatrixSource::Provider,
-            (Some(_), Some(_)) => unreachable!("request validation rejects two matrices"),
+            (Some(rows), None, None) | (None, None, Some(rows)) => MatrixSource::Dense(rows),
+            (None, Some(rows), None) => MatrixSource::Sparse(rows),
+            (None, None, None) => MatrixSource::Provider,
+            _ => unreachable!("request validation rejects multiple matrix sources"),
         };
         let (departure_time, time_zone) = routing_departure_time(request)?;
         let routing_context = self.matrix_service.routing_context(

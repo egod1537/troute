@@ -31,6 +31,8 @@ export interface RouteInput {
     id: string;
     name?: string;
     place_id: string;
+    latitude?: number;
+    longitude?: number;
     open_time: string;
     close_time: string;
     stay_minutes: number;
@@ -45,6 +47,7 @@ export interface RouteInput {
   travel_mode?: TravelMode;
   country_code?: string;
   route_provider?: RouteProviderName;
+  use_euclidean_matrix?: boolean;
   travel_time_matrix?: number[][];
   sparse_travel_time_matrix?: (number | null)[][];
   debug?: {
@@ -642,6 +645,13 @@ export function parseInput(text: string): RouteInput {
   const hasSuppliedMatrix =
     input.travel_time_matrix !== undefined ||
     input.sparse_travel_time_matrix !== undefined;
+  const useEuclideanMatrix = input.use_euclidean_matrix === true;
+  if (input.use_euclidean_matrix !== undefined && typeof input.use_euclidean_matrix !== "boolean") {
+    throw new Error("use_euclidean_matrix는 boolean이어야 합니다.");
+  }
+  if (useEuclideanMatrix && hasSuppliedMatrix) {
+    throw new Error("use_euclidean_matrix는 전달된 매트릭스와 함께 사용할 수 없습니다.");
+  }
   if (input.travel_time_matrix !== undefined) {
     if (
       !Array.isArray(input.travel_time_matrix) ||
@@ -698,15 +708,28 @@ export function parseInput(text: string): RouteInput {
       !object(location) ||
       !nonempty(location.id) ||
       (location.name !== undefined && typeof location.name !== "string") ||
-      (hasSuppliedMatrix
+      (hasSuppliedMatrix || useEuclideanMatrix
         ? typeof location.place_id !== "string"
         : !nonempty(location.place_id)) ||
+      ((location.latitude === undefined) !== (location.longitude === undefined)) ||
+      (location.latitude !== undefined &&
+        (typeof location.latitude !== "number" ||
+          !Number.isFinite(location.latitude) ||
+          location.latitude < -90 ||
+          location.latitude > 90)) ||
+      (location.longitude !== undefined &&
+        (typeof location.longitude !== "number" ||
+          !Number.isFinite(location.longitude) ||
+          location.longitude < -180 ||
+          location.longitude > 180)) ||
+      (useEuclideanMatrix &&
+        (location.latitude === undefined || location.longitude === undefined)) ||
       !isTenMinuteTime(location.open_time) ||
       !isTenMinuteTime(location.close_time) ||
       !isTenMinuteDuration(location.stay_minutes)
     ) {
       throw new Error(
-        `locations[${index}]에는 id, ${hasSuppliedMatrix ? "문자열 place_id" : "유효한 place_id"}, 10분 단위 open_time/close_time, 0 이상의 10분 배수 stay_minutes가 필요합니다.`,
+        `locations[${index}]의 장소 정보, 좌표, 시간 또는 체류 시간이 올바르지 않습니다.`,
       );
     }
     if (locationIds.has(location.id)) {

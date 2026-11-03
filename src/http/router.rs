@@ -232,7 +232,10 @@ pub(super) fn enforce_routing_pair_limit(
     request: &OptimizeRouteRequest,
     maximum: usize,
 ) -> Result<(), ApiError> {
-    if request.travel_time_matrix.is_some() || request.sparse_travel_time_matrix.is_some() {
+    if request.travel_time_matrix.is_some()
+        || request.sparse_travel_time_matrix.is_some()
+        || request.use_euclidean_matrix
+    {
         return Ok(());
     }
     let location_count = request.locations.len();

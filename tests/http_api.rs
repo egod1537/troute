@@ -646,6 +646,37 @@ async fn matrix_preview_uses_the_configured_routing_provider() {
 }
 
 #[tokio::test]
+async fn matrix_preview_can_use_local_euclidean_coordinates() {
+    let mut request = valid_request();
+    request["use_euclidean_matrix"] = json!(true);
+    request["travel_mode"] = json!("WALKING");
+    for (location, longitude) in request["locations"]
+        .as_array_mut()
+        .unwrap()
+        .iter_mut()
+        .zip([0.0, 0.01, 0.02])
+    {
+        location.as_object_mut().unwrap().remove("place_id");
+        location["latitude"] = json!(0.0);
+        location["longitude"] = json!(longitude);
+    }
+
+    let response = send(
+        Method::POST,
+        "/integration/matrix",
+        Some("application/json"),
+        request.to_string(),
+    )
+    .await;
+
+    assert_eq!(response.status, StatusCode::OK);
+    assert_eq!(
+        response.body["travel_time_matrix"],
+        json!([[0, 14, 28], [14, 0, 14], [28, 14, 0]])
+    );
+}
+
+#[tokio::test]
 async fn optimize_uses_a_caller_supplied_matrix() {
     let mut request = valid_request();
     request["travel_time_matrix"] = json!([[0, 7, 99], [31, 0, 9], [41, 27, 0]]);

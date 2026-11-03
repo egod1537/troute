@@ -56,6 +56,25 @@ fn supplied_matrix_bypasses_the_routing_provider() {
 }
 
 #[test]
+fn euclidean_matrix_bypasses_the_routing_provider() {
+    let service = RouteOptimizationService::new(FailingRoutingProvider, DevelopmentRouteSolver);
+    let mut request = valid_request();
+    request.travel_mode = Some(TravelMode::Walking);
+    request.use_euclidean_matrix = true;
+    request.locations[0].place_id.clear();
+    request.locations[0].latitude = Some(0.0);
+    request.locations[0].longitude = Some(0.0);
+    request.locations[1].place_id.clear();
+    request.locations[1].latitude = Some(0.0);
+    request.locations[1].longitude = Some(0.01);
+
+    let response = service.optimize(request).unwrap();
+
+    assert_eq!(response.total_travel_minutes, 14);
+    assert_eq!(response.selected_provider, None);
+}
+
+#[test]
 fn request_travel_mode_reaches_routing_context_and_defaults_to_transit() {
     for (requested, expected) in [
         (None, TravelMode::Transit),

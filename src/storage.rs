@@ -79,7 +79,7 @@ pub struct StoredJobError {
     pub suggestions: Option<Vec<FailureSuggestion>>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
+#[derive(Debug, Clone, PartialEq, Deserialize, Serialize)]
 pub struct StoredJob {
     pub request: OptimizeRouteRequest,
     #[serde(flatten)]

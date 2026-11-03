@@ -17,8 +17,8 @@ fn prepare_matrix_request(
     request: Result<Json<OptimizeRouteRequest>, JsonRejection>,
 ) -> Result<OptimizeRouteRequest, ApiError> {
     let Json(mut request) = request.map_err(ApiError::from_json_rejection)?;
-    // Matrix preview always performs provider queries even if the editor
-    // currently contains a supplied matrix.
+    // Matrix preview ignores an editor-supplied matrix. Euclidean mode remains
+    // enabled so coordinate previews stay local and avoid provider queries.
     request.travel_time_matrix = None;
     request.sparse_travel_time_matrix = None;
     OptimizationProblem::try_from(request.clone())

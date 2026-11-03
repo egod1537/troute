@@ -9,6 +9,7 @@ pub mod api;
 pub mod cancellation;
 pub mod development;
 pub mod domain;
+mod euclidean;
 pub mod events;
 pub mod failure;
 pub mod http;

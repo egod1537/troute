@@ -4,11 +4,12 @@ This reference covers the runtime settings previously documented in the root
 README. [`../.env.example`](../.env.example) is the checked-in template for
 local and Compose configuration.
 
-When `travel_time_matrix` is omitted, optimization queries one tcache Route Job
-for each directed pair, and `PairwiseMatrixRoutingProvider` assembles those
-results into the troute-owned matrix. A caller-supplied matrix bypasses tcache
-after its dimensions and zero diagonal are validated. `TCACHE_BASE_URL` is
-required, and missing or invalid configuration fails application startup.
+When both matrix fields are omitted and `use_euclidean_matrix` is false,
+optimization queries one tcache Route Job for each directed pair, and
+`PairwiseMatrixRoutingProvider` assembles those results into the troute-owned
+matrix. A caller-supplied matrix or coordinate-based Euclidean mode bypasses
+tcache. `TCACHE_BASE_URL` remains required at startup for provider-backed
+requests.
 
 | Variable | Default | Description |
 | --- | --- | --- |
@@ -22,7 +23,7 @@ required, and missing or invalid configuration fails application startup.
 | `TROUTE_MAX_CONCURRENT_JOBS` | `4` | maximum background Jobs executing concurrently; additional Jobs remain pending |
 | `TROUTE_MAX_OUTSTANDING_JOBS` | `100` | maximum admitted non-terminal Jobs; excess submissions receive HTTP 429 |
 | `TROUTE_MAX_CONCURRENT_MATRIX_PREVIEWS` | `2` | maximum simultaneous `/integration/matrix` requests; excess previews receive HTTP 429 |
-| `TROUTE_MAX_ROUTING_PAIRS` | `10000` | maximum `N(N-1)` provider queries for a request without a supplied matrix |
+| `TROUTE_MAX_ROUTING_PAIRS` | `10000` | maximum `N(N-1)` provider queries for a request without a supplied matrix or Euclidean mode |
 | `ROUTE_PROVIDER` | `auto` | `auto` applies policy resolution; a provider name globally forces every routed request |
 | `ROUTE_PROVIDER_POLICY_JSON` | built-in policy | country × mode policy JSON, parsed and validated at startup |
 | `ROUTE_PROVIDER_OVERRIDE_ENABLED` | `false` | permits request-level `route_provider` only while `ROUTE_PROVIDER=auto` |

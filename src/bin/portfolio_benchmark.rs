@@ -401,6 +401,8 @@ fn synthetic_instance(
             id: format!("p{index}"),
             name: Some(format!("Synthetic {index}")),
             place_id: String::new(),
+            latitude: None,
+            longitude: None,
             open_time: open,
             close_time: close,
             stay_minutes: if scenario == "tight" && index > 0 {
@@ -446,6 +448,7 @@ fn synthetic_instance(
         travel_mode: None,
         country_code: None,
         route_provider: None,
+        use_euclidean_matrix: false,
         travel_time_matrix: None,
         sparse_travel_time_matrix: Some(rows),
         debug: None,

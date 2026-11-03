@@ -24,7 +24,7 @@ const MAX_STRING_CHARACTERS: usize = 512;
 const INPUT_TIME_GRANULARITY_MINUTES: u32 = 10;
 pub const MAX_DEBUG_JOB_DURATION_MS: u64 = 60_000;
 
-#[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
+#[derive(Debug, Clone, PartialEq, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct OptimizeRouteRequest {
     pub job_id: String,
@@ -54,6 +54,10 @@ pub struct OptimizeRouteRequest {
         alias = "routeProvider"
     )]
     pub route_provider: Option<RouteProviderName>,
+    /// Build a local straight-line travel-time estimate from location
+    /// coordinates instead of querying a routing provider.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub use_euclidean_matrix: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub travel_time_matrix: Option<Vec<Vec<u32>>>,
     /// Sparse matrix form. JSON numbers are travel minutes and `null` marks a
@@ -77,13 +81,18 @@ pub struct DebugOptions {
     pub shuffle_seed: Option<u64>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
+#[derive(Debug, Clone, PartialEq, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct LocationInput {
     pub id: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub name: Option<String>,
+    #[serde(default)]
     pub place_id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub latitude: Option<f64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub longitude: Option<f64>,
     pub open_time: TimeOfDay,
     pub close_time: TimeOfDay,
     pub stay_minutes: u32,
@@ -91,6 +100,10 @@ pub struct LocationInput {
     pub required: Option<bool>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub priority: Option<u8>,
+}
+
+fn is_false(value: &bool) -> bool {
+    !*value
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
@@ -443,6 +456,9 @@ impl TryFrom<OptimizeRouteRequest> for OptimizationProblem {
         }
         let has_supplied_matrix =
             request.travel_time_matrix.is_some() || request.sparse_travel_time_matrix.is_some();
+        if request.use_euclidean_matrix && has_supplied_matrix {
+            return Err(RequestValidationError::EuclideanMatrixConflict);
+        }
         if let Some(matrix) = request.travel_time_matrix.as_ref() {
             if matrix.len() != request.locations.len() {
                 return Err(RequestValidationError::TravelTimeMatrixSizeMismatch {
@@ -522,7 +538,10 @@ impl TryFrom<OptimizeRouteRequest> for OptimizationProblem {
                     maximum: MAX_STRING_CHARACTERS,
                 });
             }
-            if !has_supplied_matrix && input.place_id.trim().is_empty() {
+            if !has_supplied_matrix
+                && !request.use_euclidean_matrix
+                && input.place_id.trim().is_empty()
+            {
                 return Err(RequestValidationError::EmptyPlaceId {
                     location_id: input.id,
                 });
@@ -532,6 +551,33 @@ impl TryFrom<OptimizeRouteRequest> for OptimizationProblem {
                     location_id: input.id,
                     maximum: MAX_STRING_CHARACTERS,
                 });
+            }
+            match (input.latitude, input.longitude) {
+                (Some(latitude), Some(longitude)) => {
+                    if !latitude.is_finite() || !(-90.0..=90.0).contains(&latitude) {
+                        return Err(RequestValidationError::InvalidLatitude {
+                            location_id: input.id,
+                            actual: latitude,
+                        });
+                    }
+                    if !longitude.is_finite() || !(-180.0..=180.0).contains(&longitude) {
+                        return Err(RequestValidationError::InvalidLongitude {
+                            location_id: input.id,
+                            actual: longitude,
+                        });
+                    }
+                }
+                (None, None) if request.use_euclidean_matrix => {
+                    return Err(RequestValidationError::CoordinatesRequired {
+                        location_id: input.id,
+                    });
+                }
+                (None, None) => {}
+                _ => {
+                    return Err(RequestValidationError::IncompleteCoordinates {
+                        location_id: input.id,
+                    });
+                }
             }
             if !ids.insert(input.id.clone()) {
                 return Err(RequestValidationError::DuplicateLocationId(input.id));
@@ -1100,6 +1146,18 @@ pub enum RequestValidationError {
     InvalidLocationPriority { location_id: String, actual: u8 },
     #[error("provide only one of travel_time_matrix and sparse_travel_time_matrix")]
     MultipleTravelTimeMatrices,
+    #[error(
+        "use_euclidean_matrix cannot be combined with travel_time_matrix or sparse_travel_time_matrix"
+    )]
+    EuclideanMatrixConflict,
+    #[error("latitude and longitude are required for location {location_id} when use_euclidean_matrix is true")]
+    CoordinatesRequired { location_id: String },
+    #[error("latitude and longitude must be supplied together for location {location_id}")]
+    IncompleteCoordinates { location_id: String },
+    #[error("latitude must be finite and between -90 and 90 for location {location_id} (actual {actual})")]
+    InvalidLatitude { location_id: String, actual: f64 },
+    #[error("longitude must be finite and between -180 and 180 for location {location_id} (actual {actual})")]
+    InvalidLongitude { location_id: String, actual: f64 },
     #[error(
         "travel_time_matrix has {actual} rows; expected {expected} for the supplied locations"
     )]

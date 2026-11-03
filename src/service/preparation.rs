@@ -19,6 +19,7 @@ pub(super) struct PreparedOptimization {
     pub(super) problem: OptimizationProblem,
     pub(super) supplied_matrix: Option<Vec<Vec<u32>>>,
     pub(super) supplied_sparse_matrix: Option<Vec<Vec<Option<u32>>>>,
+    pub(super) euclidean_matrix: Option<Vec<Vec<u32>>>,
     pub(super) shuffle_seed: Option<Option<u64>>,
     pub(super) portfolio_experiment: Option<PortfolioExperimentOptions>,
     pub(super) telemetry_job_id: String,
@@ -31,8 +32,10 @@ pub(super) struct PreparedOptimization {
 }
 
 impl PreparedOptimization {
-    pub(super) fn has_supplied_matrix(&self) -> bool {
-        self.supplied_matrix.is_some() || self.supplied_sparse_matrix.is_some()
+    pub(super) fn has_local_matrix(&self) -> bool {
+        self.supplied_matrix.is_some()
+            || self.supplied_sparse_matrix.is_some()
+            || self.euclidean_matrix.is_some()
     }
 }
 
@@ -63,12 +66,15 @@ impl<P, S> RouteOptimizationService<P, S> {
         let telemetry_job_id = request.job_id.clone();
         let supplied_matrix = request.travel_time_matrix.clone();
         let supplied_sparse_matrix = request.sparse_travel_time_matrix.clone();
-        let dated_routing = request.travel_date.is_some();
+        let use_euclidean_matrix = request.use_euclidean_matrix;
+        let dated_routing = request.travel_date.is_some() && !use_euclidean_matrix;
         let travel_mode = request.travel_mode.unwrap_or_default();
         let requested_country = request.country_code.clone();
         let requested_provider = request.route_provider;
         let (matrix_departure_time, matrix_time_zone) = routing_departure_time(&request)?;
-        let problem = OptimizationProblem::try_from(request)?;
+        let problem = OptimizationProblem::try_from(request.clone())?;
+        let euclidean_matrix = use_euclidean_matrix
+            .then(|| crate::euclidean::travel_time_rows(&request.locations, travel_mode));
         let country_code = requested_country
             .as_deref()
             .map(normalize_country_code)
@@ -80,6 +86,7 @@ impl<P, S> RouteOptimizationService<P, S> {
             problem,
             supplied_matrix,
             supplied_sparse_matrix,
+            euclidean_matrix,
             shuffle_seed,
             portfolio_experiment,
             telemetry_job_id,

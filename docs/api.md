@@ -32,8 +32,9 @@ fixed destination, and only locations between them may be reordered by the
 solver. The required `job_id` is an opaque correlation value supplied by the
 caller; it must be non-blank and at most 128 characters. Location IDs must be
 non-blank strings of at most 512 characters and unique. Place IDs must be
-non-blank strings of at most 512 characters when both matrix fields are
-omitted; they may be blank when a matrix is supplied because tcache is bypassed.
+non-blank strings of at most 512 characters when both matrix fields are omitted
+and `use_euclidean_matrix` is false. They may be blank when a matrix is supplied
+or Euclidean mode is enabled because tcache is bypassed.
 Overnight windows are not supported, so `open_time` must not be later than
 `close_time`. The request body limit is 1 MiB.
 
@@ -41,11 +42,12 @@ The canonical `OptimizeRouteRequest` wire fields are:
 
 - `job_id`
 - `locations[].id`, optional `locations[].name`, `locations[].place_id`,
+  `locations[].latitude`, `locations[].longitude`,
   `locations[].open_time`, `locations[].close_time`, and
   `locations[].stay_minutes`; optional `locations[].required` and
   `locations[].priority`
 - optional `start_policy`, `start_time`, `travel_mode`, `country_code`,
-  `route_provider`, `visit_policy`, `travel_time_matrix`, and
+  `route_provider`, `visit_policy`, `use_euclidean_matrix`, `travel_time_matrix`, and
   `sparse_travel_time_matrix`
 - optional `debug.min_job_duration_ms`, `debug.shuffle_result_route`, and
   `debug.shuffle_seed`
@@ -77,6 +79,15 @@ When `travel_time_matrix` is supplied directly, routing lookup is bypassed and
 a directed travel time (zero is valid), while `null` means that directed arc is
 unreachable. Its diagonal must contain numeric zero. Supply only one matrix
 field. Existing numeric `travel_time_matrix` requests are unchanged.
+
+Set `use_euclidean_matrix` to `true` to bypass tcache and build a symmetric
+matrix locally from every location's numeric `latitude` and `longitude`.
+Coordinates must be supplied as a pair and remain within latitude `[-90, 90]`
+and longitude `[-180, 180]`. Straight-line distance is converted to whole
+minutes (rounded up) with nominal speeds of 4.8 km/h walking, 15 km/h
+bicycling, 30 km/h transit, and 40 km/h driving. This is a cost-saving
+estimate: it does not account for roads, barriers, traffic, or transit service.
+Do not combine the flag with either caller-supplied matrix field.
 
 `visit_policy` defaults to `ALL_REQUIRED`. The opt-in
 `BEST_EFFORT_ON_FAILURE` policy keeps the first and last locations required,

@@ -194,3 +194,40 @@ fn sparse_matrix_accepts_null_arcs_and_rejects_invalid_diagonal() {
         Err(RequestValidationError::MultipleTravelTimeMatrices)
     ));
 }
+
+#[test]
+fn euclidean_matrix_requires_valid_coordinate_pairs_and_conflicts_with_supplied_matrices() {
+    let mut request = request_with_locations(&["A", "B"]);
+    request.use_euclidean_matrix = true;
+    request.locations[0].place_id.clear();
+    request.locations[1].place_id.clear();
+
+    assert!(matches!(
+        OptimizationProblem::try_from(request.clone()),
+        Err(RequestValidationError::CoordinatesRequired { location_id }) if location_id == "A"
+    ));
+
+    request.locations[0].latitude = Some(37.5665);
+    assert!(matches!(
+        OptimizationProblem::try_from(request.clone()),
+        Err(RequestValidationError::IncompleteCoordinates { location_id }) if location_id == "A"
+    ));
+
+    request.locations[0].longitude = Some(126.9780);
+    request.locations[1].latitude = Some(37.5700);
+    request.locations[1].longitude = Some(126.9900);
+    OptimizationProblem::try_from(request.clone()).unwrap();
+
+    request.locations[1].latitude = Some(91.0);
+    assert!(matches!(
+        OptimizationProblem::try_from(request.clone()),
+        Err(RequestValidationError::InvalidLatitude { location_id, .. }) if location_id == "B"
+    ));
+
+    request.locations[1].latitude = Some(37.5700);
+    request.travel_time_matrix = Some(vec![vec![0, 1], vec![1, 0]]);
+    assert!(matches!(
+        OptimizationProblem::try_from(request),
+        Err(RequestValidationError::EuclideanMatrixConflict)
+    ));
+}
