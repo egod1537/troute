@@ -80,8 +80,10 @@ a directed travel time (zero is valid), while `null` means that directed arc is
 unreachable. Its diagonal must contain numeric zero. Supply only one matrix
 field. Existing numeric `travel_time_matrix` requests are unchanged.
 
-Set `use_euclidean_matrix` to `true` to bypass tcache and build a symmetric
-matrix locally from every location's numeric `latitude` and `longitude`.
+The production default builds a symmetric matrix locally from every location's
+numeric `latitude` and `longitude`. Requests may also set
+`use_euclidean_matrix` to `true` explicitly, which keeps the same behavior when
+the server default is disabled.
 Coordinates must be supplied as a pair and remain within latitude `[-90, 90]`
 and longitude `[-180, 180]`. Straight-line distance is converted to whole
 minutes (rounded up) with nominal speeds of 4.8 km/h walking, 15 km/h

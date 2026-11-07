@@ -57,6 +57,7 @@ fn app_config_loads_defaults_without_mutating_process_environment() {
         defaults.routing.matrix_total_timeout.as_millis(),
         u128::from(troute::routing::DEFAULT_MATRIX_TOTAL_TIMEOUT_MS)
     );
+    assert!(defaults.routing.default_euclidean_matrix);
     assert_eq!(
         defaults.solver,
         troute::solver::SolverOrchestratorConfig::default()
@@ -79,6 +80,7 @@ fn app_config_loads_typed_values_and_preserves_alias_priority() {
         ("TROUTE_DATA_DIR", "test-data"),
         ("TCACHE_PAIR_CONCURRENCY", "12"),
         ("TCACHE_MATRIX_TOTAL_TIMEOUT_MS", "1234"),
+        ("TROUTE_DEFAULT_EUCLIDEAN_MATRIX", "false"),
         ("SOLVER_MAX_CONCURRENCY", "2"),
         ("SOLVER_CPU_SLOTS", "6"),
         ("SOLVER_SA_SEEDS", "1, 2, 3"),
@@ -106,6 +108,7 @@ fn app_config_loads_typed_values_and_preserves_alias_priority() {
     assert_eq!(configured.routing.tcache.poll_interval.as_millis(), 400);
     assert_eq!(configured.routing.pair_concurrency.get(), 12);
     assert_eq!(configured.routing.matrix_total_timeout.as_millis(), 1234);
+    assert!(!configured.routing.default_euclidean_matrix);
     assert!(
         configured
             .routing
@@ -146,6 +149,11 @@ fn app_config_rejects_invalid_type_range_list_and_cross_field_values() {
                 "ROUTE_PROVIDER_OVERRIDE_ENABLED",
                 "yes",
                 "invalid route provider policy: ROUTE_PROVIDER_OVERRIDE_ENABLED must be true or false, got \"yes\"",
+            ),
+            (
+                "TROUTE_DEFAULT_EUCLIDEAN_MATRIX",
+                "sometimes",
+                "TROUTE_DEFAULT_EUCLIDEAN_MATRIX must be one of true/false, 1/0, yes/no, or on/off",
             ),
         ] {
             let values = source(&[("TCACHE_BASE_URL", "http://localhost:8081"), (name, value)]);

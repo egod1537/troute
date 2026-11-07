@@ -42,6 +42,7 @@ pub(crate) struct RoutingConfig {
     pub(crate) provider_selector: RouteProviderSelector,
     pub(crate) pair_concurrency: NonZeroUsize,
     pub(crate) matrix_total_timeout: Duration,
+    pub(crate) default_euclidean_matrix: bool,
 }
 
 impl AppConfig {
@@ -154,6 +155,7 @@ impl RoutingConfig {
                 .expect("default matrix timeout must fit usize"),
             86_400_000,
         )?;
+        let default_euclidean_matrix = reader.read_bool("TROUTE_DEFAULT_EUCLIDEAN_MATRIX", true)?;
 
         Ok(Self {
             tcache,
@@ -162,6 +164,7 @@ impl RoutingConfig {
             matrix_total_timeout: Duration::from_millis(
                 u64::try_from(matrix_total_timeout_ms).expect("matrix timeout must fit u64"),
             ),
+            default_euclidean_matrix,
         })
     }
 }

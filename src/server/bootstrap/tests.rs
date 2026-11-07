@@ -43,6 +43,7 @@ async fn initialization_propagates_storage_failures() {
             provider_selector,
             pair_concurrency: NonZeroUsize::new(1).unwrap(),
             matrix_total_timeout: Duration::from_secs(1),
+            default_euclidean_matrix: true,
         },
         solver: SolverOrchestratorConfig::default(),
         remediation: RemediationConfig::default(),

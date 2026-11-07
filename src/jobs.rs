@@ -35,6 +35,8 @@ use cancellation::JobCancellationRegistry;
 
 /// Executes the optimization pipeline independently of its HTTP request.
 pub trait JobExecutor: Send + Sync {
+    fn apply_request_defaults(&self, _request: &mut OptimizeRouteRequest) {}
+
     fn execute(
         &self,
         request: OptimizeRouteRequest,
@@ -81,6 +83,10 @@ where
     P: RoutingProvider + Send + Sync,
     S: RouteSolver + Send + Sync,
 {
+    fn apply_request_defaults(&self, request: &mut OptimizeRouteRequest) {
+        RouteOptimizationService::apply_request_defaults(self, request);
+    }
+
     fn execute(
         &self,
         request: OptimizeRouteRequest,

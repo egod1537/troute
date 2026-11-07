@@ -21,6 +21,7 @@ fn prepare_matrix_request(
     // enabled so coordinate previews stay local and avoid provider queries.
     request.travel_time_matrix = None;
     request.sparse_travel_time_matrix = None;
+    state.executor.apply_request_defaults(&mut request);
     OptimizationProblem::try_from(request.clone())
         .map_err(OptimizationServiceError::InvalidRequest)
         .map_err(ApiError::from_service)?;

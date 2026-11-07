@@ -4,12 +4,12 @@ This reference covers the runtime settings previously documented in the root
 README. [`../.env.example`](../.env.example) is the checked-in template for
 local and Compose configuration.
 
-When both matrix fields are omitted and `use_euclidean_matrix` is false,
-optimization queries one tcache Route Job for each directed pair, and
-`PairwiseMatrixRoutingProvider` assembles those results into the troute-owned
-matrix. A caller-supplied matrix or coordinate-based Euclidean mode bypasses
-tcache. `TCACHE_BASE_URL` remains required at startup for provider-backed
-requests.
+When both matrix fields are omitted, `TROUTE_DEFAULT_EUCLIDEAN_MATRIX=true`
+builds a coordinate-based Euclidean matrix locally. Set it to `false` to query
+one tcache Route Job for each directed pair unless the request explicitly sets
+`use_euclidean_matrix=true`. A caller-supplied matrix always takes precedence
+and bypasses tcache. `TCACHE_BASE_URL` remains required at startup so provider
+routing can be restored without rebuilding the binary.
 
 | Variable | Default | Description |
 | --- | --- | --- |
@@ -20,6 +20,7 @@ requests.
 | `TCACHE_REQUEST_TIMEOUT_MS` | `30000` | positive total timeout for each pair query |
 | `TCACHE_PAIR_CONCURRENCY` | `4` | maximum concurrent directed pair Route Jobs; 1-256 |
 | `TCACHE_MATRIX_TOTAL_TIMEOUT_MS` | `120000` | total deadline for one matrix build in milliseconds; 1-86,400,000 |
+| `TROUTE_DEFAULT_EUCLIDEAN_MATRIX` | `true` | use local coordinate-based travel-time estimates when a request does not supply a matrix |
 | `TROUTE_MAX_CONCURRENT_JOBS` | `4` | maximum background Jobs executing concurrently; additional Jobs remain pending |
 | `TROUTE_MAX_OUTSTANDING_JOBS` | `100` | maximum admitted non-terminal Jobs; excess submissions receive HTTP 429 |
 | `TROUTE_MAX_CONCURRENT_MATRIX_PREVIEWS` | `2` | maximum simultaneous `/integration/matrix` requests; excess previews receive HTTP 429 |

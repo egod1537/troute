@@ -7,6 +7,8 @@ export interface JobPresetLocation {
   id: string;
   name: string;
   placeId: string;
+  latitude?: number;
+  longitude?: number;
   openTime: string;
   closeTime: string;
   stayMinutes: number;
@@ -175,6 +177,8 @@ function placePreset(options: PlacePresetOptions): JobPreset {
       id: location.id,
       name: SEOUL_LOCATION_NAMES[location.id] ?? location.name,
       placeId: location.place_id,
+      latitude: location.latitude,
+      longitude: location.longitude,
       openTime: "00:00",
       closeTime: "23:50",
       stayMinutes: index === 0 || index === locations.length - 1 ? 0 : 30,

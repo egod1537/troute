@@ -50,8 +50,10 @@ impl ServerComponents {
         )
         .log();
 
+        let default_euclidean_matrix = routing_runtime.default_euclidean_matrix();
         let matrix_service = Arc::new(MatrixService::new(routing_runtime.into_provider()));
         let optimizer = RouteOptimizationService::with_matrix_service(matrix_service, solver)
+            .with_default_euclidean_matrix(default_euclidean_matrix)
             .with_remediation_config(remediation);
         let router = http::router_with_storage_runtime_options(
             optimizer,

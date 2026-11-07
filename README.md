@@ -61,9 +61,9 @@ flowchart LR
 
 1. **Request**: The HTTP API validates the locations, fixed endpoints, time
    windows, stay durations, visit policy, and start policy.
-2. **Travel Time Matrix**: troute validates a supplied directed matrix, builds
-   one from pairwise tcache Route Jobs, or estimates one locally from coordinates
-   when `use_euclidean_matrix` is enabled.
+2. **Travel Time Matrix**: troute validates a supplied directed matrix or,
+   by default, estimates one locally from coordinates. Operators can restore
+   pairwise tcache Route Jobs with `TROUTE_DEFAULT_EUCLIDEAN_MATRIX=false`.
 3. **Solver Portfolio**: Applicable exact, external, and heuristic strategies
    run within the configured resource and time budgets.
 4. **Schedule**: The selected visit order is recalculated against the matrix and

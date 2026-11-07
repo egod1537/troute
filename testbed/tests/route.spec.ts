@@ -729,7 +729,7 @@ test("form and Raw JSON enforce the same ten-minute input units", async ({ page 
   await expect(dialog.getByText("유효함", { exact: true })).toBeVisible();
 });
 
-test("CSV and tcache matrix input update the shared form and raw JSON", async ({
+test("CSV and Euclidean matrix input update the shared form and raw JSON", async ({
   page,
 }) => {
   let matrixRequests = 0;
@@ -737,6 +737,7 @@ test("CSV and tcache matrix input update the shared form and raw JSON", async ({
     matrixRequests += 1;
     const request = route.request().postDataJSON();
     expect(request.travel_time_matrix).toBeUndefined();
+    expect(request.use_euclidean_matrix).toBe(true);
     await route.fulfill({
       json: { travel_time_matrix: [[0, 11, 12], [21, 0, 23], [31, 32, 0]] },
     });
@@ -750,7 +751,7 @@ test("CSV and tcache matrix input update the shared form and raw JSON", async ({
   await expect(dialog.getByLabel("A에서 B 이동 시간")).toHaveValue("5");
   await expect(editor).toHaveValue(/"travel_time_matrix"/);
 
-  await dialog.getByRole("button", { name: "tcache에서 가져오기" }).click();
+  await dialog.getByRole("button", { name: "유클리디안 계산" }).click();
   await expect.poll(() => matrixRequests).toBe(1);
   await expect(dialog.getByLabel("A에서 B 이동 시간")).toHaveValue("11");
   await expect(dialog.getByLabel("B에서 A 이동 시간")).toHaveValue("21");
@@ -786,9 +787,9 @@ test("reloading a matrix aborts the old request and ignores its stale response",
   await page.goto("/");
   const { dialog } = await openJobDialog(page);
 
-  await dialog.getByRole("button", { name: "tcache에서 가져오기" }).click();
+  await dialog.getByRole("button", { name: "유클리디안 계산" }).click();
   await expect.poll(() => matrixRequests).toBe(1);
-  await dialog.getByRole("button", { name: "다시 가져오기" }).click();
+  await dialog.getByRole("button", { name: "다시 계산" }).click();
   await expect.poll(() => matrixRequests).toBe(2);
   await expect.poll(() => abortedMatrixRequests).toBe(1);
   await expect(dialog.getByLabel("A에서 B 이동 시간")).toHaveValue("91");
@@ -819,14 +820,14 @@ test("preset changes and dialog close abort active matrix requests", async ({
   await page.goto("/");
   const { dialog } = await openJobDialog(page);
 
-  await dialog.getByRole("button", { name: "tcache에서 가져오기" }).click();
+  await dialog.getByRole("button", { name: "유클리디안 계산" }).click();
   await expect.poll(() => matrixRequests).toBe(1);
   await dialog.getByRole("button", { name: "서울 핵심 명소 · 5", exact: true }).click();
   await expect.poll(() => abortedMatrixRequests).toBe(1);
   releaseResponses.shift()?.();
   await page.getByRole("button", { name: "취소", exact: true }).last().click();
 
-  await dialog.getByRole("button", { name: "tcache에서 가져오기" }).click();
+  await dialog.getByRole("button", { name: "유클리디안 계산" }).click();
   await expect.poll(() => matrixRequests).toBe(2);
   await dialog.getByRole("button", { name: "취소", exact: true }).click();
   await expect.poll(() => abortedMatrixRequests).toBe(2);

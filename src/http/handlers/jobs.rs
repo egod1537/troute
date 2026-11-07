@@ -5,7 +5,8 @@ pub(in crate::http) async fn submit_job(
     headers: HeaderMap,
     request: Result<Json<OptimizeRouteRequest>, JsonRejection>,
 ) -> Result<impl IntoResponse, ApiError> {
-    let Json(request) = request.map_err(ApiError::from_json_rejection)?;
+    let Json(mut request) = request.map_err(ApiError::from_json_rejection)?;
+    state.executor.apply_request_defaults(&mut request);
     OptimizationProblem::try_from(request.clone())
         .map_err(OptimizationServiceError::InvalidRequest)
         .map_err(ApiError::from_service)?;

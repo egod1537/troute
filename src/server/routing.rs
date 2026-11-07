@@ -21,6 +21,7 @@ pub(super) struct RoutingRuntime {
     provider_diagnostics: RouteProviderSelectionDiagnostics,
     pair_concurrency: NonZeroUsize,
     matrix_total_timeout: Duration,
+    default_euclidean_matrix: bool,
 }
 
 impl RoutingRuntime {
@@ -30,6 +31,7 @@ impl RoutingRuntime {
             provider_selector,
             pair_concurrency,
             matrix_total_timeout,
+            default_euclidean_matrix,
         } = config;
 
         // reqwest's blocking client owns a small internal runtime. Constructing
@@ -52,6 +54,7 @@ impl RoutingRuntime {
             provider_diagnostics,
             pair_concurrency,
             matrix_total_timeout,
+            default_euclidean_matrix,
         })
     }
 
@@ -65,6 +68,10 @@ impl RoutingRuntime {
 
     pub(super) fn matrix_total_timeout(&self) -> Duration {
         self.matrix_total_timeout
+    }
+
+    pub(super) fn default_euclidean_matrix(&self) -> bool {
+        self.default_euclidean_matrix
     }
 
     pub(super) fn into_provider(self) -> ProductionRoutingProvider {

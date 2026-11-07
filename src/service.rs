@@ -29,6 +29,7 @@ pub struct RouteOptimizationService<P, S> {
     matrix_service: Arc<MatrixService<P>>,
     solver: S,
     remediation: RemediationConfig,
+    default_euclidean_matrix: bool,
 }
 
 impl<P, S> RouteOptimizationService<P, S>
@@ -45,12 +46,30 @@ where
             matrix_service,
             solver,
             remediation: RemediationConfig::default(),
+            default_euclidean_matrix: false,
         }
     }
 
     pub fn with_remediation_config(mut self, remediation: RemediationConfig) -> Self {
         self.remediation = remediation;
         self
+    }
+
+    /// Uses the local coordinate estimate whenever a request does not supply a
+    /// matrix. Disabling the process setting restores provider-backed routing.
+    pub fn with_default_euclidean_matrix(mut self, enabled: bool) -> Self {
+        self.default_euclidean_matrix = enabled;
+        self
+    }
+
+    /// Applies process-level request defaults before validation and storage.
+    pub fn apply_request_defaults(&self, request: &mut OptimizeRouteRequest) {
+        if self.default_euclidean_matrix
+            && request.travel_time_matrix.is_none()
+            && request.sparse_travel_time_matrix.is_none()
+        {
+            request.use_euclidean_matrix = true;
+        }
     }
 
     pub fn optimize(
@@ -90,8 +109,9 @@ where
 
     pub fn build_travel_time_matrix(
         &self,
-        request: OptimizeRouteRequest,
+        mut request: OptimizeRouteRequest,
     ) -> Result<crate::matrix::TravelTimeMatrix, OptimizationServiceError> {
+        self.apply_request_defaults(&mut request);
         self.build_request_matrix(request)
     }
 
@@ -109,16 +129,19 @@ where
         error: &OptimizationServiceError,
         cancellation: &CancellationToken,
     ) -> Vec<FailureSuggestion> {
-        self.failure_suggestions_for(request, error, cancellation)
+        let mut request = request.clone();
+        self.apply_request_defaults(&mut request);
+        self.failure_suggestions_for(&request, error, cancellation)
     }
 
     fn optimize_pipeline(
         &self,
-        request: OptimizeRouteRequest,
+        mut request: OptimizeRouteRequest,
         reporter: &dyn OptimizationEventReporter,
         cancellation: &CancellationToken,
         progress: &ProgressCoordinator<'_>,
     ) -> Result<OptimizeRouteResponse, OptimizationServiceError> {
+        self.apply_request_defaults(&mut request);
         let mut prepared = Self::prepare_request(request, progress, cancellation)?;
         let routing = self.resolve_routing(&prepared, progress, cancellation)?;
         let matrix = self.build_matrix(&mut prepared, &routing, progress, cancellation)?;

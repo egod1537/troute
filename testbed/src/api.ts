@@ -645,7 +645,8 @@ export function parseInput(text: string): RouteInput {
   const hasSuppliedMatrix =
     input.travel_time_matrix !== undefined ||
     input.sparse_travel_time_matrix !== undefined;
-  const useEuclideanMatrix = input.use_euclidean_matrix === true;
+  const useEuclideanMatrix =
+    input.use_euclidean_matrix === true || !hasSuppliedMatrix;
   if (input.use_euclidean_matrix !== undefined && typeof input.use_euclidean_matrix !== "boolean") {
     throw new Error("use_euclidean_matrix는 boolean이어야 합니다.");
   }
@@ -704,6 +705,15 @@ export function parseInput(text: string): RouteInput {
   }
   const locationIds = new Set<string>();
   for (const [index, location] of input.locations.entries()) {
+    if (object(location) && !isTenMinuteTime(location.open_time)) {
+      throw new Error(`locations[${index}].open_time은 10분 단위 HH:MM이어야 합니다.`);
+    }
+    if (object(location) && !isTenMinuteTime(location.close_time)) {
+      throw new Error(`locations[${index}].close_time은 10분 단위 HH:MM이어야 합니다.`);
+    }
+    if (object(location) && !isTenMinuteDuration(location.stay_minutes)) {
+      throw new Error(`locations[${index}].stay_minutes는 0 이상의 10분 배수여야 합니다.`);
+    }
     if (
       !object(location) ||
       !nonempty(location.id) ||
@@ -724,9 +734,9 @@ export function parseInput(text: string): RouteInput {
           location.longitude > 180)) ||
       (useEuclideanMatrix &&
         (location.latitude === undefined || location.longitude === undefined)) ||
-      !isTenMinuteTime(location.open_time) ||
-      !isTenMinuteTime(location.close_time) ||
-      !isTenMinuteDuration(location.stay_minutes)
+      typeof location.open_time !== "string" ||
+      typeof location.close_time !== "string" ||
+      typeof location.stay_minutes !== "number"
     ) {
       throw new Error(
         `locations[${index}]의 장소 정보, 좌표, 시간 또는 체류 시간이 올바르지 않습니다.`,
@@ -945,6 +955,7 @@ export async function fetchTravelTimeMatrix(
 ): Promise<(number | null)[][]> {
   const response = await request("/integration/matrix", {
     ...input,
+    use_euclidean_matrix: true,
     travel_time_matrix: undefined,
     sparse_travel_time_matrix: undefined,
   }, signal);

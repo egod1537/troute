@@ -10,13 +10,14 @@ interface NewJobDialogProps {
 }
 interface FormLocation {
   key: string; id: string; name: string; placeId: string;
+  latitude: string; longitude: string;
   openTime: string; closeTime: string; stayMinutes: string;
   required: boolean; priority: string;
 }
 interface ValidationResult { valid: boolean; message: string }
 
 function locationFromRequest(location: RouteInput["locations"][number], index: number): FormLocation {
-  return { key: `${location.id}-${index}-${Date.now()}`, id: location.id, name: location.name ?? "", placeId: location.place_id, openTime: location.open_time, closeTime: location.close_time, stayMinutes: String(location.stay_minutes), required: location.required ?? false, priority: String(location.priority ?? 1) };
+  return { key: `${location.id}-${index}-${Date.now()}`, id: location.id, name: location.name ?? "", placeId: location.place_id, latitude: location.latitude === undefined ? "" : String(location.latitude), longitude: location.longitude === undefined ? "" : String(location.longitude), openTime: location.open_time, closeTime: location.close_time, stayMinutes: String(location.stay_minutes), required: location.required ?? false, priority: String(location.priority ?? 1) };
 }
 function blankMatrix(size: number): string[][] {
   return Array.from({ length: size }, (_, row) => Array.from({ length: size }, (_, column) => row === column ? "0" : ""));
@@ -95,6 +96,8 @@ export function NewJobDialog({ isOpen, dark, existingJobIds, onClose, onCreate }
         id: location.id.trim(),
         name: location.name.trim() || undefined,
         place_id: location.placeId.trim(),
+        latitude: location.latitude.trim() === "" ? undefined : Number(location.latitude),
+        longitude: location.longitude.trim() === "" ? undefined : Number(location.longitude),
         open_time: location.openTime,
         close_time: location.closeTime,
         stay_minutes: Number(location.stayMinutes),
@@ -107,6 +110,7 @@ export function NewJobDialog({ isOpen, dark, existingJobIds, onClose, onCreate }
       country_code: countryCode.trim().toUpperCase() || undefined,
       travel_mode: travelMode,
       route_provider: routeProvider || undefined,
+      use_euclidean_matrix: suppliedMatrix ? undefined : true,
       travel_time_matrix: suppliedMatrix,
       debug: { min_job_duration_ms: 4_000 },
     };
@@ -139,7 +143,10 @@ export function NewJobDialog({ isOpen, dark, existingJobIds, onClose, onCreate }
       if (!location.id.trim()) errors[`${prefix}.id`] = "ID가 필요합니다.";
       else if (ids.has(location.id.trim())) errors[`${prefix}.id`] = "ID는 중복될 수 없습니다.";
       ids.add(location.id.trim());
-      if (!location.placeId.trim() && !suppliedMatrix) errors[`${prefix}.placeId`] = "매트릭스가 없으면 tcache 조회용 Place ID가 필요합니다.";
+      const latitude = Number(location.latitude);
+      const longitude = Number(location.longitude);
+      if (!suppliedMatrix && (location.latitude.trim() === "" || !Number.isFinite(latitude) || latitude < -90 || latitude > 90)) errors[`${prefix}.latitude`] = "유클리디안 계산에는 -90~90 범위의 위도가 필요합니다.";
+      if (!suppliedMatrix && (location.longitude.trim() === "" || !Number.isFinite(longitude) || longitude < -180 || longitude > 180)) errors[`${prefix}.longitude`] = "유클리디안 계산에는 -180~180 범위의 경도가 필요합니다.";
       if (!isTenMinuteTime(location.openTime)) errors[`${prefix}.openTime`] = "Open은 10분 단위 HH:MM이어야 합니다.";
       if (!isTenMinuteTime(location.closeTime)) errors[`${prefix}.closeTime`] = "Close는 10분 단위 HH:MM이어야 합니다.";
       if (isTenMinuteTime(location.openTime) && isTenMinuteTime(location.closeTime) && location.openTime > location.closeTime) errors[`${prefix}.closeTime`] = "Close는 Open보다 빠를 수 없습니다.";
@@ -170,7 +177,7 @@ export function NewJobDialog({ isOpen, dark, existingJobIds, onClose, onCreate }
   function addLocation() {
     const nextIndex = locations.length;
     const candidate = String.fromCharCode(65 + (nextIndex % 26));
-    setLocations((current) => [...current, { key: `new-${Date.now()}-${nextIndex}`, id: current.some((location) => location.id === candidate) ? `L${nextIndex + 1}` : candidate, name: "", placeId: "", openTime: "09:00", closeTime: "18:00", stayMinutes: "0", required: false, priority: "1" }]);
+    setLocations((current) => [...current, { key: `new-${Date.now()}-${nextIndex}`, id: current.some((location) => location.id === candidate) ? `L${nextIndex + 1}` : candidate, name: "", placeId: "", latitude: "", longitude: "", openTime: "09:00", closeTime: "18:00", stayMinutes: "0", required: false, priority: "1" }]);
     setMatrix((current) => [...current.map((row) => [...row, ""]), Array.from({ length: current.length + 1 }, (_, index) => index === current.length ? "0" : "")]);
     clearFeedback();
   }
@@ -191,6 +198,8 @@ export function NewJobDialog({ isOpen, dark, existingJobIds, onClose, onCreate }
       id: location.id,
       name: location.name,
       placeId: location.placeId,
+      latitude: location.latitude === undefined ? "" : String(location.latitude),
+      longitude: location.longitude === undefined ? "" : String(location.longitude),
       openTime: location.openTime,
       closeTime: location.closeTime,
       stayMinutes: String(location.stayMinutes),
@@ -224,6 +233,8 @@ export function NewJobDialog({ isOpen, dark, existingJobIds, onClose, onCreate }
         id: location.id,
         name: location.name,
         place_id: location.placeId,
+        latitude: location.latitude === "" ? undefined : Number(location.latitude),
+        longitude: location.longitude === "" ? undefined : Number(location.longitude),
         open_time: location.openTime,
         close_time: location.closeTime,
         stay_minutes: Number(location.stayMinutes),
@@ -235,6 +246,7 @@ export function NewJobDialog({ isOpen, dark, existingJobIds, onClose, onCreate }
       start_time: preset.startTime ?? "09:00",
       country_code: preset.countryCode,
       travel_mode: preset.travelMode ?? "WALKING",
+      use_euclidean_matrix: true,
     };
     const { controller, requestSequence } = beginMatrixRequest();
     try {
@@ -242,7 +254,7 @@ export function NewJobDialog({ isOpen, dark, existingJobIds, onClose, onCreate }
       if (
         result.length !== nextLocations.length ||
         result.some((row) => row.length !== nextLocations.length)
-      ) throw new Error("tcache 매트릭스 크기가 장소 수와 일치하지 않습니다.");
+      ) throw new Error("유클리디안 매트릭스 크기가 장소 수와 일치하지 않습니다.");
       if (matrixRequestSequence.current !== requestSequence) return;
       setMatrix(matrixFromNumbers(result));
       setValidation({ valid: true, message: `${preset.name} preset과 매트릭스를 적용했습니다.` });
@@ -268,14 +280,14 @@ export function NewJobDialog({ isOpen, dark, existingJobIds, onClose, onCreate }
   async function loadMatrix() {
     cancelMatrixRequest();
     const request = validateForm(false); if (!request) return;
-    const missingIndex = locations.findIndex((location) => !location.placeId.trim());
-    if (missingIndex >= 0) { setFieldErrors({ [`location.${missingIndex}.placeId`]: "tcache 조회에는 Place ID가 필요합니다." }); setValidation({ valid: false, message: "모든 장소의 Place ID를 입력하세요." }); return; }
+    const missingIndex = locations.findIndex((location) => location.latitude.trim() === "" || location.longitude.trim() === "");
+    if (missingIndex >= 0) { setValidation({ valid: false, message: "모든 장소의 위도와 경도를 입력하세요." }); return; }
     const { controller, requestSequence } = beginMatrixRequest();
     try {
       const result = await fetchTravelTimeMatrix(request, controller.signal);
-      if (result.length !== locations.length || result.some((row) => row.length !== locations.length)) throw new Error("tcache 매트릭스 크기가 장소 수와 일치하지 않습니다.");
+      if (result.length !== locations.length || result.some((row) => row.length !== locations.length)) throw new Error("유클리디안 매트릭스 크기가 장소 수와 일치하지 않습니다.");
       if (matrixRequestSequence.current !== requestSequence) return;
-      setMatrix(matrixFromNumbers(result)); setValidation({ valid: true, message: "tcache 매트릭스를 가져왔습니다." });
+      setMatrix(matrixFromNumbers(result)); setValidation({ valid: true, message: "유클리디안 매트릭스를 계산했습니다." });
     } catch (error) {
       if (matrixRequestSequence.current === requestSequence) setValidation({ valid: false, message: (error as Error).message });
     }
@@ -331,7 +343,7 @@ export function NewJobDialog({ isOpen, dark, existingJobIds, onClose, onCreate }
 
       <section className="new-job-section" aria-labelledby="locations-heading">
         <div className="section-heading"><div><h2 id="locations-heading">장소</h2><p className={Classes.TEXT_MUTED}>locations[0]은 고정 start, 마지막 항목은 고정 destination입니다. 부분 방문 정책에서는 중간 장소의 필수 여부와 우선순위를 반영합니다.</p></div></div>
-        <div className="form-table-scroll"><table className="location-input-table"><thead><tr><th>순서</th><th>ID</th><th>이름</th><th>Place ID</th><th>Open</th><th>Close</th><th>체류시간(분)</th><th>필수</th><th>우선순위</th><th>삭제</th></tr></thead>
+        <div className="form-table-scroll"><table className="location-input-table"><thead><tr><th>순서</th><th>ID</th><th>이름</th><th>Place ID</th><th>위도</th><th>경도</th><th>Open</th><th>Close</th><th>체류시간(분)</th><th>필수</th><th>우선순위</th><th>삭제</th></tr></thead>
           <tbody>{locations.map((location, index) => {
             const role = index === 0 ? "start" : index === locations.length - 1 ? "destination" : String(index + 1);
             const endpoint = index === 0 || index === locations.length - 1;
@@ -342,6 +354,8 @@ export function NewJobDialog({ isOpen, dark, existingJobIds, onClose, onCreate }
               <td><input aria-label={`${index + 1}번 장소 ID`} aria-invalid={Boolean(field("id"))} className={`bp6-input ${field("id") ? "field-invalid" : ""}`} value={location.id} onChange={(event) => updateLocation(index, "id", event.target.value)} /></td>
               <td><input aria-label={`${index + 1}번 장소 이름`} className="bp6-input" value={location.name} onChange={(event) => updateLocation(index, "name", event.target.value)} /></td>
               <td><input aria-label={`${index + 1}번 장소 Place ID`} aria-invalid={Boolean(field("placeId"))} className={`bp6-input place-id-input ${field("placeId") ? "field-invalid" : ""}`} value={location.placeId} onChange={(event) => updateLocation(index, "placeId", event.target.value)} /></td>
+              <td><input aria-label={`${index + 1}번 장소 위도`} aria-invalid={Boolean(field("latitude"))} className={`bp6-input ${field("latitude") ? "field-invalid" : ""}`} type="number" min="-90" max="90" step="any" value={location.latitude} onChange={(event) => updateLocation(index, "latitude", event.target.value)} /></td>
+              <td><input aria-label={`${index + 1}번 장소 경도`} aria-invalid={Boolean(field("longitude"))} className={`bp6-input ${field("longitude") ? "field-invalid" : ""}`} type="number" min="-180" max="180" step="any" value={location.longitude} onChange={(event) => updateLocation(index, "longitude", event.target.value)} /></td>
               <td><input aria-label={`${index + 1}번 장소 Open`} aria-invalid={Boolean(field("openTime"))} className={`bp6-input time-input ${field("openTime") ? "field-invalid" : ""}`} type="time" step="600" value={location.openTime} onChange={(event) => updateLocation(index, "openTime", event.target.value)} /></td>
               <td><input aria-label={`${index + 1}번 장소 Close`} aria-invalid={Boolean(field("closeTime"))} className={`bp6-input time-input ${field("closeTime") ? "field-invalid" : ""}`} type="time" step="600" value={location.closeTime} onChange={(event) => updateLocation(index, "closeTime", event.target.value)} /></td>
               <td><input aria-label={`${index + 1}번 장소 체류시간`} aria-invalid={Boolean(field("stayMinutes"))} className={`bp6-input stay-input ${field("stayMinutes") ? "field-invalid" : ""}`} type="number" min="0" step="10" value={location.stayMinutes} onChange={(event) => updateLocation(index, "stayMinutes", event.target.value)} /></td>
@@ -354,11 +368,11 @@ export function NewJobDialog({ isOpen, dark, existingJobIds, onClose, onCreate }
       </section>
 
       <section className="new-job-section" aria-labelledby="matrix-heading">
-        <div className="section-heading"><div><h2 id="matrix-heading">이동 시간 매트릭스</h2><p className={Classes.TEXT_MUTED}>완성된 매트릭스는 최적화 요청에 포함되어 tcache 조회를 생략합니다. 비워 두면 Place ID로 tcache에서 조회합니다.</p></div></div>
+        <div className="section-heading"><div><h2 id="matrix-heading">이동 시간 매트릭스</h2><p className={Classes.TEXT_MUTED}>완성된 매트릭스는 최적화 요청에 포함됩니다. 비워 두면 위도·경도로 유클리디안 이동 시간을 계산합니다.</p></div></div>
         <div className="form-table-scroll matrix-scroll"><table className="matrix-input-table"><thead><tr><th aria-label="출발 및 도착" />{locations.map((location, index) => <th key={location.key}>{location.id || index + 1}</th>)}</tr></thead>
           <tbody>{locations.map((location, rowIndex) => <tr key={location.key}><th>{location.id || rowIndex + 1}</th>{locations.map((column, columnIndex) => { const error = fieldErrors[`matrix.${rowIndex}.${columnIndex}`]; return <td key={column.key}><input aria-label={`${location.id || rowIndex + 1}에서 ${column.id || columnIndex + 1} 이동 시간`} aria-invalid={Boolean(error)} className={`bp6-input ${error ? "field-invalid" : ""}`} type="number" min="0" step="1" disabled={rowIndex === columnIndex} value={matrix[rowIndex]?.[columnIndex] ?? ""} onChange={(event) => { const value = event.target.value; setMatrix((current) => current.map((row, currentRow) => currentRow === rowIndex ? row.map((cell, currentColumn) => currentColumn === columnIndex ? value : cell) : row)); clearFeedback(); }} /></td>; })}</tr>)}</tbody>
         </table></div>
-        <div className="section-actions matrix-actions"><Button icon="cloud-download" onClick={() => void loadMatrix()}>{matrixLoading ? "다시 가져오기" : "tcache에서 가져오기"}</Button><Button icon="random" onClick={randomizeMatrix}>랜덤 생성</Button><Button icon="th" onClick={() => setCsvOpen((open) => !open)}>CSV 붙여넣기</Button><Button icon="reset" onClick={resetMatrix}>초기화</Button>{matrixLoading && <span className={Classes.TEXT_MUTED}><Spinner size={14} /> 매트릭스 생성 중</span>}</div>
+        <div className="section-actions matrix-actions"><Button icon="calculator" onClick={() => void loadMatrix()}>{matrixLoading ? "다시 계산" : "유클리디안 계산"}</Button><Button icon="random" onClick={randomizeMatrix}>랜덤 생성</Button><Button icon="th" onClick={() => setCsvOpen((open) => !open)}>CSV 붙여넣기</Button><Button icon="reset" onClick={resetMatrix}>초기화</Button>{matrixLoading && <span className={Classes.TEXT_MUTED}><Spinner size={14} /> 매트릭스 생성 중</span>}</div>
         <Collapse isOpen={csvOpen}><div className="csv-editor"><TextArea aria-label="매트릭스 CSV" fill placeholder={"0,30,45\n28,0,15\n40,18,0"} value={csvInput} onChange={(event) => setCsvInput(event.target.value)} /><Button intent={Intent.PRIMARY} onClick={applyCsv}>CSV 적용</Button></div></Collapse>
       </section>
 
