@@ -211,6 +211,7 @@ impl<
             }
         }
         route.push(input.problem.end_location_index());
+        input.problem.restore_order_locks(&mut route);
 
         let initial_solution = SolverSolution {
             visit_order: route.clone(),

@@ -52,10 +52,19 @@ where
             ),
         );
         check_cancelled(cancellation)?;
-        let rendered_solution = prepared
+        let mut rendered_solution = prepared
             .shuffle_seed
             .map(|seed| shuffle_solution(&solver_result.solution, seed))
             .unwrap_or_else(|| solver_result.solution.clone());
+        prepared
+            .problem
+            .restore_order_locks(&mut rendered_solution.visit_order);
+        if !prepared
+            .problem
+            .preserves_order_locks(&rendered_solution.visit_order)
+        {
+            rendered_solution = solver_result.solution.clone();
+        }
         let static_plan = calculate_schedule_from(
             &prepared.problem,
             matrix,

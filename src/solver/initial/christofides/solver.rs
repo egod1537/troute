@@ -98,6 +98,7 @@ impl<S: SymmetricDistanceStrategy, P: PerfectMatchingStrategy> ChristofidesIniti
         let mut visit_order = shortcut_euler_tour(node_count, &euler_tour)?;
         move_fixed_destination_to_end(&mut visit_order, input.problem.end_location_index())?;
 
+        input.problem.restore_order_locks(&mut visit_order);
         Ok(ChristofidesResult {
             symmetric_distance_strategy: self.symmetric_distance.name().to_owned(),
             matching_strategy: self

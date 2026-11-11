@@ -84,6 +84,9 @@ pub struct DebugOptions {
 #[derive(Debug, Clone, PartialEq, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct LocationInput {
+    /// Keep this location at its position in the submitted locations array.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub order_locked: bool,
     pub id: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub name: Option<String>,
@@ -604,7 +607,7 @@ impl TryFrom<OptimizeRouteRequest> for OptimizationProblem {
             }
             let endpoint = location_index == 0 || location_index + 1 == location_count;
             if input.required == Some(false)
-                && (endpoint || visit_policy == VisitPolicy::AllRequired)
+                && (endpoint || input.order_locked || visit_policy == VisitPolicy::AllRequired)
             {
                 return Err(RequestValidationError::RequiredLocationCannotBeOptional {
                     location_id: input.id,
@@ -619,6 +622,7 @@ impl TryFrom<OptimizeRouteRequest> for OptimizationProblem {
             }
             let required = visit_policy == VisitPolicy::AllRequired
                 || endpoint
+                || input.order_locked
                 || input.required.unwrap_or(false);
 
             let time_window =
@@ -636,7 +640,8 @@ impl TryFrom<OptimizeRouteRequest> for OptimizationProblem {
                     time_window,
                     input.stay_minutes,
                 )
-                .with_visit_metadata(required, priority),
+                .with_visit_metadata(required, priority)
+                .with_order_lock(input.order_locked),
             );
         }
 
@@ -1141,7 +1146,7 @@ pub enum RequestValidationError {
         "stay_minutes must be a non-negative multiple of 10 for location {location_id} (actual {actual})"
     )]
     StayMinutesNotTenMinuteMultiple { location_id: String, actual: u32 },
-    #[error("start/end and ALL_REQUIRED locations cannot set required=false ({location_id})")]
+    #[error("start/end, order-locked, and ALL_REQUIRED locations cannot set required=false ({location_id})")]
     RequiredLocationCannotBeOptional { location_id: String },
     #[error("priority must be between 1 and 100 for location {location_id} (actual {actual})")]
     InvalidLocationPriority { location_id: String, actual: u8 },

@@ -58,12 +58,23 @@ The canonical `OptimizeRouteRequest` wire fields are:
   `locations[].latitude`, `locations[].longitude`,
   `locations[].open_time`, `locations[].close_time`, and
   `locations[].stay_minutes`; optional `locations[].required` and
-  `locations[].priority`
+  `locations[].priority` and `locations[].order_locked`
 - optional `start_policy`, `start_time`, `travel_mode`, `country_code`,
   `route_provider`, `visit_policy`, `use_euclidean_matrix`, `travel_time_matrix`, and
   `sparse_travel_time_matrix`
 - optional `debug.min_job_duration_ms`, `debug.shuffle_result_route`, and
   `debug.shuffle_seed`
+
+`locations[].order_locked` is an optional boolean (default `false`). A locked
+location must remain at its zero-based position in the submitted `locations`
+array. It is always required, including with `BEST_EFFORT_ON_FAILURE`; explicitly
+setting `required: false` on a locked location is rejected. Locks constrain both
+exact search and heuristic moves and are validated again when scheduling.
+Optional omissions must still preserve the absolute positions of every lock.
+Conflicting time windows return `NO_FEASIBLE_ROUTE`; locks are never relaxed.
+The API uses the order of the current request, so moving a location manually and
+submitting again locks its new position. LKH3 is not used for locked requests;
+its current formulation does not encode visit positions.
 
 Unknown fields are rejected. The compatibility input aliases `countryCode`,
 `provider`, and `routeProvider` are accepted, but serialization always uses the

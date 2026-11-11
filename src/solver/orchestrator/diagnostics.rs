@@ -234,11 +234,19 @@ impl OrchestratedStrategy for PartialGreedyStrategy {
         route.push(end);
 
         let objective = DefaultObjectivePolicy;
+        if input.problem.has_order_locks() {
+            route = GreedyInitialRoute
+                .initial_solution(input, &mut StdRng::seed_from_u64(0))?
+                .visit_order;
+        }
         let required_solution = SolverSolution { visit_order: route };
         let mut best_metrics = evaluate_solution(&objective, input, &required_solution)?;
         let mut best_solution = required_solution;
         let mut remaining: Vec<_> = (1..end)
-            .filter(|&index| !input.problem.locations()[index].required())
+            .filter(|&index| {
+                !input.problem.locations()[index].required()
+                    && !best_solution.visit_order.contains(&index)
+            })
             .collect();
 
         loop {

@@ -90,6 +90,9 @@ pub fn evaluate_solution_with_penalties(
     } else {
         0
     };
+    if !input.problem.preserves_order_locks(&solution.visit_order) {
+        required_violations = required_violations.saturating_add(1);
+    }
     let mut seen = vec![false; location_count];
     for &location in &solution.visit_order {
         if location >= location_count || seen[location] {

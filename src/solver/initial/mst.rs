@@ -68,6 +68,7 @@ impl<S: SymmetricDistanceStrategy> MstDoubleTreeInitialRoute<S> {
             visit_order.push(end);
         }
 
+        input.problem.restore_order_locks(&mut visit_order);
         Ok(MstDoubleTreeResult {
             symmetric_distance_strategy: self.symmetric_distance.name().to_owned(),
             mst_edges: edges,

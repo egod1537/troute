@@ -140,6 +140,7 @@ pub struct Location {
     stay_minutes: u32,
     required: bool,
     priority: u8,
+    order_locked: bool,
 }
 
 impl Location {
@@ -156,6 +157,7 @@ impl Location {
             stay_minutes,
             required: true,
             priority: 1,
+            order_locked: false,
         }
     }
 
@@ -163,6 +165,15 @@ impl Location {
         self.required = required;
         self.priority = priority;
         self
+    }
+
+    pub(crate) fn with_order_lock(mut self, locked: bool) -> Self {
+        self.order_locked = locked;
+        self
+    }
+
+    pub fn order_locked(&self) -> bool {
+        self.order_locked
     }
 
     pub fn id(&self) -> &str {
@@ -229,6 +240,45 @@ impl OptimizationProblem {
             start_time,
             start_policy,
             visit_policy,
+        }
+    }
+
+    /// A locked location keeps its zero-based position in the submitted list.
+    pub fn allows_visit_at(&self, location: usize, position: usize) -> bool {
+        self.locations.get(location).is_some_and(|value| {
+            (!value.order_locked() || location == position)
+                && self
+                    .locations
+                    .get(position)
+                    .is_some_and(|occupant| !occupant.order_locked() || location == position)
+        })
+    }
+
+    pub fn preserves_order_locks(&self, order: &[usize]) -> bool {
+        self.locations
+            .iter()
+            .enumerate()
+            .all(|(position, location)| {
+                !location.order_locked() || order.get(position) == Some(&position)
+            })
+    }
+
+    pub fn has_order_locks(&self) -> bool {
+        self.locations.iter().any(Location::order_locked)
+    }
+
+    /// Project a complete heuristic seed onto the fixed visit positions.
+    /// Partial orders are left to the constrained search and shared validator.
+    pub(crate) fn restore_order_locks(&self, order: &mut [usize]) {
+        if order.len() != self.locations.len() {
+            return;
+        }
+        for (position, location) in self.locations.iter().enumerate() {
+            if location.order_locked() {
+                if let Some(current) = order.iter().position(|&index| index == position) {
+                    order.swap(position, current);
+                }
+            }
         }
     }
 

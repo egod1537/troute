@@ -157,7 +157,14 @@ where
         };
         let rows = matrix.into_rows();
         let mut first_feasible_removal = None;
-        for remove_index in (1..request.locations.len() - 1).take(run.max_remove_probes) {
+        for remove_index in (1..request.locations.len() - 1)
+            .filter(|&index| {
+                !request.locations[index..]
+                    .iter()
+                    .any(|location| location.order_locked)
+            })
+            .take(run.max_remove_probes)
+        {
             if !run.is_active() {
                 break;
             }

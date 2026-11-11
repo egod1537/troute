@@ -152,6 +152,9 @@ fn validate_solution(
             .ok_or(ScheduleError::InvalidVisitOrder);
     }
 
+    if !problem.preserves_order_locks(&solution.visit_order) {
+        return Err(ScheduleError::InvalidVisitOrder);
+    }
     let all_required = problem.visit_policy() == crate::domain::VisitPolicy::AllRequired;
     if (all_required && solution.visit_order.len() != location_count)
         || solution.visit_order.len() < 2

@@ -398,6 +398,7 @@ fn synthetic_instance(
     let partial = scenario == "partial" || scenario == "mixed-priorities";
     let locations = (0..size)
         .map(|index| LocationInput {
+            order_locked: false,
             id: format!("p{index}"),
             name: Some(format!("Synthetic {index}")),
             place_id: String::new(),

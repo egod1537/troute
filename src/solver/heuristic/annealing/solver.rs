@@ -305,6 +305,7 @@ impl<I: InitialRouteStrategy, N: NeighborhoodStrategy, O: ObjectivePolicy>
                 &mut rng,
             )?;
         }
+        input.problem.restore_order_locks(&mut current.visit_order);
         let current_evaluation = evaluate_solution_with_penalties(
             &self.objective,
             SolverInput {
@@ -336,6 +337,10 @@ impl<I: InitialRouteStrategy, N: NeighborhoodStrategy, O: ObjectivePolicy>
             ) else {
                 break;
             };
+            if !input.problem.preserves_order_locks(&candidate) {
+                state.finish_iteration(config.cooling_rate);
+                continue;
+            }
             state.record_movement(movement);
             let candidate = SolverSolution {
                 visit_order: candidate,

@@ -346,7 +346,9 @@ fn build_model(
     );
     let order = (0..n)
         .map(|index| {
-            let bounds = if index == start {
+            let bounds = if input.problem.locations()[index].order_locked() {
+                index as isize..=index as isize
+            } else if index == start {
                 0..=0
             } else {
                 0..=n as isize - 1
@@ -376,6 +378,21 @@ fn build_model(
 
     add_flow_constraints(&mut model, &arcs, &y, start, end);
     add_subtour_constraints(&mut model, &arcs, &order, n);
+    if input.problem.has_order_locks() {
+        for (from, row) in arcs.iter().enumerate() {
+            for (to, arc) in row.iter().enumerate() {
+                if let Some(arc) = arc {
+                    model.add(
+                        cons()
+                            .le(n as f64 + 1.0)
+                            .coef(&order[to], 1.0)
+                            .coef(&order[from], -1.0)
+                            .coef(arc, n as f64),
+                    );
+                }
+            }
+        }
+    }
     add_time_constraints(
         &mut model,
         input,

@@ -180,7 +180,11 @@ impl<O: ObjectivePolicy, F: FrontierPolicy> ExactBitDpSolver<O, F> {
                     }
                     for next in 1..location_count {
                         let next_bit = 1 << next;
-                        if mask & next_bit != 0 {
+                        if mask & next_bit != 0
+                            || !input
+                                .problem
+                                .allows_visit_at(next, mask.count_ones() as usize)
+                        {
                             continue;
                         }
                         // The fixed destination can only be visited last.
@@ -292,7 +296,12 @@ impl<O: ObjectivePolicy, F: FrontierPolicy> ExactBitDpSolver<O, F> {
                 };
                 for next in 1..location_count {
                     let next_bit = 1 << next;
-                    if mask & next_bit != 0 || (next == end && mask | next_bit != full_mask) {
+                    if mask & next_bit != 0
+                        || !input
+                            .problem
+                            .allows_visit_at(next, mask.count_ones() as usize)
+                        || (next == end && mask | next_bit != full_mask)
+                    {
                         continue;
                     }
                     let Some(finish_slot) = transition_time(input, last, next, time_slot) else {

@@ -25,6 +25,7 @@ impl InitialRouteGenerator for RandomInitialRoute {
         visit_order.push(input.problem.start_location_index());
         visit_order.extend(intermediate);
         visit_order.push(end);
+        input.problem.restore_order_locks(&mut visit_order);
         Ok(SolverSolution { visit_order })
     }
 }

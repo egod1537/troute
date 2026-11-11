@@ -42,12 +42,11 @@ pub(super) fn solve_cluster<O: ObjectivePolicy, F: FrontierPolicy>(
     );
     let mut locations = Vec::with_capacity(cluster.members.len() + 2);
     locations.push(completed_anchor);
-    locations.extend(
-        cluster
-            .members
-            .iter()
-            .map(|&member| input.problem.locations()[member].clone()),
-    );
+    locations.extend(cluster.members.iter().map(|&member| {
+        input.problem.locations()[member]
+            .clone()
+            .with_order_lock(false)
+    }));
     locations.push(dummy);
     let subproblem = OptimizationProblem::with_start_policy(
         locations,

@@ -67,6 +67,7 @@ impl OrchestratedStrategy for Lkh3Strategy {
 
     fn is_applicable_to(&self, problem: &crate::domain::OptimizationProblem) -> bool {
         problem.visit_policy() == VisitPolicy::AllRequired
+            && !problem.has_order_locks()
             && self.is_applicable(problem.locations().len())
     }
 

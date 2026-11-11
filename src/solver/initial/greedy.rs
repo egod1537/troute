@@ -28,6 +28,7 @@ impl InitialRouteGenerator for GreedyInitialRoute {
             let next = remaining
                 .iter()
                 .copied()
+                .filter(|&candidate| input.problem.allows_visit_at(candidate, visit_order.len()))
                 .min_by_key(|&candidate| {
                     (
                         input

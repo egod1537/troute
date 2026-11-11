@@ -95,6 +95,7 @@ pub fn build_optimize_request_from_fixture(
             .locations
             .into_iter()
             .map(|location| LocationInput {
+                order_locked: false,
                 id: location.id,
                 name: Some(location.name),
                 place_id: location.place_id,

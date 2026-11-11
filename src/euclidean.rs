@@ -92,6 +92,7 @@ mod tests {
 
     fn location(id: &str, latitude: f64, longitude: f64) -> LocationInput {
         LocationInput {
+            order_locked: false,
             id: id.to_owned(),
             name: None,
             place_id: String::new(),
