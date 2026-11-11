@@ -26,6 +26,7 @@ pub mod service;
 pub mod solver;
 pub mod storage;
 pub mod tcache;
+pub mod validation;
 
 pub use api::{
     ClusterDiagnosticOutput, DebugOptions, MatchingPairDiagnosticOutput, MstEdgeDiagnosticOutput,

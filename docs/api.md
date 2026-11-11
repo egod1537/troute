@@ -1,3 +1,9 @@
+# Standalone validation
+
+For read-only itinerary checks independent of optimization, see
+[`POST /validate`](route-validation.md). Current-order conflicts are reported as
+non-blocking warnings; malformed domain inputs block optimization. No Job runs.
+
 # HTTP API
 
 `POST /integration/jobs` is the primary asynchronous submission endpoint.

@@ -11,3 +11,6 @@ pub(super) use health::health;
 pub(super) use jobs::{cancel_job, get_job, job_timeline, list_jobs, solver_telemetry, submit_job};
 pub(super) use matrix::build_matrix;
 pub(super) use optimization::optimize;
+
+mod validation;
+pub(super) use validation::validate_route;

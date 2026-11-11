@@ -6,6 +6,7 @@ mod progress;
 mod remediation;
 mod revalidation;
 mod routing;
+mod validation;
 
 use std::sync::Arc;
 

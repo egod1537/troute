@@ -249,7 +249,8 @@ async fn method_not_allowed<B>(request: Request<B>) -> Response {
         ),
     )
     .into_response();
-    if request.uri().path() == "/optimize"
+    if request.uri().path() == "/validate"
+        || request.uri().path() == "/optimize"
         || (request.uri().path().starts_with("/integration/jobs/")
             && request.uri().path().ends_with("/cancel"))
     {

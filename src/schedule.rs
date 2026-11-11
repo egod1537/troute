@@ -28,10 +28,11 @@ pub fn calculate_schedule_from(
     validate_solution(problem, matrix, solution)?;
 
     let start_location = problem.start_location();
-    let start_service = start_time.max(start_location.time_window().open());
-    let start_wait = u32::from(start_service.minutes() - start_time.minutes());
-    let start_departure = start_service
-        .checked_add(start_location.stay_minutes())
+    let start_timing = visit_timing(start_location, start_time, None);
+    let start_service = start_timing.service_start;
+    let start_wait = start_timing.wait_minutes;
+    let start_departure = start_timing
+        .departure
         .ok_or(ScheduleError::OutsideSingleDay)?;
     if start_departure > start_location.time_window().close() {
         return Err(ScheduleError::TimeWindowViolation {
@@ -86,11 +87,10 @@ pub fn calculate_schedule_from(
             .checked_add(travel_minutes)
             .ok_or(ScheduleError::OutsideSingleDay)?;
         let location = &problem.locations()[to];
-        let service_start = arrival_time.max(location.time_window().open());
-        let wait_minutes = u32::from(service_start.minutes() - arrival_time.minutes());
-        let departure_time = service_start
-            .checked_add(location.stay_minutes())
-            .ok_or(ScheduleError::OutsideSingleDay)?;
+        let timing = visit_timing(location, arrival_time, None);
+        let service_start = timing.service_start;
+        let wait_minutes = timing.wait_minutes;
+        let departure_time = timing.departure.ok_or(ScheduleError::OutsideSingleDay)?;
 
         if departure_time > location.time_window().close() {
             return Err(ScheduleError::TimeWindowViolation {
@@ -219,3 +219,24 @@ pub enum ScheduleError {
 
 #[cfg(test)]
 mod tests;
+
+/// Shared service, waiting and stay semantics for optimization and validation.
+pub(crate) struct VisitTiming {
+    pub service_start: crate::domain::TimeOfDay,
+    pub wait_minutes: u32,
+    pub departure: Option<crate::domain::TimeOfDay>,
+}
+pub(crate) fn visit_timing(
+    location: &crate::domain::Location,
+    arrival: crate::domain::TimeOfDay,
+    requested: Option<crate::domain::TimeOfDay>,
+) -> VisitTiming {
+    let service_start = arrival
+        .max(location.time_window().open())
+        .max(requested.unwrap_or(arrival));
+    VisitTiming {
+        service_start,
+        wait_minutes: u32::from(service_start.minutes() - arrival.minutes()),
+        departure: service_start.checked_add(location.stay_minutes()),
+    }
+}

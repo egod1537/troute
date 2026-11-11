@@ -120,6 +120,7 @@ where
             get(handlers::solver_capabilities),
         )
         .route("/optimize", post(handlers::optimize))
+        .route("/validate", post(handlers::validate_route))
         .route(
             "/integration/jobs",
             get(handlers::list_jobs).post(handlers::submit_job),

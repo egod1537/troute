@@ -35,6 +35,18 @@ use cancellation::JobCancellationRegistry;
 
 /// Executes the optimization pipeline independently of its HTTP request.
 pub trait JobExecutor: Send + Sync {
+    fn validate_route(
+        &self,
+        _request: crate::validation::ValidateRouteRequest,
+        _cancellation: &CancellationToken,
+    ) -> Result<crate::validation::ValidateRouteResponse, OptimizationServiceError> {
+        Err(OptimizationServiceError::Routing(
+            crate::routing::RoutingError::Provider(
+                "route validation is unavailable for this executor".to_owned(),
+            ),
+        ))
+    }
+
     fn apply_request_defaults(&self, _request: &mut OptimizeRouteRequest) {}
 
     fn execute(
@@ -83,6 +95,14 @@ where
     P: RoutingProvider + Send + Sync,
     S: RouteSolver + Send + Sync,
 {
+    fn validate_route(
+        &self,
+        request: crate::validation::ValidateRouteRequest,
+        cancellation: &CancellationToken,
+    ) -> Result<crate::validation::ValidateRouteResponse, OptimizationServiceError> {
+        RouteOptimizationService::validate_route(self, request, cancellation)
+    }
+
     fn apply_request_defaults(&self, request: &mut OptimizeRouteRequest) {
         RouteOptimizationService::apply_request_defaults(self, request);
     }
