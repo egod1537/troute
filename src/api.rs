@@ -587,7 +587,8 @@ impl TryFrom<OptimizeRouteRequest> for OptimizationProblem {
                 ("open_time", input.open_time),
                 ("close_time", input.close_time),
             ] {
-                if time.minutes() % INPUT_TIME_GRANULARITY_MINUTES as u16 != 0 {
+                let end_of_day = field == "close_time" && time.minutes() == 24 * 60 - 1;
+                if !end_of_day && time.minutes() % INPUT_TIME_GRANULARITY_MINUTES as u16 != 0 {
                     return Err(RequestValidationError::TimeNotTenMinuteAligned {
                         location_id: input.id.clone(),
                         field,

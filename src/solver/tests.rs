@@ -143,6 +143,47 @@ fn latest_start_is_selected_on_the_minute_boundary() {
 }
 
 #[test]
+fn unrestricted_day_window_can_finish_after_twenty_three_fifty() {
+    let request: OptimizeRouteRequest = serde_json::from_value(serde_json::json!({
+        "job_id": "end-of-day-latest",
+        "start_policy": "LATEST",
+        "locations": [
+            {"id":"A","place_id":"a","open_time":"00:00","close_time":"23:59","stay_minutes":0},
+            {"id":"B","place_id":"b","open_time":"00:00","close_time":"23:59","stay_minutes":0}
+        ]
+    }))
+    .unwrap();
+    let problem: OptimizationProblem = request.try_into().unwrap();
+    let matrix = TravelTimeMatrix::new(vec![vec![0, 15], vec![15, 0]]).unwrap();
+    let cancellation = CancellationToken::new();
+    let result = ExactBitDpSolver::default()
+        .solve_detailed(SolverInput {
+            matrix: &matrix,
+            problem: &problem,
+            cancellation: &cancellation,
+        })
+        .unwrap();
+    assert_eq!(result.metrics.start_time_slot, 23 * 60 + 44);
+    assert_eq!(result.metrics.finish_time_slot, 23 * 60 + 59);
+    let plan = calculate_schedule_from(
+        &problem,
+        &matrix,
+        &result.solution,
+        TimeOfDay::from_minutes(result.metrics.start_time_slot).unwrap(),
+    )
+    .unwrap();
+    assert_eq!(
+        plan.stops
+            .last()
+            .unwrap()
+            .departure_time
+            .unwrap()
+            .to_string(),
+        "23:59"
+    );
+}
+
+#[test]
 fn exact_solver_uses_reachable_sparse_path_and_ignores_irrelevant_reverse_arc() {
     let request: OptimizeRouteRequest = serde_json::from_value(serde_json::json!({
         "job_id": "sparse-exact",

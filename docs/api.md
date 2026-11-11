@@ -32,7 +32,8 @@ Both submission endpoints accept `application/json`. Time values are strict 24-h
 `HH:MM` strings on both request and response; numeric minute values and forms
 such as `9:00`, `24:00`, or `09:60` are rejected. Requests must contain 2 to 500
 locations. Location `open_time` and `close_time` values must fall on a 10-minute
-boundary (`00`, `10`, `20`, `30`, `40`, or `50` minutes), and `stay_minutes`
+boundary (`00`, `10`, `20`, `30`, `40`, or `50` minutes), except for the end-of-day
+`close_time` boundary `23:59`, and `stay_minutes`
 must be a non-negative multiple of 10. The first location is the fixed start, the last location is the
 fixed destination, and only locations between them may be reordered by the
 solver. The required `job_id` is an opaque correlation value supplied by the
@@ -41,6 +42,12 @@ non-blank strings of at most 512 characters and unique. Place IDs must be
 non-blank strings of at most 512 characters when both matrix fields are omitted
 and `use_euclidean_matrix` is false. They may be blank when a matrix is supplied
 or Euclidean mode is enabled because tcache is bypassed.
+
+`close_time` also accepts `23:59` as the end-of-day boundary, allowing unknown
+hours or all-day places to use `00:00`–`23:59` without losing the last nine
+minutes of the day. Other location times and stay durations still use ten-minute
+units. `open_time` and fixed `start_time` do not gain a `23:59` exception.
+
 Overnight windows are not supported, so `open_time` must not be later than
 `close_time`. The request body limit is 1 MiB.
 
@@ -334,7 +341,8 @@ best updates, and termination reason.
 The exact solver supports at most 15 locations, keeps the first and last
 request locations as fixed endpoints, and reorders every intermediate
 location with bitmask DP. Solver state and final scheduling use exact minutes;
-the input window/stay contract remains ten-minute aligned. Each
+the input window/stay contract remains ten-minute aligned except for the
+`23:59` closing boundary. Each
 `(visited_mask, last_location)` cell contains a Pareto frontier over time and
 cost; objective scoring and frontier dominance are replaceable policies.
 

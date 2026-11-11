@@ -31,6 +31,12 @@ shared with optimization. With no explicit start time the existing domain defaul
 is midnight; this endpoint never searches EARLIEST/LATEST starts or changes order.
 Clients should send the current start time explicitly.
 
+Location closing times also accept `23:59` for an unrestricted end-of-day window.
+Opening times and fixed route starts still require ten-minute alignment. A client
+validating minute-precision service times can round its arrival/start down to the
+preceding ten-minute boundary and retain the exact first visit time in
+`service_start_times`; the simulator then accounts for the intervening wait.
+
 ## Response
 
 HTTP 200 returns `input_valid`, nullable `schedule_feasible`,
@@ -64,6 +70,12 @@ provider queries. Solver, remediation searches and Job storage are not invoked.
 
 ## Verification
 
+- End-of-day regression coverage accepts `close_time: 23:59`, rejects unaligned
+  ordinary opening/closing times, and verifies an exact latest-start route can
+  finish at `23:59`. Manual HTTP calls using actual Trasolve request builders and
+  the local troute binary confirmed optimization and detached validation agree
+  on a route starting at `23:24` and finishing at `23:59`; a `23:55` closing time
+  still returns blocking invalid input. Supplied matrices avoided provider I/O.
 - Added four focused tests: collecting multiple pinned-time/window problems,
   equivalence with optimization's schedule semantics, unknown suffix times after
   an unreachable arc, and invalid input blocking before routing.

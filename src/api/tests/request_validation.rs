@@ -104,6 +104,22 @@ fn location_times_and_stays_require_ten_minute_units() {
 }
 
 #[test]
+fn end_of_day_close_does_not_relax_other_clock_constraints() {
+    let mut request = request_with_locations(&["A", "B"]);
+    request.locations[0].close_time = "23:59".parse().unwrap();
+    let problem = OptimizationProblem::try_from(request.clone()).unwrap();
+    assert_eq!(problem.start_location().time_window().close().to_string(), "23:59");
+
+    request.locations[0].open_time = "23:59".parse().unwrap();
+    assert!(matches!(OptimizationProblem::try_from(request.clone()),
+        Err(RequestValidationError::TimeNotTenMinuteAligned { field: "open_time", .. })));
+    request.locations[0].open_time = "00:00".parse().unwrap();
+    request.locations[0].close_time = "23:55".parse().unwrap();
+    assert!(matches!(OptimizationProblem::try_from(request),
+        Err(RequestValidationError::TimeNotTenMinuteAligned { field: "close_time", .. })));
+}
+
+#[test]
 fn travel_mode_is_optional_strict_and_round_trips() {
     let omitted = request_with_locations(&["A", "B"]);
     assert_eq!(omitted.travel_mode, None);
