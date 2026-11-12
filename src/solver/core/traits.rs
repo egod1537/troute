@@ -28,6 +28,11 @@ pub trait SolverProgressObserver: Send + Sync {
     /// Unlike the global incumbent, this may be worse than the previous preview.
     fn on_preview_solution(&self, _solution: &SolverSolution, _metrics: &super::SolutionMetrics) {}
 
+    /// An actual accepted feasible state from inside a bounded SA run.
+    fn on_search_sample(&self, solution: &SolverSolution, metrics: &super::SolutionMetrics) {
+        self.on_preview_solution(solution, metrics);
+    }
+
     fn is_enabled(&self) -> bool {
         true
     }

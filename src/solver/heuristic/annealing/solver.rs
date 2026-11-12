@@ -272,6 +272,33 @@ impl<I: InitialRouteStrategy, N: NeighborhoodStrategy, O: ObjectivePolicy>
         &self,
         input: SolverInput<'_>,
     ) -> Result<SimulatedAnnealingResult, SolverError> {
+        self.solve_recording(input, false).map(|(result, _)| result)
+    }
+
+    pub fn solve_detailed_with_samples(
+        &self,
+        input: SolverInput<'_>,
+    ) -> Result<
+        (
+            SimulatedAnnealingResult,
+            Vec<(SolverSolution, SolutionMetrics)>,
+        ),
+        SolverError,
+    > {
+        self.solve_recording(input, true)
+    }
+
+    fn solve_recording(
+        &self,
+        input: SolverInput<'_>,
+        capture: bool,
+    ) -> Result<
+        (
+            SimulatedAnnealingResult,
+            Vec<(SolverSolution, SolutionMetrics)>,
+        ),
+        SolverError,
+    > {
         let config = self.config.validate()?;
         if input.cancellation.is_cancelled() {
             return Err(SolverError::Cancelled);
@@ -321,6 +348,7 @@ impl<I: InitialRouteStrategy, N: NeighborhoodStrategy, O: ObjectivePolicy>
         let mut state =
             AnnealingSearchState::new(current, current_evaluation, config.initial_temperature);
         let time_limit = config.time_limit_ms.map(Duration::from_millis);
+        let mut samples: Vec<(SolverSolution, SolutionMetrics)> = Vec::new();
 
         while optional_limit_allows(config.iteration_limit, state.iterations)
             && optional_duration_allows(time_limit, started.elapsed())
@@ -363,12 +391,32 @@ impl<I: InitialRouteStrategy, N: NeighborhoodStrategy, O: ObjectivePolicy>
                 Err(error) => return Err(error),
             };
             let random_unit = rng.gen::<f64>();
+            let accepted_before = state.accepted_moves;
             state.consider_candidate(
                 &self.objective,
                 candidate,
                 candidate_evaluation,
                 random_unit,
             );
+            if capture
+                && state.accepted_moves > accepted_before
+                && (samples.len() < 5 || state.accepted_moves % 16 == 0)
+                && state.current.visit_order != initial_solution.visit_order
+            {
+                if let Some(metrics) = state.current_evaluation.feasible_metrics {
+                    if !samples
+                        .iter()
+                        .any(|(route, _)| route.visit_order == state.current.visit_order)
+                    {
+                        let sample = (state.current.clone(), metrics);
+                        if samples.len() < 5 {
+                            samples.push(sample);
+                        } else {
+                            samples[4] = sample;
+                        }
+                    }
+                }
+            }
             state.finish_iteration(config.cooling_rate);
         }
 
@@ -389,13 +437,16 @@ impl<I: InitialRouteStrategy, N: NeighborhoodStrategy, O: ObjectivePolicy>
             )?
         };
         debug_assert_eq!(verified, metrics);
-        Ok(SimulatedAnnealingResult {
-            initial_solution,
-            initial_metrics,
-            solution,
-            metrics: verified,
-            stats: state.stats(config, started.elapsed()),
-        })
+        Ok((
+            SimulatedAnnealingResult {
+                initial_solution,
+                initial_metrics,
+                solution,
+                metrics: verified,
+                stats: state.stats(config, started.elapsed()),
+            },
+            samples,
+        ))
     }
 }
 

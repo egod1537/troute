@@ -548,17 +548,30 @@ impl<I: InitialRouteStrategy> OrchestratedStrategy for AnnealingStrategy<I> {
     }
 
     fn execute(&self, input: SolverInput<'_>) -> Result<StrategyExecution, SolverError> {
+        self.execute_with_previews(input, false)
+    }
+
+    fn execute_with_previews(
+        &self,
+        input: SolverInput<'_>,
+        enabled: bool,
+    ) -> Result<StrategyExecution, SolverError> {
         let location_ids: Vec<_> = input
             .problem
             .locations()
             .iter()
             .map(|location| location.id().to_owned())
             .collect();
-        let result = self.solver.solve_detailed(input)?;
+        let (result, samples) = if enabled {
+            self.solver.solve_detailed_with_samples(input)?
+        } else {
+            (self.solver.solve_detailed(input)?, Vec::new())
+        };
         let location_id = |index: usize| location_ids[index].clone();
         Ok(StrategyExecution {
             solution: result.solution.clone(),
             metadata: SolverCandidateMetadata {
+                preview_samples: Some(samples),
                 initial_strategy: Some(self.initial_strategy.to_owned()),
                 initial_route: Some(
                     result

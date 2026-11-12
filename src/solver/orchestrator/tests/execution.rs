@@ -142,3 +142,34 @@ fn live_preview_arrives_before_slow_parallel_strategy_finishes() {
     assert_eq!(received.len(), 1, "equal candidates must not generate new previews");
     assert!(received[0] < Duration::from_millis(300), "preview must be published while the slow strategy is still running");
 }
+
+#[test]
+fn small_exact_job_exposes_real_sa_trajectory_and_preserves_the_exact_optimum() {
+    #[derive(Default)]
+    struct Recorder(std::sync::Mutex<Vec<SolverSolution>>);
+    impl crate::solver::SolverProgressObserver for Recorder {
+        fn on_progress(&self, _: crate::solver::SolverProgressEvent) {}
+        fn on_search_sample(&self, solution: &SolverSolution, _: &SolutionMetrics) {
+            self.0.lock().unwrap().push(solution.clone());
+        }
+    }
+    let mut config = test_config();
+    config.total_budget = Duration::from_secs(2);
+    config.sa_config.iteration_limit = Some(512);
+    let solver = SolverOrchestrator::new(config).unwrap();
+    let problem = problem(13);
+    let matrix = matrix(13);
+    let cancellation = CancellationToken::new();
+    let input = input(&problem, &matrix, &cancellation);
+    let optimum = solver.solve_detailed(input).unwrap();
+    let observer = Recorder::default();
+    let traced = crate::solver::RouteSolver::solve_with_diagnostics_and_progress(&solver, input, &observer).unwrap();
+    assert_eq!(traced.solution, optimum.solution);
+    let samples = observer.0.lock().unwrap();
+    assert_eq!(samples.len(), 5, "the default <=15-place path must not bypass SA trace collection");
+    let unique: std::collections::HashSet<_> = samples.iter().map(|solution| solution.visit_order.clone()).collect();
+    assert_eq!(unique.len(), samples.len());
+    for solution in samples.iter() {
+        DefaultObjectivePolicy.evaluate(input, solution).unwrap();
+    }
+}

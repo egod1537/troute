@@ -62,6 +62,12 @@ impl<E: ObjectiveEvaluator> SolverProgressObserver for PreviewObserver<'_, E> {
         self.observer.is_enabled()
     }
 
+    fn on_search_sample(&self, solution: &SolverSolution, metrics: &SolutionMetrics) {
+        // Accepted SA trajectory samples are already bounded by the run. Keep
+        // them even when an entire run finishes inside one wall-clock window.
+        self.observer.on_search_sample(solution, metrics);
+    }
+
     fn on_candidate(&self, candidate: &SolverCandidate) {
         if !self.is_enabled() || !candidate.feasible {
             return;

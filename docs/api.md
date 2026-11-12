@@ -653,25 +653,27 @@ null until successful completion. Previews are provisional schedules based on
 the current travel-time matrix; final time-dependent revalidation can change
 the completed result. They must never be treated as completed/applicable results.
 
-The orchestrator observes validated strategy completions while other workers and
-subsequent SA chunks are still executing. Global incumbent updates and map previews
-are separate: every strict global improvement still updates the incumbent, while
-`PreviewObserver` selects the best new feasible visit order in each three-second
-window using the same objective evaluator. The previously sampled visit order is
-excluded to avoid identical map frames. A later sampled candidate can be worse than
-an earlier sample; it never replaces the authoritative final optimum. The last
-window is flushed on successful solve completion without sleeping.
+The SA loop records up to five distinct, accepted feasible routes (first four
+and newest), including accepted moves that worsen the current objective. Rejected
+and infeasible moves are never exposed. Each sample is revalidated through the
+authoritative objective evaluator before becoming a provisional schedule. Recording
+uses the same RNG and acceptance logic and does not replace SA's best feasible route.
 
-This does not expose every internal SA move or native-solver incumbent. Exact
-search can finish with only one real route; clients should show that one result
-for one playback interval instead of padding it to a five-frame animation.
+Small exact solves normally bypass SA. With progress enabled, at least four
+locations, SA enabled, and remaining deadline/resource allowance, an additional SA
+run starts from the exact optimum with a maximum 40 ms budget. This supplies real
+search trajectories without keeping a server worker busy for UI playback. Restrictive
+constraints can still leave fewer distinct feasible routes. Final selection remains
+the best validated candidate from all algorithms, including the exact optimum.
+
+Validated strategy completions also update global incumbents and the best new route
+in each three-second sampling window. The final window is flushed without sleeping.
 Detailed solver telemetry remains separate from the live preview transport.
 
-A bounded watch channel retains at most five real candidate milestones:
-the first four and the newest window sample. Each `preview.frames[]` entry has a source
-`revision` and complete `result`. No fabricated or repeated routes are added to
-fill the history. Source revisions increase for every emitted window sample, so
-retained and transmitted revision numbers may have gaps.
+A bounded watch channel retains at most five actual candidate milestones: the first
+four and the newest sample. Each `preview.frames[]` entry has a source `revision`
+and complete `result`. No routes are fabricated to fill the history. Source revisions
+increase for emitted samples, so retained revision numbers may have gaps.
 
 The first available preview is transmitted immediately; subsequent active Job
 updates remain limited to once every three seconds. Before success, all retained

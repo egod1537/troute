@@ -385,6 +385,7 @@ impl<E: ObjectiveEvaluator> SolverOrchestrator<E> {
                 let mut candidate = execute_strategy(
                     exact.as_ref(),
                     &self.evaluator,
+                    observer,
                     SolverInput {
                         matrix: input.matrix,
                         problem: input.problem,
@@ -401,17 +402,59 @@ impl<E: ObjectiveEvaluator> SolverOrchestrator<E> {
                 observer.on_candidate(&candidate);
                 accumulator.consider(&self.evaluator, &mut candidate);
                 let exact_optimum = candidate.feasible && candidate.route.is_some();
+                let exact_route = candidate.route.clone();
                 accumulator.push(candidate);
                 if exact_optimum && !self.config.compare_all {
+                    // Exact search normally bypasses SA. A tightly bounded run from
+                    // its valid optimum records real accepted search states for UI
+                    // playback without holding a server worker for fifteen seconds.
+                    let baseline_elapsed = started.elapsed();
+                    let mut sa_elapsed = Duration::ZERO;
+                    let mut sa_run_count = 0;
+                    if observer.is_enabled()
+                        && input.problem.locations().len() >= 4
+                        && solver_enabled(&self.config, "sa")
+                        && instance_policy_allows(instance_selection.as_ref(), "sa")
+                    {
+                        if let Some(budget) = strategy_allowance(
+                            deadline,
+                            self.config.deadline_safety_margin,
+                            Duration::from_millis(40),
+                        ) {
+                            let strategy = annealing_strategy(
+                                &self.config,
+                                SaInitializer::GlobalBest,
+                                exact_route,
+                                self.config.sa_seeds[0],
+                                0,
+                                duration_ms(budget),
+                            )?;
+                            let mut sampled = execute_strategy(
+                                strategy.as_ref(),
+                                &self.evaluator,
+                                observer,
+                                input,
+                                budget,
+                                started,
+                                &self.resources,
+                                resource_request(&self.config, strategy.name()),
+                            );
+                            sa_elapsed = sampled.elapsed;
+                            sa_run_count = 1;
+                            observer.on_candidate(&sampled);
+                            accumulator.consider(&self.evaluator, &mut sampled);
+                            accumulator.push(sampled);
+                        }
+                    }
                     let (candidates, global_best_updates) = accumulator.into_parts();
                     return SolveResultBuilder::new(&self.evaluator, observer).build(
                         candidates,
                         SolveResultStats {
                             total_budget: self.config.total_budget,
                             started,
-                            baseline_elapsed: started.elapsed(),
-                            sa_elapsed: Duration::ZERO,
-                            sa_run_count: 0,
+                            baseline_elapsed,
+                            sa_elapsed,
+                            sa_run_count,
                             global_best_updates,
                             termination_reason: "exact_optimum",
                         },
@@ -568,6 +611,7 @@ impl<E: ObjectiveEvaluator> SolverOrchestrator<E> {
             let mut candidate = execute_strategy(
                 strategy.as_ref(),
                 &self.evaluator,
+                observer,
                 SolverInput {
                     matrix: input.matrix,
                     problem: input.problem,

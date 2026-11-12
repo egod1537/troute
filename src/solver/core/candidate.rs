@@ -39,6 +39,8 @@ pub struct SolverCandidate {
 
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct SolverCandidateMetadata {
+    /// Internal, bounded accepted-SA samples; drained before candidate persistence.
+    pub preview_samples: Option<Vec<(SolverSolution, SolutionMetrics)>>,
     pub solver_id: Option<String>,
     pub run_id: Option<u64>,
     pub job_queued_at_ms: Option<u64>,

@@ -251,7 +251,14 @@ fn caller_matrix_bypass_and_api_response_contract_are_stable() {
     );
 
     let candidates = json["solver_candidates"].as_array().unwrap();
-    assert_eq!(candidates.len(), 1);
+    // Progress-enabled exact solves now add one bounded, genuine SA trace run.
+    assert_eq!(candidates.len(), 2);
+    assert!(candidates.iter().any(|candidate| candidate["strategy"]
+        .as_str()
+        .is_some_and(|name| name.starts_with("sa_"))));
+    assert!(candidates
+        .iter()
+        .all(|candidate| candidate["metadata"].get("preview_samples").is_none()));
     assert_eq!(
         candidates
             .iter()
@@ -285,6 +292,8 @@ fn caller_matrix_bypass_and_api_response_contract_are_stable() {
             "wait_minutes"
         ])
     );
+    assert_eq!(exact["best"], true);
+    assert_eq!(json["solver_diagnostics"]["sa_run_count"], 1);
     assert_eq!(exact["objective_score"]["latest_start"], "23:10");
     assert_eq!(exact["objective_score"]["finish_time"], "23:50");
     assert_eq!(exact["objective_score"]["travel_minutes"], 40);

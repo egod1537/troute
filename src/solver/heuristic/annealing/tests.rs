@@ -74,3 +74,54 @@ fn deterministic_config(iterations: u64) -> SimulatedAnnealingConfig {
 include!("tests/neighborhood.rs");
 include!("tests/feasibility.rs");
 include!("tests/limits.rs");
+
+#[test]
+fn accepted_trajectory_samples_are_feasible_distinct_and_do_not_change_the_best_result() {
+    let problem = problem(7);
+    let matrix = directed_matrix(7);
+    let cancellation = CancellationToken::new();
+    let input = SolverInput {
+        matrix: &matrix,
+        problem: &problem,
+        cancellation: &cancellation,
+    };
+    let solver = SimulatedAnnealingSolver::new(
+        SimulatedAnnealingConfig {
+            seed: Some(42),
+            iteration_limit: Some(512),
+            time_limit_ms: None,
+            ..SimulatedAnnealingConfig::default()
+        },
+        FixedInitialRoute {
+            solution: SolverSolution {
+                visit_order: (0..7).collect(),
+            },
+        },
+        MixedNeighborhoodStrategy,
+        DefaultObjectivePolicy,
+    )
+    .unwrap();
+    let plain = solver.solve_detailed(input).unwrap();
+    let (traced, samples) = solver.solve_detailed_with_samples(input).unwrap();
+    assert_eq!(plain.solution, traced.solution);
+    assert_eq!(plain.metrics, traced.metrics);
+    assert_eq!(plain.stats.iterations, traced.stats.iterations);
+    assert_eq!(
+        samples.len(),
+        5,
+        "a short SA run must retain accepted trajectory states, not only its winner"
+    );
+    let mut orders = std::collections::HashSet::new();
+    for (solution, metrics) in samples {
+        assert!(orders.insert(solution.visit_order.clone()));
+        assert_ne!(solution, traced.initial_solution);
+        let verified = evaluate_solution(&DefaultObjectivePolicy, input, &solution).unwrap();
+        assert_eq!(verified, metrics);
+        assert!(!crate::solver::ObjectiveEvaluator::compare(
+            &DefaultObjectivePolicy,
+            &traced.metrics,
+            &metrics
+        )
+        .is_gt());
+    }
+}

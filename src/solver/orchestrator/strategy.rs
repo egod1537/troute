@@ -48,6 +48,14 @@ pub trait OrchestratedStrategy: Send + Sync {
     }
 
     fn execute(&self, input: SolverInput<'_>) -> Result<StrategyExecution, SolverError>;
+
+    fn execute_with_previews(
+        &self,
+        input: SolverInput<'_>,
+        _enabled: bool,
+    ) -> Result<StrategyExecution, SolverError> {
+        self.execute(input)
+    }
 }
 
 pub(super) fn report_progress(
@@ -132,6 +140,7 @@ impl<E: ObjectiveEvaluator> StrategyBatchExecutor<'_, E> {
                     let candidate = execute_strategy(
                         strategy.as_ref(),
                         self.evaluator,
+                        self.observer,
                         self.input,
                         timeout,
                         self.started,
@@ -181,6 +190,7 @@ pub(super) fn duration_ms(duration: Duration) -> u64 {
 pub(super) fn execute_strategy<E: ObjectiveEvaluator>(
     strategy: &dyn OrchestratedStrategy,
     evaluator: &E,
+    observer: &dyn SolverProgressObserver,
     input: SolverInput<'_>,
     timeout: Duration,
     job_started: Instant,
@@ -261,11 +271,14 @@ pub(super) fn execute_strategy<E: ObjectiveEvaluator>(
             }
         });
         let result = catch_unwind(AssertUnwindSafe(|| {
-            let execution = strategy.execute(SolverInput {
-                matrix: input.matrix,
-                problem: input.problem,
-                cancellation: &child_cancellation,
-            })?;
+            let execution = strategy.execute_with_previews(
+                SolverInput {
+                    matrix: input.matrix,
+                    problem: input.problem,
+                    cancellation: &child_cancellation,
+                },
+                observer.is_enabled(),
+            )?;
             let validation_cancellation = CancellationToken::new();
             let evaluation_cancellation = if strategy.preserves_result_on_cancellation()
                 && child_cancellation.is_cancelled()
@@ -316,6 +329,15 @@ pub(super) fn execute_strategy<E: ObjectiveEvaluator>(
             Ok(Err(error)) => failed_candidate_from_error(strategy.name(), elapsed, error),
             Ok(Ok((execution, Ok(metrics)))) => {
                 let mut metadata = execution.metadata;
+                let samples = metadata.preview_samples.take().unwrap_or_default();
+                if !input.cancellation.is_cancelled() {
+                    for (sample, _) in samples {
+                        // Validate accepted states again through the authoritative evaluator.
+                        if let Ok(metrics) = evaluator.evaluate(input, &sample) {
+                            observer.on_search_sample(&sample, &metrics);
+                        }
+                    }
+                }
                 metadata.timed_out |= reason == 1;
                 metadata.outcome = Some(if metadata.timed_out {
                     SolverOutcomeKind::Timeout
@@ -340,6 +362,7 @@ pub(super) fn execute_strategy<E: ObjectiveEvaluator>(
             }
             Ok(Ok((execution, Err(error)))) => {
                 let mut metadata = execution.metadata;
+                metadata.preview_samples = None;
                 metadata.error = Some(error.to_string());
                 metadata.outcome = Some(SolverOutcomeKind::Failed);
                 metadata.proof_status = Some(SolverProofStatus::Unknown);
