@@ -166,7 +166,7 @@ fn small_exact_job_exposes_real_sa_trajectory_and_preserves_the_exact_optimum() 
     let traced = crate::solver::RouteSolver::solve_with_diagnostics_and_progress(&solver, input, &observer).unwrap();
     assert_eq!(traced.solution, optimum.solution);
     let samples = observer.0.lock().unwrap();
-    assert_eq!(samples.len(), 5, "the default <=15-place path must not bypass SA trace collection");
+    assert_eq!(samples.len(), 10, "the default <=15-place path must not bypass SA trace collection");
     let unique: std::collections::HashSet<_> = samples.iter().map(|solution| solution.visit_order.clone()).collect();
     assert_eq!(unique.len(), samples.len());
     for solution in samples.iter() {

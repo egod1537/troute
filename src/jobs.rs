@@ -503,7 +503,7 @@ impl JobRunner {
                         Ok(false) => {},
                         Err(error) => logger().job_operation_failed("preview persistence", job_id, &error),
                     }
-                    next_preview = tokio::time::Instant::now() + Duration::from_secs(3);
+                    next_preview = tokio::time::Instant::now() + Duration::from_secs(1);
                     continue;
                 }
                 update = updates.recv() => match update {
@@ -831,7 +831,7 @@ impl OptimizationEventReporter for ProgressForwarder {
             if frames.len() < MAX_PREVIEW_FRAMES {
                 frames.push(frame);
             } else {
-                // Preserve the first four milestones and always keep the newest sample.
+                // Preserve the first nine milestones and always keep the newest sample.
                 frames[MAX_PREVIEW_FRAMES - 1] = frame;
             }
         });

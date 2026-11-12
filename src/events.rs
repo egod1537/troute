@@ -3,7 +3,7 @@ use thiserror::Error;
 
 use crate::{api::OptimizeRouteResponse, solver::TelemetryEvent};
 
-pub const MAX_PREVIEW_FRAMES: usize = 5;
+pub const MAX_PREVIEW_FRAMES: usize = 10;
 
 /// Bounded feasible candidate milestones retained for client-side playback.
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
@@ -12,7 +12,7 @@ pub struct OptimizationPreviewFrame {
     pub result: OptimizeRouteResponse,
 }
 
-/// Latest provisional route and up to five sampled feasible candidates.
+/// Latest provisional route and up to ten sampled feasible candidates.
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
 pub struct OptimizationPreview {
     pub revision: u64,

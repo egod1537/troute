@@ -108,7 +108,7 @@ fn accepted_trajectory_samples_are_feasible_distinct_and_do_not_change_the_best_
     assert_eq!(plain.stats.iterations, traced.stats.iterations);
     assert_eq!(
         samples.len(),
-        5,
+        10,
         "a short SA run must retain accepted trajectory states, not only its winner"
     );
     let mut orders = std::collections::HashSet::new();

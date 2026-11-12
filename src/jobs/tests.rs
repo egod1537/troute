@@ -559,7 +559,7 @@ impl JobExecutor for FastPreviewExecutor {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn fast_job_retains_five_playback_frames_without_delaying_completion_or_next_job() {
+async fn fast_job_retains_ten_playback_frames_without_delaying_completion_or_next_job() {
     let temporary = TestDirectory::new();
     let store = Arc::new(FileJobStore::new(&temporary.0).unwrap());
     let runner = JobRunner::new(Arc::new(FastPreviewExecutor), store.clone(), Some(1));
@@ -574,14 +574,14 @@ async fn fast_job_retains_five_playback_frames_without_delaying_completion_or_ne
                     let snapshot = JobEventEnvelope::from_stored_job(1, job);
                     assert!(snapshot.is_valid_for_event("completed"));
                     let preview = snapshot.state.preview.unwrap();
-                    assert_eq!(preview.frames.len(), 5);
+                    assert_eq!(preview.frames.len(), 10);
                     assert_eq!(
                         preview
                             .frames
                             .iter()
                             .map(|frame| frame.revision)
                             .collect::<Vec<_>>(),
-                        vec![1, 2, 3, 4, 20]
+                        vec![1, 2, 3, 4, 5, 6, 7, 8, 9, 20]
                     );
                     assert_eq!(preview.revision, 20);
                     assert_eq!(preview.result, snapshot.state.result.unwrap());

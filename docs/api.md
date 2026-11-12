@@ -653,7 +653,7 @@ null until successful completion. Previews are provisional schedules based on
 the current travel-time matrix; final time-dependent revalidation can change
 the completed result. They must never be treated as completed/applicable results.
 
-The SA loop records up to five distinct, accepted feasible routes (first four
+The SA loop records up to ten distinct, accepted feasible routes (first nine
 and newest), including accepted moves that worsen the current objective. Rejected
 and infeasible moves are never exposed. Each sample is revalidated through the
 authoritative objective evaluator before becoming a provisional schedule. Recording
@@ -667,16 +667,16 @@ constraints can still leave fewer distinct feasible routes. Final selection rema
 the best validated candidate from all algorithms, including the exact optimum.
 
 Validated strategy completions also update global incumbents and the best new route
-in each three-second sampling window. The final window is flushed without sleeping.
+in each one-second sampling window. The final window is flushed without sleeping.
 Detailed solver telemetry remains separate from the live preview transport.
 
-A bounded watch channel retains at most five actual candidate milestones: the first
-four and the newest sample. Each `preview.frames[]` entry has a source `revision`
+A bounded watch channel retains at most ten actual candidate milestones: the first
+nine and the newest sample. Each `preview.frames[]` entry has a source `revision`
 and complete `result`. No routes are fabricated to fill the history. Source revisions
 increase for emitted samples, so retained revision numbers may have gaps.
 
 The first available preview is transmitted immediately; subsequent active Job
-updates remain limited to once every three seconds. Before success, all retained
+updates remain limited to once every second. Before success, all retained
 milestones are flushed to storage, even when the solve finishes within three
 seconds. The `completed` envelope and completed Job detail retain `preview` with
 its bounded `frames` for client-side replay. Older clients can still read the

@@ -8,7 +8,7 @@ use crate::solver::{
     SolverProgressObserver, SolverSolution,
 };
 
-const PREVIEW_WINDOW: Duration = Duration::from_secs(3);
+const PREVIEW_WINDOW: Duration = Duration::from_secs(1);
 
 type Preview = (SolverSolution, SolutionMetrics);
 

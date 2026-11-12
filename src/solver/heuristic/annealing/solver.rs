@@ -16,6 +16,8 @@ use super::{
     MixedNeighborhoodStrategy, NeighborhoodMove, NeighborhoodStrategy, SimulatedAnnealingConfig,
 };
 
+const MAX_SEARCH_SAMPLES: usize = 10;
+
 pub trait InitialRouteStrategy: Send + Sync {
     fn initial_solution(
         &self,
@@ -400,7 +402,7 @@ impl<I: InitialRouteStrategy, N: NeighborhoodStrategy, O: ObjectivePolicy>
             );
             if capture
                 && state.accepted_moves > accepted_before
-                && (samples.len() < 5 || state.accepted_moves % 16 == 0)
+                && (samples.len() < MAX_SEARCH_SAMPLES || state.accepted_moves % 16 == 0)
                 && state.current.visit_order != initial_solution.visit_order
             {
                 if let Some(metrics) = state.current_evaluation.feasible_metrics {
@@ -409,10 +411,10 @@ impl<I: InitialRouteStrategy, N: NeighborhoodStrategy, O: ObjectivePolicy>
                         .any(|(route, _)| route.visit_order == state.current.visit_order)
                     {
                         let sample = (state.current.clone(), metrics);
-                        if samples.len() < 5 {
+                        if samples.len() < MAX_SEARCH_SAMPLES {
                             samples.push(sample);
                         } else {
-                            samples[4] = sample;
+                            samples[MAX_SEARCH_SAMPLES - 1] = sample;
                         }
                     }
                 }
