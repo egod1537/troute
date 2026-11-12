@@ -147,6 +147,24 @@ fn cancellation_is_an_error_rather_than_an_infeasibility_proof() {
     ));
 }
 
+#[test]
+fn an_expired_probe_deadline_is_not_an_infeasibility_proof() {
+    let p = problem(route(2));
+    let m = TravelTimeMatrix::new(vec![vec![0, 1], vec![1, 0]]).unwrap();
+    let cancellation = CancellationToken::new();
+    assert!(matches!(
+        troute::solver::check_route_feasibility_until(
+            SolverInput {
+                problem: &p,
+                matrix: &m,
+                cancellation: &cancellation
+            },
+            std::time::Instant::now() - std::time::Duration::from_millis(1)
+        ),
+        Err(SolverError::TimedOut)
+    ));
+}
+
 fn exhaustive(
     problem: &OptimizationProblem,
     matrix: &TravelTimeMatrix,

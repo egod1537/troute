@@ -5,6 +5,7 @@
 //! generators, including MST Double-Tree and Christofides, consume that matrix
 //! without doing travel-time acquisition.
 
+pub mod affinity;
 pub mod api;
 pub mod cancellation;
 pub mod development;

@@ -96,6 +96,8 @@ fn app_config_loads_typed_values_and_preserves_alias_priority() {
         ("TROUTE_MAX_OUTSTANDING_JOBS", "40"),
         ("TROUTE_MAX_CONCURRENT_MATRIX_PREVIEWS", "5"),
         ("TROUTE_MAX_ROUTING_PAIRS", "800"),
+        ("TROUTE_VALIDATION_CPU", "0"),
+        ("TROUTE_MAX_QUEUED_VALIDATIONS", "9"),
         ("ROUTE_PROVIDER_OVERRIDE_ENABLED", "1"),
     ]);
     let configured = AppConfig::from_source(&values).unwrap();
@@ -105,6 +107,11 @@ fn app_config_loads_typed_values_and_preserves_alias_priority() {
     assert_eq!(configured.server.router.max_outstanding_jobs, Some(40));
     assert_eq!(configured.server.router.max_concurrent_matrix_previews, 5);
     assert_eq!(configured.server.router.max_routing_pairs, 800);
+    assert_eq!(
+        configured.server.validation_cpu_policy,
+        troute::affinity::ValidationCpuPolicy::Cpu(0)
+    );
+    assert_eq!(configured.server.router.max_queued_validations, 9);
     assert_eq!(configured.routing.tcache.poll_interval.as_millis(), 400);
     assert_eq!(configured.routing.pair_concurrency.get(), 12);
     assert_eq!(configured.routing.matrix_total_timeout.as_millis(), 1234);

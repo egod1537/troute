@@ -10,6 +10,7 @@ use std::{
 
 use env::{EnvReader, EnvSource, ProcessEnv};
 use troute::{
+    affinity::ValidationCpuPolicy,
     http::RouterRuntimeOptions,
     providers::tcache::TcacheRoutingConfig,
     routing::{RouteProviderSelector, DEFAULT_MATRIX_TOTAL_TIMEOUT_MS, DEFAULT_PAIR_CONCURRENCY},
@@ -34,6 +35,7 @@ pub(crate) struct ServerConfig {
     pub(crate) port: NonZeroU16,
     pub(crate) data_dir: PathBuf,
     pub(crate) router: RouterRuntimeOptions,
+    pub(crate) validation_cpu_policy: ValidationCpuPolicy,
 }
 
 #[derive(Debug, Clone)]
@@ -106,12 +108,23 @@ impl ServerConfig {
         Ok(Self {
             port,
             data_dir,
+            validation_cpu_policy: reader
+                .read_optional_string("TROUTE_VALIDATION_CPU")?
+                .as_deref()
+                .unwrap_or("auto")
+                .parse()?,
             router: RouterRuntimeOptions {
                 max_concurrent_jobs,
                 max_outstanding_jobs,
                 max_concurrent_matrix_previews,
                 max_routing_pairs,
                 sse_heartbeat_interval: defaults.sse_heartbeat_interval,
+                max_queued_validations: reader.read_bounded_size(
+                    "TROUTE_MAX_QUEUED_VALIDATIONS",
+                    defaults.max_queued_validations,
+                    1024,
+                )?,
+                validation_cpu: None,
             },
         })
     }

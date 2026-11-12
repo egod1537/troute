@@ -14,6 +14,31 @@ pub(in crate::http) async fn validate_route(
         return Ok(Json(response));
     }
     enforce_routing_pair_limit(&request.route, state.max_routing_pairs)?;
+    let cancellation = CancellationToken::new();
+    let _guard = CancelValidation(cancellation.clone());
+    if request.check_feasibility {
+        let result = state
+            .validation_worker
+            .submit(request, cancellation)
+            .map_err(|error| {
+                use crate::http::validation_worker::QueueError;
+                match error {
+                    QueueError::Full => ApiError::new(
+                        StatusCode::TOO_MANY_REQUESTS,
+                        "FAST_VALIDATION_CAPACITY_EXCEEDED",
+                        "Too many fast validation requests are waiting.",
+                        "the dedicated validation queue is full",
+                    ),
+                    QueueError::Unavailable => ApiError::new(
+                        StatusCode::SERVICE_UNAVAILABLE,
+                        "FAST_VALIDATION_UNAVAILABLE",
+                        "Fast validation is temporarily unavailable.",
+                        "the dedicated validation worker is unavailable",
+                    ),
+                }
+            })?;
+        return await_validation(result).await;
+    }
     let permit = state
         .matrix_permits
         .clone()
@@ -26,13 +51,19 @@ pub(in crate::http) async fn validate_route(
                 "validation shares the bounded matrix capacity",
             )
         })?;
-    let cancellation = CancellationToken::new();
-    let _guard = CancelValidation(cancellation.clone());
     let executor = state.executor.clone();
     let task = tokio::task::spawn_blocking(move || {
         let _permit = permit;
         executor.validate_route(request, &cancellation)
     });
+    await_validation(task).await
+}
+
+async fn await_validation<E: std::fmt::Display>(
+    task: impl std::future::Future<
+        Output = Result<Result<ValidateRouteResponse, OptimizationServiceError>, E>,
+    >,
+) -> Result<Json<ValidateRouteResponse>, ApiError> {
     let response = tokio::time::timeout(Duration::from_secs(30), task)
         .await
         .map_err(|_| {

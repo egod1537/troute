@@ -37,7 +37,7 @@ impl<P: RoutingProvider, S: RouteSolver> RouteOptimizationService<P, S> {
         let routing = self.resolve_routing(&prepared, &progress, cancellation)?;
         let matrix = self.build_matrix(&mut prepared, &routing, &progress, cancellation)?;
         if request.check_feasibility {
-            return validate_feasibility(&problem, &matrix, source, cancellation);
+            return validate_feasibility(&problem, &matrix, source, cancellation, self.remediation);
         }
         Ok(validate_schedule(&request, &problem, &matrix, source))
     }

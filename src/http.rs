@@ -45,6 +45,7 @@ use tokio::sync::Semaphore;
 mod error;
 mod handlers;
 mod router;
+mod validation_worker;
 use error::{ApiError, ErrorEnvelope};
 use router::enforce_routing_pair_limit;
 pub use router::{
@@ -72,6 +73,8 @@ pub struct RouterRuntimeOptions {
     pub max_concurrent_matrix_previews: usize,
     pub max_routing_pairs: usize,
     pub sse_heartbeat_interval: Duration,
+    pub validation_cpu: Option<usize>,
+    pub max_queued_validations: usize,
 }
 
 impl Default for RouterRuntimeOptions {
@@ -82,6 +85,8 @@ impl Default for RouterRuntimeOptions {
             max_concurrent_matrix_previews: DEFAULT_MAX_CONCURRENT_MATRIX_PREVIEWS,
             max_routing_pairs: DEFAULT_MAX_ROUTING_PAIRS,
             sse_heartbeat_interval: DEFAULT_SSE_HEARTBEAT_INTERVAL,
+            validation_cpu: None,
+            max_queued_validations: 16,
         }
     }
 }
@@ -95,6 +100,7 @@ struct AppState {
     sse_heartbeat_interval: Duration,
     matrix_permits: Arc<Semaphore>,
     max_routing_pairs: usize,
+    validation_worker: validation_worker::ValidationWorker,
 }
 
 #[derive(Debug, Serialize)]

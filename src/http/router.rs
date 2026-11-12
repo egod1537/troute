@@ -78,6 +78,7 @@ where
         max_concurrent_matrix_previews: max_matrix_previews_from_env(),
         max_routing_pairs: max_routing_pairs_from_env(),
         sse_heartbeat_interval,
+        ..RouterRuntimeOptions::default()
     };
     router_with_storage_runtime_options(optimizer, observation, job_store, options)
 }
@@ -102,8 +103,15 @@ where
         max_concurrent_matrix_previews,
         max_routing_pairs,
         sse_heartbeat_interval,
+        validation_cpu,
+        max_queued_validations,
     } = options;
     let executor: Arc<dyn JobExecutor> = Arc::new(optimizer);
+    let validation_worker = validation_worker::ValidationWorker::start(
+        executor.clone(),
+        validation_cpu,
+        max_queued_validations,
+    );
     let runner = job_store.as_ref().map(|store| {
         JobRunner::new_with_limits(
             executor.clone(),
@@ -158,6 +166,7 @@ where
             sse_heartbeat_interval: sse_heartbeat_interval.max(Duration::from_millis(1)),
             matrix_permits: Arc::new(Semaphore::new(max_concurrent_matrix_previews)),
             max_routing_pairs,
+            validation_worker,
         })
 }
 

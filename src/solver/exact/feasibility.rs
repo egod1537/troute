@@ -10,6 +10,16 @@ pub(in crate::solver) fn find_feasible_at_start(
     start: u16,
     require_all: bool,
 ) -> Result<Option<SolverSolution>, SolverError> {
+    find_feasible_at_start_until(input, start, require_all, None)
+}
+
+pub(in crate::solver) fn find_feasible_at_start_until(
+    input: &SolverInput<'_>,
+    start: u16,
+    require_all: bool,
+    deadline: Option<std::time::Instant>,
+) -> Result<Option<SolverSolution>, SolverError> {
+    super::super::feasibility::check_active(input, deadline)?;
     let Some(initial) = initial_service(input, start) else {
         return Ok(None);
     };
@@ -38,9 +48,7 @@ pub(in crate::solver) fn find_feasible_at_start(
     earliest[n] = initial.departure_slot;
 
     for mask in 1..=full_mask {
-        if input.cancellation.is_cancelled() {
-            return Err(SolverError::Cancelled);
-        }
+        super::super::feasibility::check_active(input, deadline)?;
         for last in 0..end {
             let departure = earliest[mask * n + last];
             if departure == u16::MAX {

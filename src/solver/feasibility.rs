@@ -3,7 +3,7 @@ use rand::{rngs::StdRng, SeedableRng};
 use serde::Serialize;
 
 use super::{
-    exact::find_feasible_at_start, GreedyInitialRoute, InitialRouteGenerator, SolverError,
+    exact::find_feasible_at_start_until, GreedyInitialRoute, InitialRouteGenerator, SolverError,
     SolverInput, SolverSolution, EXACT_MAX_LOCATIONS,
 };
 use crate::schedule::calculate_schedule;
@@ -22,9 +22,34 @@ pub struct FeasibilitySolution {
 }
 
 pub fn check_route_feasibility(input: SolverInput<'_>) -> Result<FeasibilitySolution, SolverError> {
+    check(input, None)
+}
+
+pub fn check_route_feasibility_until(
+    input: SolverInput<'_>,
+    deadline: std::time::Instant,
+) -> Result<FeasibilitySolution, SolverError> {
+    check(input, Some(deadline))
+}
+
+pub(super) fn check_active(
+    input: &SolverInput<'_>,
+    deadline: Option<std::time::Instant>,
+) -> Result<(), SolverError> {
     if input.cancellation.is_cancelled() {
         return Err(SolverError::Cancelled);
     }
+    if deadline.is_some_and(|deadline| std::time::Instant::now() >= deadline) {
+        return Err(SolverError::TimedOut);
+    }
+    Ok(())
+}
+
+fn check(
+    input: SolverInput<'_>,
+    deadline: Option<std::time::Instant>,
+) -> Result<FeasibilitySolution, SolverError> {
+    check_active(&input, deadline)?;
     let n = input.problem.locations().len();
     if n > EXACT_MAX_LOCATIONS {
         return Err(SolverError::UnsupportedLocationCount {
@@ -44,6 +69,7 @@ pub fn check_route_feasibility(input: SolverInput<'_>) -> Result<FeasibilitySolu
     let mut rng = StdRng::seed_from_u64(0);
     if let Ok(solution) = GreedyInitialRoute.generate(input, &mut rng) {
         if calculate_schedule(input.problem, input.matrix, &solution).is_ok() {
+            check_active(&input, deadline)?;
             return Ok(FeasibilitySolution {
                 method: FeasibilityMethod::Greedy,
                 solution,
@@ -52,10 +78,16 @@ pub fn check_route_feasibility(input: SolverInput<'_>) -> Result<FeasibilitySolu
     }
     // For EARLIEST/LATEST, existence only needs the minimum permitted start:
     // an earlier departure can wait and reproduce any later feasible schedule.
-    let solution = find_feasible_at_start(&input, input.problem.start_time().minutes(), false)?
-        .ok_or(SolverError::ProvenInfeasible)?;
+    let solution = find_feasible_at_start_until(
+        &input,
+        input.problem.start_time().minutes(),
+        false,
+        deadline,
+    )?
+    .ok_or(SolverError::ProvenInfeasible)?;
     calculate_schedule(input.problem, input.matrix, &solution)
         .map_err(|error| SolverError::Failed(error.to_string()))?;
+    check_active(&input, deadline)?;
     Ok(FeasibilitySolution {
         method: FeasibilityMethod::BitDp,
         solution,

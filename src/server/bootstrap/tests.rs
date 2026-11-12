@@ -32,6 +32,7 @@ async fn initialization_propagates_storage_failures() {
             port: NonZeroU16::new(8080).unwrap(),
             data_dir: data_file,
             router: RouterRuntimeOptions::default(),
+            validation_cpu_policy: troute::affinity::ValidationCpuPolicy::Off,
         },
         routing: RoutingConfig {
             tcache: TcacheRoutingConfig::from_parts(

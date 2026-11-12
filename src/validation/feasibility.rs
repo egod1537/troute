@@ -18,6 +18,7 @@ pub(crate) fn validate_feasibility(
     matrix: &TravelTimeMatrix,
     source: &'static str,
     cancellation: &CancellationToken,
+    remediation: crate::failure::RemediationConfig,
 ) -> Result<ValidateRouteResponse, OptimizationServiceError> {
     let checked = check_route_feasibility(SolverInput {
         problem,
@@ -42,14 +43,23 @@ pub(crate) fn validate_feasibility(
     let found = match checked {
         Ok(found) => found,
         Err(SolverError::ProvenInfeasible) => {
+            let recovery = super::recovery::find_recovery_suggestions(
+                problem,
+                matrix,
+                cancellation,
+                remediation,
+            );
+            if cancellation.is_cancelled() {
+                return Err(OptimizationServiceError::Solver(SolverError::Cancelled));
+            }
             result.issues.push(ValidationIssue {
                 code: "NO_FEASIBLE_ROUTE",
                 severity: "warning",
                 blocks_optimization: false,
                 location_id: None,
                 message: "No visit order satisfies the supplied itinerary constraints.".to_owned(),
-                failure_detail: None,
-                suggestions: Vec::new(),
+                failure_detail: Some(serde_json::json!({"type":"NO_FEASIBLE_ROUTE", "remediation": {"probes": recovery.probes, "budget_exhausted": recovery.budget_exhausted}})),
+                suggestions: recovery.suggestions,
             });
             return Ok(result);
         }

@@ -8,6 +8,7 @@ use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 mod evaluate;
 mod feasibility;
+mod recovery;
 pub use evaluate::validate_schedule;
 pub(crate) use feasibility::validate_feasibility;
 

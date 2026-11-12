@@ -192,6 +192,11 @@ impl Location {
         self.stay_minutes
     }
 
+    pub(crate) fn with_stay_minutes(mut self, minutes: u32) -> Self {
+        self.stay_minutes = minutes;
+        self
+    }
+
     pub fn required(&self) -> bool {
         self.required
     }

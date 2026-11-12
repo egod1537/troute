@@ -34,6 +34,7 @@ impl ServerComponents {
             port,
             data_dir,
             router: router_options,
+            validation_cpu_policy: _,
         } = server;
         let routing_runtime = RoutingRuntime::initialize(routing)?;
         let solver = SolverOrchestrator::new(solver)?;

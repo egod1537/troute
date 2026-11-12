@@ -25,6 +25,8 @@ routing can be restored without rebuilding the binary.
 | `TROUTE_MAX_OUTSTANDING_JOBS` | `100` | maximum admitted non-terminal Jobs; excess submissions receive HTTP 429 |
 | `TROUTE_MAX_CONCURRENT_MATRIX_PREVIEWS` | `2` | maximum simultaneous `/integration/matrix` requests; excess previews receive HTTP 429 |
 | `TROUTE_MAX_ROUTING_PAIRS` | `10000` | maximum `N(N-1)` provider queries for a request without a supplied matrix or Euclidean mode |
+| `TROUTE_VALIDATION_CPU` | `auto` | reserve the last allowed Linux logical CPU for fast validation; a CPU ID selects explicitly, `off` disables affinity |
+| `TROUTE_MAX_QUEUED_VALIDATIONS` | `16` | waiting fast-validation requests in addition to the single active worker; 1-1024; a full queue returns HTTP 429 |
 | `ROUTE_PROVIDER` | `auto` | `auto` applies policy resolution; a provider name globally forces every routed request |
 | `ROUTE_PROVIDER_POLICY_JSON` | built-in policy | country × mode policy JSON, parsed and validated at startup |
 | `ROUTE_PROVIDER_OVERRIDE_ENABLED` | `false` | permits request-level `route_provider` only while `ROUTE_PROVIDER=auto` |
@@ -38,7 +40,7 @@ routing can be restored without rebuilding the binary.
 | `SOLVER_DEADLINE_SAFETY_MS` | `50` | time reserved for schedule calculation and response assembly |
 | `SOLVER_STRATEGY_TIMEOUT_MS` | `30000` | per-strategy safety cap, bounded by the global deadline |
 | `SOLVER_SA_SEEDS` | `42` | deterministic SA base seed list, cycled by restart round before initializer-specific derivation |
-| `TROUTE_REMEDIATION_BUDGET_MS` | `500` | separate post-failure budget for validated alternative-mode and removal probes |
+| `TROUTE_REMEDIATION_BUDGET_MS` | `500` | post-failure analysis budget; fast validation caps this at 500 ms and reuses its matrix for verified single-change repairs |
 | `TROUTE_REMEDIATION_MAX_REMOVE_PROBES` | `8` | maximum intermediate locations tested as removal candidates after one failure |
 | `TROUTE_MAX_FAILURE_SUGGESTIONS` | `3` | maximum ranked, de-duplicated remediation suggestions returned per failure |
 | `MATCHING_STRATEGY` | `auto` | Christofides benchmark/debug override: `auto`, `bitdp`, or `blossom` |

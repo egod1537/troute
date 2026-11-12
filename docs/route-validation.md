@@ -4,6 +4,32 @@ By default, `POST /validate` checks the submitted current visit order without ru
 a solver, creating a Job, persisting a result, or changing locations or times.
 The existing optimization routes remain unchanged.
 
+## Dedicated fast-validation CPU
+
+The production binary reserves a Linux logical CPU before constructing Tokio or
+any solver/provider threads. `TROUTE_VALIDATION_CPU=auto` selects the last CPU in
+the process's allowed affinity set; an explicit CPU ID selects that CPU instead.
+The startup thread removes it from its own mask, so ordinary runtime threads,
+blocking workers and solver child processes inherit a mask excluding that CPU.
+The single `troute-validate` thread pins itself to only the reserved CPU. Greedy,
+bit-DP and the repair probes execute on that thread outside Tokio's shared blocking
+pool. CPU isolation is within troute, not an exclusive host reservation; container
+cpusets and CPU quotas still apply. Docker on macOS uses this Linux path.
+
+Fast checks have an independent bounded FIFO queue: `TROUTE_MAX_QUEUED_VALIDATIONS`
+defaults to 16 waiting requests plus one active request. A full queue returns 429;
+an unavailable worker returns 503. Cancelled queued requests are skipped. The
+30-second HTTP deadline includes queue waiting and cancels work cooperatively.
+Current-order validation retains its matrix-permit/blocking-pool path. The
+15-location cap and invalid-input checks run before queue admission.
+
+At least two allowed logical CPUs are needed for reservation. Auto mode warns and
+uses a dedicated unpinned thread on a single-CPU or non-Linux native environment;
+an explicit unavailable CPU fails startup. `off` deliberately selects thread-only
+isolation. Startup logs identify the selected logical CPU. Compatibility library
+router constructors also use the dedicated thread but do not change the embedding
+application's global thread affinities.
+
 ## Bounded existence check
 
 Set `check_feasibility: true` beside `route` and send `service_start_times: {}` to
@@ -45,8 +71,8 @@ three states leave `blocks_optimization=false`. Unsupported inputs use
 `matrix_source: "none"`; other results describe the matrix actually checked.
 Invalid domain inputs still return the existing invalid-input response.
 Cancellation, provider failures and HTTP timeouts remain errors, never proofs of
-infeasibility. No Job, billing action, remediation search or persisted result is
-created by an existence check.
+infeasibility. No Job, billing action or persisted result is created by an
+existence check. Only the bounded repair probes below follow an infeasible result.
 
 Verification includes greedy success, a greedy trap repaired by DP, locked-position
 infeasibility, sparse directed arcs, optional visits, the 15/16 boundary and
@@ -55,6 +81,34 @@ are cross-checked against exhaustive permutations using the common evaluator.
 The actual troute binary and Trasolve gateway were exercised together for all
 three statuses, both methods, legacy validation and the partial-visit capability
 switch, with supplied matrices and no billable provider requests.
+
+## Verified repair suggestions
+
+After exact infeasibility is established, validation may spend a separate bounded
+budget rechecking single changes: an earlier start, a shorter stay at one place,
+or excluding one intermediate place. The acquired directed/sparse matrix is
+reused; no additional provider calls or optimization portfolio runs occur.
+Every returned repair has `feasibility_verified: true` and `confidence: "exact"`
+only after a complete feasible itinerary is found and passes schedule validation
+with that one change. These are alternatives, not cumulative instructions.
+Existing optimization-failure suggestions keep their previous confidence semantics
+and do not receive this flag unless the full itinerary was rechecked.
+
+Clock/stay changes use ten-minute increments, with at least ten minutes of stay,
+matching Trasolve's request builder. Binary refinement tries to retain the latest
+feasible start or largest feasible stay. If refinement times out, it keeps only
+the last actually verified value. Endpoints are never removed, and no removal
+may delete or shift a locked position. The saved itinerary is not edited.
+
+The analysis uses at most `min(TROUTE_REMEDIATION_BUDGET_MS, 500)` milliseconds,
+64 probes, 50 ms per probe, and up to five suggestions (default three). Removal
+probes additionally honor `TROUTE_REMEDIATION_MAX_REMOVE_PROBES`. An unfinished
+probe is never treated as infeasible or used as a binary-search bound. Empty
+suggestions do not prove that no repair exists: combined edits and untested
+repairs may still work. The original infeasibility result remains unchanged.
+`failure_detail.remediation` exposes probe count and budget exhaustion for
+diagnostics. Guarantees are relative to the supplied static travel times/windows,
+not live changes in transit schedules or opening-hours data.
 
 ## Request
 
@@ -113,12 +167,13 @@ HTTP 200 returns `input_valid`, nullable `schedule_feasible`,
   Unknown opening-hours data must be identified by the caller; the engine only
   sees supplied windows and cannot infer missing calendar data.
 
-Malformed JSON/clock syntax is HTTP 400. Existing body/pair bounds apply. Validation
-shares the matrix concurrency pool (429 when exhausted), with a 30-second HTTP
+Malformed JSON/clock syntax is HTTP 400. Existing body/pair bounds apply. Default
+current-order validation shares the matrix concurrency pool (429 when exhausted), with a 30-second HTTP
 budget and cancellation on timeout/request disposal. A blocking routing operation
 keeps its permit until it actually finishes. Provider-backed validation currently
 uses the existing bounded matrix builder; supplied and Euclidean matrices avoid
-provider queries. Solver, remediation searches and Job storage are not invoked.
+provider queries. Optimization solvers and Job storage are not invoked; existence
+mode alone runs the bounded feasibility and verified-repair checks above.
 
 ## Verification
 

@@ -64,6 +64,9 @@ pub struct FailureSuggestion {
     pub suggestion_type: FailureSuggestionType,
     pub reason: String,
     pub confidence: SuggestionConfidence,
+    /// True only after validating a complete itinerary with this single change.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub feasibility_verified: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub location_id: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -85,7 +88,7 @@ pub struct FailureSuggestion {
 }
 
 impl FailureSuggestion {
-    fn new(
+    pub(crate) fn new(
         suggestion_type: FailureSuggestionType,
         confidence: SuggestionConfidence,
         reason: impl Into<String>,
@@ -94,6 +97,7 @@ impl FailureSuggestion {
             suggestion_type,
             reason: reason.into(),
             confidence,
+            feasibility_verified: false,
             location_id: None,
             from_location_id: None,
             to_location_id: None,
@@ -105,6 +109,10 @@ impl FailureSuggestion {
             suggested_latest_start: None,
         }
     }
+}
+
+fn is_false(value: &bool) -> bool {
+    !value
 }
 
 /// Applies the stable user-disruption ranking, removes equivalent or
