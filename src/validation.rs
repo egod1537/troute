@@ -1,4 +1,4 @@
-//! Read-only validation of a caller's current visit order. No solver or Job runs.
+//! Read-only current-order validation and bounded itinerary existence checks.
 use crate::{
     api::OptimizeRouteRequest,
     domain::{OptimizationProblem, TimeOfDay},
@@ -7,12 +7,16 @@ use crate::{
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 mod evaluate;
+mod feasibility;
 pub use evaluate::validate_schedule;
+pub(crate) use feasibility::validate_feasibility;
 
 #[derive(Debug, Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ValidateRouteRequest {
     pub route: OptimizeRouteRequest,
+    #[serde(default)]
+    pub check_feasibility: bool,
     #[serde(default)]
     pub service_start_times: HashMap<String, TimeOfDay>,
 }
@@ -45,9 +49,48 @@ pub struct ValidateRouteResponse {
     pub matrix_source: &'static str,
     pub issues: Vec<ValidationIssue>,
     pub stops: Vec<ValidationStop>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub feasibility: Option<FeasibilityValidation>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "SCREAMING_SNAKE_CASE")]
+pub enum FeasibilityStatus {
+    Feasible,
+    Infeasible,
+    Unsupported,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct FeasibilityValidation {
+    pub status: FeasibilityStatus,
+    pub method: Option<crate::solver::FeasibilityMethod>,
+    pub location_count: usize,
+    pub max_locations: usize,
+    pub visit_order: Vec<String>,
 }
 
 impl ValidateRouteResponse {
+    /// Check the cap before matrix/provider work or a greedy attempt.
+    pub(crate) fn unsupported(request: &ValidateRouteRequest) -> Option<Self> {
+        let count = request.route.locations.len();
+        (request.check_feasibility && count > crate::solver::EXACT_MAX_LOCATIONS).then(|| Self {
+            input_valid: true,
+            schedule_feasible: None,
+            blocks_optimization: false,
+            matrix_source: "none",
+            issues: Vec::new(),
+            stops: Vec::new(),
+            feasibility: Some(FeasibilityValidation {
+                status: FeasibilityStatus::Unsupported,
+                method: None,
+                location_count: count,
+                max_locations: crate::solver::EXACT_MAX_LOCATIONS,
+                visit_order: Vec::new(),
+            }),
+        })
+    }
+
     pub(crate) fn invalid(message: String) -> Self {
         Self {
             input_valid: false,
@@ -55,6 +98,7 @@ impl ValidateRouteResponse {
             blocks_optimization: true,
             matrix_source: "none",
             stops: Vec::new(),
+            feasibility: None,
             issues: vec![ValidationIssue {
                 code: "INVALID_REQUEST",
                 severity: "error",
@@ -72,6 +116,11 @@ impl ValidateRouteResponse {
 pub(crate) fn validate_input(
     request: &ValidateRouteRequest,
 ) -> Result<OptimizationProblem, ValidateRouteResponse> {
+    if request.check_feasibility && !request.service_start_times.is_empty() {
+        return Err(ValidateRouteResponse::invalid(
+            "service_start_times is only supported for current-order validation".to_owned(),
+        ));
+    }
     let problem = OptimizationProblem::try_from(request.route.clone())
         .map_err(|error| ValidateRouteResponse::invalid(error.to_string()))?;
     if request.service_start_times.keys().any(|id| {

@@ -8,7 +8,7 @@ use super::super::{
 use super::{
     frontier::{FrontierPolicy, ParetoState, TimeCostFrontierPolicy},
     stats::{ExactSolveResult, ExactSolverStats},
-    transition::{initial_service, minutes_to_slot_ceil, slots_per_day, transition_time},
+    transition::{initial_service, minutes_to_slot_ceil, slots_per_day},
 };
 
 /// Exact bitmask-DP solver for a single day and at most 15 locations.
@@ -273,52 +273,8 @@ impl<O: ObjectivePolicy, F: FrontierPolicy> ExactBitDpSolver<O, F> {
         input: &SolverInput<'_>,
         start_time_slot: u16,
     ) -> Result<bool, SolverError> {
-        let Some(initial) = initial_service(input, start_time_slot) else {
-            return Ok(false);
-        };
-        let location_count = input.problem.locations().len();
-        if location_count == 1 {
-            return Ok(true);
-        }
-        let state_count = 1_usize << location_count;
-        let full_mask = state_count - 1;
-        let end = input.problem.end_location_index();
-        let mut earliest = vec![None::<u16>; state_count * location_count];
-        earliest[index(1, 0, location_count)] = Some(initial.departure_slot);
-
-        for mask in 1..=full_mask {
-            if input.cancellation.is_cancelled() {
-                return Err(SolverError::Cancelled);
-            }
-            for last in 0..location_count {
-                let Some(time_slot) = earliest[index(mask, last, location_count)] else {
-                    continue;
-                };
-                for next in 1..location_count {
-                    let next_bit = 1 << next;
-                    if mask & next_bit != 0
-                        || !input
-                            .problem
-                            .allows_visit_at(next, mask.count_ones() as usize)
-                        || (next == end && mask | next_bit != full_mask)
-                    {
-                        continue;
-                    }
-                    let Some(finish_slot) = transition_time(input, last, next, time_slot) else {
-                        continue;
-                    };
-                    let cell = &mut earliest[index(mask | next_bit, next, location_count)];
-                    let improves = match *cell {
-                        Some(current) => finish_slot < current,
-                        None => true,
-                    };
-                    if improves {
-                        *cell = Some(finish_slot);
-                    }
-                }
-            }
-        }
-        Ok(earliest[index(full_mask, end, location_count)].is_some())
+        super::find_feasible_at_start(input, start_time_slot, true)
+            .map(|solution| solution.is_some())
     }
 
     fn transition(

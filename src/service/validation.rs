@@ -4,7 +4,10 @@ use crate::{
     events::NoopOptimizationEventReporter,
     routing::RoutingProvider,
     solver::RouteSolver,
-    validation::{validate_input, validate_schedule, ValidateRouteRequest, ValidateRouteResponse},
+    validation::{
+        validate_feasibility, validate_input, validate_schedule, ValidateRouteRequest,
+        ValidateRouteResponse,
+    },
 };
 impl<P: RoutingProvider, S: RouteSolver> RouteOptimizationService<P, S> {
     pub fn validate_route(
@@ -17,6 +20,9 @@ impl<P: RoutingProvider, S: RouteSolver> RouteOptimizationService<P, S> {
             Ok(problem) => problem,
             Err(response) => return Ok(response),
         };
+        if let Some(response) = ValidateRouteResponse::unsupported(&request) {
+            return Ok(response);
+        }
         let source = if request.route.use_euclidean_matrix {
             "euclidean"
         } else if request.route.travel_time_matrix.is_some()
@@ -30,6 +36,9 @@ impl<P: RoutingProvider, S: RouteSolver> RouteOptimizationService<P, S> {
         let mut prepared = Self::prepare_request(request.route.clone(), &progress, cancellation)?;
         let routing = self.resolve_routing(&prepared, &progress, cancellation)?;
         let matrix = self.build_matrix(&mut prepared, &routing, &progress, cancellation)?;
+        if request.check_feasibility {
+            return validate_feasibility(&problem, &matrix, source, cancellation);
+        }
         Ok(validate_schedule(&request, &problem, &matrix, source))
     }
 }

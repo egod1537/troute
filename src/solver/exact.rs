@@ -1,9 +1,11 @@
 mod bit_dp;
+mod feasibility;
 mod frontier;
 mod stats;
 mod transition;
 
 pub use bit_dp::*;
+pub(super) use feasibility::find_feasible_at_start;
 pub use frontier::*;
 pub use stats::*;
 pub(super) use transition::{

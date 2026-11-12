@@ -1,8 +1,60 @@
 # Standalone itinerary validation
 
-`POST /validate` checks the submitted current visit order without running a solver,
-creating a Job, persisting a result, or changing the submitted locations or times.
+By default, `POST /validate` checks the submitted current visit order without running
+a solver, creating a Job, persisting a result, or changing locations or times.
 The existing optimization routes remain unchanged.
+
+## Bounded existence check
+
+Set `check_feasibility: true` beside `route` and send `service_start_times: {}` to
+check whether any valid visit order exists under the optimization request's
+constraints. Displayed service times are not additional fixed appointments in
+this mode. The default current-order mode below retains its existing behavior.
+
+The limit is **15 locations, including both endpoints**. Above this limit the
+HTTP handler returns `UNSUPPORTED` before acquiring matrix capacity, querying a
+provider or attempting greedy/DP search. This does not disable optimization.
+
+For supported inputs, the engine first generates a deterministic nearest-neighbor
+greedy order and checks it with the common schedule evaluator. A valid greedy
+witness returns immediately. Otherwise an exact bitmask DP stores only the
+earliest departure for each `(visited set, last location)`, reconstructing and
+returning the first valid terminal order. Only exhaustion of this DP establishes
+infeasibility. The DP uses `O(n^2 * 2^n)` time and `O(n * 2^n)` space; it does not
+build objective/Pareto frontiers or run optimization's portfolio.
+
+Both stages retain fixed endpoints, absolute locked positions, directed or
+unreachable arcs, minute-accurate waiting/stays, closing times and required/optional
+visit policies. For `EARLIEST`/`LATEST`, existence is checked at the minimum allowed
+start: an earlier departure can wait to reproduce a later route. No latest-start
+optimization is performed. The same earliest-time DP is reused by the exact
+optimizer's latest-start feasibility probes.
+
+The response adds `feasibility` only in existence mode:
+
+| `status` | `method` | `schedule_feasible` | `visit_order` |
+| --- | --- | --- | --- |
+| `FEASIBLE` | `GREEDY` or `BIT_DP` | `true` | A validated witness, using location IDs |
+| `INFEASIBLE` | `BIT_DP` | `false` | Empty |
+| `UNSUPPORTED` | `null` | `null` | Empty |
+
+Metadata also contains `location_count` and `max_locations`. `stops` contains the
+witness schedule for feasible inputs; the submitted request is never edited.
+An infeasible input produces a `NO_FEASIBLE_ROUTE` warning. Valid requests in all
+three states leave `blocks_optimization=false`. Unsupported inputs use
+`matrix_source: "none"`; other results describe the matrix actually checked.
+Invalid domain inputs still return the existing invalid-input response.
+Cancellation, provider failures and HTTP timeouts remain errors, never proofs of
+infeasibility. No Job, billing action, remediation search or persisted result is
+created by an existence check.
+
+Verification includes greedy success, a greedy trap repaired by DP, locked-position
+infeasibility, sparse directed arcs, optional visits, the 15/16 boundary and
+cancellation. For 120 varied small instances, existence and returned witnesses
+are cross-checked against exhaustive permutations using the common evaluator.
+The actual troute binary and Trasolve gateway were exercised together for all
+three statuses, both methods, legacy validation and the partial-visit capability
+switch, with supplied matrices and no billable provider requests.
 
 ## Request
 

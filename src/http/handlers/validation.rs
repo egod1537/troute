@@ -10,6 +10,9 @@ pub(in crate::http) async fn validate_route(
     if let Err(response) = crate::validation::validate_input(&request) {
         return Ok(Json(response));
     }
+    if let Some(response) = ValidateRouteResponse::unsupported(&request) {
+        return Ok(Json(response));
+    }
     enforce_routing_pair_limit(&request.route, state.max_routing_pairs)?;
     let permit = state
         .matrix_permits

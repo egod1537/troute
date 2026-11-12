@@ -4,6 +4,8 @@ use crate::domain::{OptimizationProblem, StartPolicy};
 
 pub mod core;
 pub use core::*;
+mod feasibility;
+pub use feasibility::*;
 pub mod exact;
 pub use exact::*;
 pub mod initial;

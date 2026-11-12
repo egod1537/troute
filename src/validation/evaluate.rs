@@ -22,6 +22,7 @@ pub fn validate_schedule(
         matrix_source: source,
         issues: Vec::new(),
         stops: Vec::new(),
+        feasibility: None,
     };
     let mut current = Some(problem.start_time());
     let mut total_wait = 0_u32;
