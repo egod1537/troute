@@ -269,17 +269,16 @@ impl<E: ObjectiveEvaluator> SolverOrchestrator<E> {
                 locations: location_count,
             });
         }
-        let preview = super::candidate_accumulator::PreviewObserver {
-            evaluator: &self.evaluator,
-            observer,
-            best: std::sync::Mutex::new(None),
-        };
+        let preview = super::candidate_preview::PreviewObserver::new(&self.evaluator, observer);
         let observer: &dyn SolverProgressObserver = &preview;
         let result = if self.anytime {
             self.solve_anytime(input, observer)
         } else {
             self.solve_registered(input, observer)
         };
+        if result.is_ok() {
+            preview.flush();
+        }
         result.map(|mut result| {
             result.portfolio_telemetry = Some(
                 PortfolioTelemetryBuilder::new(&self.config, input.problem, input.matrix)

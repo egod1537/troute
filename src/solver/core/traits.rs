@@ -24,6 +24,10 @@ pub trait SolverProgressObserver: Send + Sync {
 
     fn on_best_solution(&self, _solution: &SolverSolution, _metrics: &super::SolutionMetrics) {}
 
+    /// Best distinct feasible candidate from a presentation sampling window.
+    /// Unlike the global incumbent, this may be worse than the previous preview.
+    fn on_preview_solution(&self, _solution: &SolverSolution, _metrics: &super::SolutionMetrics) {}
+
     fn is_enabled(&self) -> bool {
         true
     }

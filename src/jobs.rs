@@ -831,7 +831,7 @@ impl OptimizationEventReporter for ProgressForwarder {
             if frames.len() < MAX_PREVIEW_FRAMES {
                 frames.push(frame);
             } else {
-                // Preserve the first four milestones and always keep the newest best.
+                // Preserve the first four milestones and always keep the newest sample.
                 frames[MAX_PREVIEW_FRAMES - 1] = frame;
             }
         });

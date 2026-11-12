@@ -5,14 +5,14 @@ use crate::{api::OptimizeRouteResponse, solver::TelemetryEvent};
 
 pub const MAX_PREVIEW_FRAMES: usize = 5;
 
-/// Bounded historical milestones retained for client-side playback.
+/// Bounded feasible candidate milestones retained for client-side playback.
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
 pub struct OptimizationPreviewFrame {
     pub revision: u64,
     pub result: OptimizeRouteResponse,
 }
 
-/// Latest provisional route and up to five real improvement milestones.
+/// Latest provisional route and up to five sampled feasible candidates.
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
 pub struct OptimizationPreview {
     pub revision: u64,

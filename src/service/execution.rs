@@ -22,7 +22,7 @@ struct SolverProgressReporter<'a> {
 }
 
 impl SolverProgressObserver for SolverProgressReporter<'_> {
-    fn on_best_solution(
+    fn on_preview_solution(
         &self,
         solution: &crate::solver::SolverSolution,
         metrics: &crate::solver::SolutionMetrics,

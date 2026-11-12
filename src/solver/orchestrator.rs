@@ -1,4 +1,5 @@
 mod candidate_accumulator;
+mod candidate_preview;
 mod config;
 mod diagnostics;
 mod initializer;

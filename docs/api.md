@@ -654,15 +654,23 @@ the current travel-time matrix; final time-dependent revalidation can change
 the completed result. They must never be treated as completed/applicable results.
 
 The orchestrator observes validated strategy completions while other workers and
-subsequent SA chunks are still executing. Only strict improvements under the
-same objective evaluator generate previews. This does not expose every internal
-SA move or native-solver incumbent; exact search may finish with only one result.
-Detailed solver telemetry remains separate and is not the live preview transport.
+subsequent SA chunks are still executing. Global incumbent updates and map previews
+are separate: every strict global improvement still updates the incumbent, while
+`PreviewObserver` selects the best new feasible visit order in each three-second
+window using the same objective evaluator. The previously sampled visit order is
+excluded to avoid identical map frames. A later sampled candidate can be worse than
+an earlier sample; it never replaces the authoritative final optimum. The last
+window is flushed on successful solve completion without sleeping.
 
-A bounded watch channel retains at most five real improvement milestones:
-the first four and the newest best. Each `preview.frames[]` entry has a source
+This does not expose every internal SA move or native-solver incumbent. Exact
+search can finish with only one real route; clients should show that one result
+for one playback interval instead of padding it to a five-frame animation.
+Detailed solver telemetry remains separate from the live preview transport.
+
+A bounded watch channel retains at most five real candidate milestones:
+the first four and the newest window sample. Each `preview.frames[]` entry has a source
 `revision` and complete `result`. No fabricated or repeated routes are added to
-fill the history. Source revisions increase for every observed improvement, so
+fill the history. Source revisions increase for every emitted window sample, so
 retained and transmitted revision numbers may have gaps.
 
 The first available preview is transmitted immediately; subsequent active Job
