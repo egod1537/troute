@@ -14,7 +14,7 @@ use thiserror::Error;
 
 use crate::{
     api::{OptimizeRouteRequest, OptimizeRouteResponse},
-    events::ProgressStage,
+    events::{OptimizationPreview, ProgressStage},
     failure::{FailureDetail, FailureSuggestion},
     logging::logger,
     observation::{JobTimelineEntry, JobTimelineStore},
@@ -86,6 +86,8 @@ pub struct StoredJob {
     pub state: JobState,
     pub result: Option<OptimizeRouteResponse>,
     pub error: Option<StoredJobError>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub preview: Option<OptimizationPreview>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
@@ -141,6 +143,14 @@ pub trait JobStore: Send + Sync {
         progress: u8,
         message: Option<&str>,
     ) -> Result<(), JobStoreError>;
+    fn save_preview(
+        &self,
+        _job_id: &str,
+        _preview: &OptimizationPreview,
+    ) -> Result<bool, JobStoreError> {
+        Ok(false)
+    }
+
     fn save_result(
         &self,
         job_id: &str,
@@ -412,6 +422,25 @@ impl JobStore for FileJobStore {
         })
     }
 
+    fn save_preview(
+        &self,
+        job_id: &str,
+        preview: &OptimizationPreview,
+    ) -> Result<bool, JobStoreError> {
+        let _guard = self
+            .lock
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let mut state = self.read_state(job_id)?;
+        if !state.status.is_active() {
+            return Ok(false);
+        }
+        atomic_write_json(&self.job_dir(job_id).join("preview.json"), preview)?;
+        state.updated_at = now_ms();
+        self.write_state(&state)?;
+        Ok(true)
+    }
+
     fn save_result(
         &self,
         job_id: &str,
@@ -483,11 +512,18 @@ impl JobStore for FileJobStore {
         if !directory.is_dir() {
             return Ok(None);
         }
+        let state = self.read_state(job_id)?;
+        let preview = if state.status.is_active() {
+            read_optional_json(&directory.join("preview.json"))?
+        } else {
+            None
+        };
         Ok(Some(StoredJob {
             request: read_json(&directory.join("request.json"))?,
-            state: read_json(&directory.join("state.json"))?,
+            state,
             result: read_optional_json(&directory.join("result.json"))?,
             error: read_optional_json(&directory.join("error.json"))?,
+            preview,
         }))
     }
 

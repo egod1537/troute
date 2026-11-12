@@ -101,6 +101,7 @@ fn canonical_event_envelope_snapshot_matches_the_serializer() {
                 completed_at: Some(123_456_789),
             },
             result: None,
+            preview: None,
             error: Some(StoredJobError {
                 code: "NO_FEASIBLE_ROUTE".to_owned(),
                 message: "No feasible route was found.".to_owned(),

@@ -141,6 +141,7 @@ impl<E: ObjectiveEvaluator> StrategyBatchExecutor<'_, E> {
                     report_progress(self.observer, || {
                         SolverProgressEvent::StrategyCompleted(strategy.name().to_owned())
                     });
+                    self.observer.on_candidate(&candidate);
                     if result_tx.send((index, candidate)).is_err() {
                         break;
                     }

@@ -3,6 +3,13 @@ use thiserror::Error;
 
 use crate::{api::OptimizeRouteResponse, solver::TelemetryEvent};
 
+/// Latest provisional route, replaced in place rather than accumulated.
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
+pub struct OptimizationPreview {
+    pub revision: u64,
+    pub result: OptimizeRouteResponse,
+}
+
 pub const MAX_JOB_ID_CHARACTERS: usize = 128;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Deserialize, Serialize)]
@@ -87,6 +94,9 @@ pub trait OptimizationEventReporter: Send + Sync {
     fn error(&self, code: OptimizationErrorCode, message: &str, detail: &str);
 
     fn result(&self, response: &OptimizeRouteResponse);
+
+    /// Provisional schedule built from the current matrix; never a terminal result.
+    fn preview(&self, _response: &OptimizeRouteResponse) {}
 
     fn solver_telemetry(&self, _event: &TelemetryEvent) {}
 }

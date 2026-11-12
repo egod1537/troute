@@ -17,9 +17,34 @@ use super::{
 
 struct SolverProgressReporter<'a> {
     progress: &'a ProgressCoordinator<'a>,
+    reporter: &'a dyn OptimizationEventReporter,
+    input: SolverInput<'a>,
 }
 
 impl SolverProgressObserver for SolverProgressReporter<'_> {
+    fn on_best_solution(
+        &self,
+        solution: &crate::solver::SolverSolution,
+        metrics: &crate::solver::SolutionMetrics,
+    ) {
+        if self.input.cancellation.is_cancelled() {
+            return;
+        }
+        let Ok(start) = crate::solver::selected_start_time(self.input.problem, metrics) else {
+            return;
+        };
+        if let Ok(plan) =
+            calculate_schedule_from(self.input.problem, self.input.matrix, solution, start)
+        {
+            self.reporter
+                .preview(&crate::api::OptimizeRouteResponse::from_plan(
+                    plan,
+                    self.input.problem,
+                    None,
+                ));
+        }
+    }
+
     fn on_progress(&self, event: SolverProgressEvent) {
         match event {
             SolverProgressEvent::StrategyStarted(name) => self.progress.report(
@@ -71,11 +96,15 @@ where
             "Optimizing route candidates.",
         );
         check_cancelled(cancellation)?;
-        let solver_progress = SolverProgressReporter { progress };
         let input = SolverInput {
             matrix,
             problem: &prepared.problem,
             cancellation,
+        };
+        let solver_progress = SolverProgressReporter {
+            progress,
+            reporter,
+            input,
         };
         let mut result = match self.solver.solve_with_portfolio_options(
             input,

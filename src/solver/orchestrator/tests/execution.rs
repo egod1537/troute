@@ -114,3 +114,31 @@ fn omits_exact_above_configured_limit() {
         .iter()
         .any(|candidate| candidate.strategy == "exact_bit_dp"));
 }
+
+#[test]
+fn live_preview_arrives_before_slow_parallel_strategy_finishes() {
+    struct Observer(std::sync::Mutex<Vec<Duration>>, std::time::Instant);
+    impl crate::solver::SolverProgressObserver for Observer {
+        fn on_progress(&self, _: crate::solver::SolverProgressEvent) {}
+        fn on_best_solution(&self, _: &SolverSolution, _: &SolutionMetrics) {
+            self.0.lock().unwrap().push(self.1.elapsed());
+        }
+    }
+    let mut config = test_config();
+    config.strategy_timeout = Duration::from_millis(400);
+    config.max_concurrency = 2;
+    let strategies: Vec<Arc<dyn OrchestratedStrategy>> = vec![
+        Arc::new(FixedStrategy { name: "slow", route: None, fail: false, wait_for_cancellation: true }),
+        Arc::new(FixedStrategy { name: "fast", route: Some(vec![0, 1, 2]), fail: false, wait_for_cancellation: false }),
+        Arc::new(FixedStrategy { name: "equal", route: Some(vec![0, 1, 2]), fail: false, wait_for_cancellation: false }),
+    ];
+    let solver = SolverOrchestrator::with_strategies(config, DefaultObjectivePolicy, strategies).unwrap();
+    let problem = problem(3);
+    let matrix = matrix(3);
+    let cancellation = CancellationToken::new();
+    let observer = Observer(std::sync::Mutex::new(Vec::new()), std::time::Instant::now());
+    crate::solver::RouteSolver::solve_with_diagnostics_and_progress(&solver, input(&problem, &matrix, &cancellation), &observer).unwrap();
+    let received = observer.0.lock().unwrap();
+    assert_eq!(received.len(), 1, "equal candidates must not generate new previews");
+    assert!(received[0] < Duration::from_millis(300), "preview must be published while the slow strategy is still running");
+}

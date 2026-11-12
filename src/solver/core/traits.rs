@@ -19,6 +19,11 @@ pub enum SolverProgressEvent {
 pub trait SolverProgressObserver: Send + Sync {
     fn on_progress(&self, event: SolverProgressEvent);
 
+    /// Called only for complete, validated strategy candidates.
+    fn on_candidate(&self, _candidate: &super::SolverCandidate) {}
+
+    fn on_best_solution(&self, _solution: &SolverSolution, _metrics: &super::SolutionMetrics) {}
+
     fn is_enabled(&self) -> bool {
         true
     }

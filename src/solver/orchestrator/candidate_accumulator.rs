@@ -67,3 +67,43 @@ impl CandidateAccumulator {
         (self.candidates, self.global_best_updates)
     }
 }
+
+/// Serializes concurrent strategy completions and forwards only strict objective
+/// improvements. This observes real work; final deterministic selection remains
+/// owned by CandidateAccumulator and CandidateSelector.
+pub(super) struct PreviewObserver<'a, E> {
+    pub evaluator: &'a E,
+    pub observer: &'a dyn crate::solver::SolverProgressObserver,
+    pub best: std::sync::Mutex<Option<crate::solver::SolutionMetrics>>,
+}
+
+impl<E: ObjectiveEvaluator> crate::solver::SolverProgressObserver for PreviewObserver<'_, E> {
+    fn on_progress(&self, event: crate::solver::SolverProgressEvent) {
+        self.observer.on_progress(event);
+    }
+
+    fn is_enabled(&self) -> bool {
+        self.observer.is_enabled()
+    }
+
+    fn on_candidate(&self, candidate: &SolverCandidate) {
+        if !self.is_enabled() || !candidate.feasible {
+            return;
+        }
+        let (Some(solution), Some(metrics)) = (&candidate.route, candidate.objective_score) else {
+            return;
+        };
+        let mut best = self
+            .best
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if best
+            .as_ref()
+            .is_some_and(|current| !self.evaluator.compare(&metrics, current).is_lt())
+        {
+            return;
+        }
+        *best = Some(metrics);
+        self.observer.on_best_solution(solution, &metrics);
+    }
+}

@@ -311,3 +311,50 @@ fn runtime_data_directories_are_ignored_by_git() {
     assert!(ignore.lines().any(|line| line == ".local/"));
     assert!(ignore.lines().any(|line| line == "runtime/"));
 }
+
+#[test]
+fn live_preview_is_provisional_replaced_and_cannot_overwrite_terminal_state() {
+    use crate::events::OptimizationPreview;
+    let temporary = TestDirectory::new();
+    let store = FileJobStore::new(&temporary.0).unwrap();
+    store.create_job(&request("preview")).unwrap();
+    store.mark_running("preview").unwrap();
+    for revision in 1..=10 {
+        assert!(store
+            .save_preview(
+                "preview",
+                &OptimizationPreview {
+                    revision,
+                    result: response()
+                }
+            )
+            .unwrap());
+    }
+    let active = store.get_job("preview").unwrap().unwrap();
+    assert_eq!(active.state.status, JobStatus::Running);
+    assert!(active.result.is_none());
+    assert_eq!(active.preview.unwrap().revision, 10);
+    let snapshot = crate::jobs::JobEventEnvelope::from_stored_job(
+        10,
+        store.get_job("preview").unwrap().unwrap(),
+    );
+    assert!(snapshot.is_valid_for_event("snapshot"));
+    assert_eq!(snapshot.state.preview.unwrap().revision, 10);
+    store.cancel_job("preview", "cancelled").unwrap();
+    assert!(!store
+        .save_preview(
+            "preview",
+            &OptimizationPreview {
+                revision: 11,
+                result: response()
+            }
+        )
+        .unwrap());
+    let terminal = crate::jobs::JobEventEnvelope::from_stored_job(
+        11,
+        store.get_job("preview").unwrap().unwrap(),
+    );
+    assert!(terminal.is_valid_for_event("cancelled"));
+    assert!(terminal.state.preview.is_none());
+    assert!(terminal.state.result.is_none());
+}

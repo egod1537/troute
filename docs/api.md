@@ -630,6 +630,48 @@ curl -i http://127.0.0.1:18080/integration/jobs/JOB_ID
 After success, the job is `completed` with progress 100 and a populated result.
 troute owns this local execution record; the consumer only reads it.
 
+## Provisional route previews
+
+Active Job snapshots and `progress` events may include an optional
+`state.preview` object:
+
+```json
+{
+  "revision": 1,
+  "result": {
+    "route": [],
+    "total_travel_minutes": 0
+  }
+}
+```
+
+The snippet abbreviates `result.route`; real previews use the complete
+`OptimizeRouteResponse` route-stop shape, including visit order, arrival,
+service start, departure, waiting, and stay durations. `state.result` stays
+null until successful completion. Previews are provisional schedules based on
+the current travel-time matrix; final time-dependent revalidation can change
+the completed result. They must never be treated as completed/applicable results.
+
+The orchestrator observes validated strategy completions while other workers and
+subsequent SA chunks are still executing. Only strict improvements under the
+same objective evaluator generate previews. This does not expose every internal
+SA move or native-solver incumbent; exact search may finish with only one result.
+Detailed solver telemetry remains separate and is not the live preview transport.
+
+A latest-value watch channel bounds pending preview memory, so slow consumers
+never queue every intermediate route. The first preview is emitted immediately;
+later previews replace the latest stored snapshot at most once every three
+seconds. No total preview-count cap applies. A completed result is published
+without waiting for the preview interval. Each published preview advances its
+own `revision`, even if stage/progress did not change. Stage events may repeat
+the same preview revision; consumers must deduplicate that revision.
+
+Only the latest provisional snapshot is atomically retained in `preview.json`.
+A fresh SSE connection, lag recovery, or Job detail fetch can recover it. Writes
+after a terminal transition are rejected, and terminal SSE envelopes omit the
+preview. Clients must clear queued previews on failure/cancellation and ignore
+late updates from superseded requests.
+
 ## Local job records and observation timeline
 
 troute stores validated optimize requests and their execution state as readable

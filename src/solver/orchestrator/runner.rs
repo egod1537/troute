@@ -269,6 +269,12 @@ impl<E: ObjectiveEvaluator> SolverOrchestrator<E> {
                 locations: location_count,
             });
         }
+        let preview = super::candidate_accumulator::PreviewObserver {
+            evaluator: &self.evaluator,
+            observer,
+            best: std::sync::Mutex::new(None),
+        };
+        let observer: &dyn SolverProgressObserver = &preview;
         let result = if self.anytime {
             self.solve_anytime(input, observer)
         } else {
@@ -393,6 +399,7 @@ impl<E: ObjectiveEvaluator> SolverOrchestrator<E> {
                 report_progress(observer, || {
                     SolverProgressEvent::StrategyCompleted(exact.name().to_owned())
                 });
+                observer.on_candidate(&candidate);
                 accumulator.consider(&self.evaluator, &mut candidate);
                 let exact_optimum = candidate.feasible && candidate.route.is_some();
                 accumulator.push(candidate);
@@ -581,6 +588,7 @@ impl<E: ObjectiveEvaluator> SolverOrchestrator<E> {
                 .initial_strategy
                 .get_or_insert_with(|| initializer.label().to_owned());
             candidate.metadata.seed.get_or_insert(seed);
+            observer.on_candidate(&candidate);
             let improved = accumulator.consider(&self.evaluator, &mut candidate);
             if let Some(selection) = &arm_selection {
                 candidate.metadata.scheduler_reason = Some(selection.reason.clone());
