@@ -536,3 +536,61 @@ async fn completion_channel_closes_when_the_job_task_panics() {
         .await;
     assert!(completion.is_err());
 }
+
+struct FastPreviewExecutor;
+
+impl JobExecutor for FastPreviewExecutor {
+    fn execute(
+        &self,
+        request: OptimizeRouteRequest,
+        reporter: &dyn OptimizationEventReporter,
+        _: &CancellationToken,
+    ) -> Result<OptimizeRouteResponse, OptimizationServiceError> {
+        let mut response =
+            RouteOptimizationService::new(DevelopmentRoutingProvider, DevelopmentRouteSolver)
+                .optimize(request)?;
+        for improvement in 0..20 {
+            response.total_travel_minutes = 100 - improvement;
+            reporter.preview(&response);
+        }
+        reporter.result(&response);
+        Ok(response)
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn fast_job_retains_five_playback_frames_without_delaying_completion_or_next_job() {
+    let temporary = TestDirectory::new();
+    let store = Arc::new(FileJobStore::new(&temporary.0).unwrap());
+    let runner = JobRunner::new(Arc::new(FastPreviewExecutor), store.clone(), Some(1));
+    tokio::time::timeout(Duration::from_secs(2), async {
+        for id in ["first-playback", "second-playback"] {
+            let mut input = request();
+            input.job_id = id.to_owned();
+            runner.submit(input).unwrap();
+            loop {
+                let job = store.get_job(id).unwrap().unwrap();
+                if job.state.status == JobStatus::Completed {
+                    let snapshot = JobEventEnvelope::from_stored_job(1, job);
+                    assert!(snapshot.is_valid_for_event("completed"));
+                    let preview = snapshot.state.preview.unwrap();
+                    assert_eq!(preview.frames.len(), 5);
+                    assert_eq!(
+                        preview
+                            .frames
+                            .iter()
+                            .map(|frame| frame.revision)
+                            .collect::<Vec<_>>(),
+                        vec![1, 2, 3, 4, 20]
+                    );
+                    assert_eq!(preview.revision, 20);
+                    assert_eq!(preview.result, snapshot.state.result.unwrap());
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(1)).await;
+            }
+        }
+    })
+    .await
+    .expect("frontend playback must not hold server completion or its single Job permit");
+}

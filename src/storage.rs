@@ -513,7 +513,7 @@ impl JobStore for FileJobStore {
             return Ok(None);
         }
         let state = self.read_state(job_id)?;
-        let preview = if state.status.is_active() {
+        let preview = if state.status.is_active() || state.status == JobStatus::Completed {
             read_optional_json(&directory.join("preview.json"))?
         } else {
             None

@@ -14,7 +14,10 @@ use tokio::sync::{mpsc, oneshot, OwnedSemaphorePermit, Semaphore};
 use crate::{
     api::{OptimizeRouteRequest, OptimizeRouteResponse},
     cancellation::CancellationToken,
-    events::{OptimizationEventReporter, ProgressStage},
+    events::{
+        OptimizationEventReporter, OptimizationPreview, OptimizationPreviewFrame, ProgressStage,
+        MAX_PREVIEW_FRAMES,
+    },
     failure::{
         rank_failure_suggestions, service_failure_detail, service_suggestions, FailureDetail,
         FailureSuggestion, DEFAULT_MAX_FAILURE_SUGGESTIONS,
@@ -210,7 +213,10 @@ impl JobEventEnvelope {
                 last_message: job.state.last_message,
                 result: job.result,
                 error: job.error.map(JobClientError::from),
-                preview: if matches!(job.state.status, JobStatus::Pending | JobStatus::Running) {
+                preview: if matches!(
+                    job.state.status,
+                    JobStatus::Pending | JobStatus::Running | JobStatus::Completed
+                ) {
                     job.preview
                 } else {
                     None
@@ -434,10 +440,10 @@ impl JobRunner {
     ) -> (
         tokio::task::JoinHandle<WorkerResult>,
         mpsc::UnboundedReceiver<ExecutionUpdate>,
-        tokio::sync::watch::Receiver<Option<OptimizeRouteResponse>>,
+        tokio::sync::watch::Receiver<Vec<OptimizationPreviewFrame>>,
     ) {
         let (update_tx, update_rx) = mpsc::unbounded_channel();
-        let (preview_tx, preview_rx) = tokio::sync::watch::channel(None);
+        let (preview_tx, preview_rx) = tokio::sync::watch::channel(Vec::new());
         let reporter = ProgressForwarder {
             update_tx,
             preview_tx,
@@ -469,13 +475,12 @@ impl JobRunner {
         pacer: &DebugJobPacer,
         cancellation: &CancellationToken,
         mut updates: mpsc::UnboundedReceiver<ExecutionUpdate>,
-        mut previews: tokio::sync::watch::Receiver<Option<OptimizeRouteResponse>>,
+        mut previews: tokio::sync::watch::Receiver<Vec<OptimizationPreviewFrame>>,
     ) -> Option<OptimizeRouteResponse> {
         // The optimizer continues on the blocking pool while this async task
         // exposes its real stage boundaries at the configured target times.
         let mut full_result = None;
         let mut pending_preview = None;
-        let mut preview_revision = 0_u64;
         let mut next_preview = tokio::time::Instant::now();
         let mut previews_open = true;
         loop {
@@ -484,19 +489,15 @@ impl JobRunner {
                 _ = cancellation.cancelled() => break,
                 changed = previews.changed(), if previews_open && full_result.is_none() => {
                     match changed {
-                        Ok(()) => pending_preview = previews.borrow_and_update().clone(),
+                        Ok(()) => pending_preview = OptimizationPreview::from_frames(previews.borrow_and_update().clone()),
                         Err(_) => previews_open = false,
                     }
                     continue;
                 }
                 _ = tokio::time::sleep_until(next_preview), if pending_preview.is_some() => {
-                    let preview = crate::events::OptimizationPreview {
-                        revision: preview_revision + 1,
-                        result: pending_preview.take().expect("pending preview"),
-                    };
+                    let preview = pending_preview.take().expect("pending preview");
                     match self.store.save_preview(job_id, &preview) {
                         Ok(true) => {
-                            preview_revision = preview.revision;
                             self.publish_persisted(job_id, JobEventKind::Progress);
                         }
                         Ok(false) => {},
@@ -548,6 +549,20 @@ impl JobRunner {
                     }
                 }
                 ExecutionUpdate::ResultSnapshot(result) => {
+                    // Persist every retained milestone before completion, even
+                    // when the solve finished inside the transmission interval.
+                    // Never wait for the client's playback to release this Job.
+                    if let Some(preview) =
+                        OptimizationPreview::from_frames(previews.borrow_and_update().clone())
+                    {
+                        if let Err(error) = self.store.save_preview(job_id, &preview) {
+                            logger().job_operation_failed(
+                                "final preview persistence",
+                                job_id,
+                                &error,
+                            );
+                        }
+                    }
                     pending_preview = None;
                     full_result = Some(result);
                 }
@@ -782,7 +797,7 @@ enum ExecutionUpdate {
 
 struct ProgressForwarder {
     update_tx: mpsc::UnboundedSender<ExecutionUpdate>,
-    preview_tx: tokio::sync::watch::Sender<Option<OptimizeRouteResponse>>,
+    preview_tx: tokio::sync::watch::Sender<Vec<OptimizationPreviewFrame>>,
 }
 
 impl OptimizationEventReporter for ProgressForwarder {
@@ -807,7 +822,19 @@ impl OptimizationEventReporter for ProgressForwarder {
     }
 
     fn preview(&self, response: &OptimizeRouteResponse) {
-        self.preview_tx.send_replace(Some(response.clone()));
+        self.preview_tx.send_modify(|frames| {
+            let revision = frames.last().map_or(1, |frame| frame.revision + 1);
+            let frame = OptimizationPreviewFrame {
+                revision,
+                result: response.clone(),
+            };
+            if frames.len() < MAX_PREVIEW_FRAMES {
+                frames.push(frame);
+            } else {
+                // Preserve the first four milestones and always keep the newest best.
+                frames[MAX_PREVIEW_FRAMES - 1] = frame;
+            }
+        });
     }
 
     fn solver_telemetry(&self, event: &TelemetryEvent) {

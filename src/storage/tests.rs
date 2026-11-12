@@ -325,7 +325,8 @@ fn live_preview_is_provisional_replaced_and_cannot_overwrite_terminal_state() {
                 "preview",
                 &OptimizationPreview {
                     revision,
-                    result: response()
+                    result: response(),
+                    frames: Vec::new(),
                 }
             )
             .unwrap());
@@ -346,7 +347,8 @@ fn live_preview_is_provisional_replaced_and_cannot_overwrite_terminal_state() {
             "preview",
             &OptimizationPreview {
                 revision: 11,
-                result: response()
+                result: response(),
+                frames: Vec::new(),
             }
         )
         .unwrap());

@@ -637,11 +637,12 @@ Active Job snapshots and `progress` events may include an optional
 
 ```json
 {
-  "revision": 1,
+  "revision": 8,
   "result": {
     "route": [],
     "total_travel_minutes": 0
-  }
+  },
+  "frames": []
 }
 ```
 
@@ -658,19 +659,25 @@ same objective evaluator generate previews. This does not expose every internal
 SA move or native-solver incumbent; exact search may finish with only one result.
 Detailed solver telemetry remains separate and is not the live preview transport.
 
-A latest-value watch channel bounds pending preview memory, so slow consumers
-never queue every intermediate route. The first preview is emitted immediately;
-later previews replace the latest stored snapshot at most once every three
-seconds. No total preview-count cap applies. A completed result is published
-without waiting for the preview interval. Each published preview advances its
-own `revision`, even if stage/progress did not change. Stage events may repeat
-the same preview revision; consumers must deduplicate that revision.
+A bounded watch channel retains at most five real improvement milestones:
+the first four and the newest best. Each `preview.frames[]` entry has a source
+`revision` and complete `result`. No fabricated or repeated routes are added to
+fill the history. Source revisions increase for every observed improvement, so
+retained and transmitted revision numbers may have gaps.
 
-Only the latest provisional snapshot is atomically retained in `preview.json`.
-A fresh SSE connection, lag recovery, or Job detail fetch can recover it. Writes
-after a terminal transition are rejected, and terminal SSE envelopes omit the
-preview. Clients must clear queued previews on failure/cancellation and ignore
-late updates from superseded requests.
+The first available preview is transmitted immediately; subsequent active Job
+updates remain limited to once every three seconds. Before success, all retained
+milestones are flushed to storage, even when the solve finishes within three
+seconds. The `completed` envelope and completed Job detail retain `preview` with
+its bounded `frames` for client-side replay. Older clients can still read the
+latest `preview.result`; `state.result` alone is the completed, applicable result.
+Failed and cancelled states omit the provisional snapshot.
+
+Only the latest bounded snapshot is atomically retained in `preview.json`.
+Fresh SSE connections, lag recovery, and Job detail fetches can recover it. Writes
+after a terminal transition are rejected. No server-side playback sleep is added:
+completion, the worker permit, and Job resources are released as soon as the
+actual execution finishes. Presentation delays belong entirely to the client.
 
 ## Local job records and observation timeline
 

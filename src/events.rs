@@ -3,11 +3,33 @@ use thiserror::Error;
 
 use crate::{api::OptimizeRouteResponse, solver::TelemetryEvent};
 
-/// Latest provisional route, replaced in place rather than accumulated.
+pub const MAX_PREVIEW_FRAMES: usize = 5;
+
+/// Bounded historical milestones retained for client-side playback.
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
+pub struct OptimizationPreviewFrame {
+    pub revision: u64,
+    pub result: OptimizeRouteResponse,
+}
+
+/// Latest provisional route and up to five real improvement milestones.
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
 pub struct OptimizationPreview {
     pub revision: u64,
     pub result: OptimizeRouteResponse,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub frames: Vec<OptimizationPreviewFrame>,
+}
+
+impl OptimizationPreview {
+    pub fn from_frames(frames: Vec<OptimizationPreviewFrame>) -> Option<Self> {
+        let latest = frames.last()?;
+        Some(Self {
+            revision: latest.revision,
+            result: latest.result.clone(),
+            frames,
+        })
+    }
 }
 
 pub const MAX_JOB_ID_CHARACTERS: usize = 128;
